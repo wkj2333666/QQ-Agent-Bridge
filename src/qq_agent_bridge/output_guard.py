@@ -11,6 +11,8 @@ _INTERNAL_PROMPT_MARKERS = (
     "用户附带资源：",
     "输出资源：",
     "用户消息：",
+    "无命令 @bot 消息",
+    "当前发送者：",
     "QQ_COMMAND=",
     "<skill name=",
 )

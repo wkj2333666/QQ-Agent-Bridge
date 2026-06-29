@@ -65,6 +65,7 @@ def test_runtime_skill_teaches_singing_is_not_tts() -> None:
     assert "不要附加说明文字" in skill
     assert "歌声生成后端" in skill
     assert "外部 singing backend" in skill
+    assert "明确说明阻塞" in skill
     assert "不能退化成 TTS" in skill
 
 

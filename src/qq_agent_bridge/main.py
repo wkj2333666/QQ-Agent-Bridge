@@ -121,7 +121,9 @@ class App:
                     )
                     preauthorized_command = "ask"
                 elif decision.action == "chat":
-                    await self._send_mention_decision(ev, decision)
+                    if self.proactive.can_send_chat_interjection(ev.chat_id):
+                        await self._send_mention_decision(ev, decision)
+                        self.proactive.record_chat_interjection(ev.chat_id)
                     await self._cleanup_policy()
                     return
                 else:
