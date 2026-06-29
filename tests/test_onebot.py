@@ -605,6 +605,77 @@ def test_adapter_enriches_reply_by_fetching_quoted_message() -> None:
     asyncio.run(go())
 
 
+def test_adapter_enriches_reply_voice_by_fetching_when_preview_text_present() -> None:
+    async def go() -> None:
+        raw = {
+            "post_type": "message",
+            "message_type": "group",
+            "message_id": 47,
+            "user_id": 1000000001,
+            "group_id": 2000000001,
+            "self_id": 111,
+            "time": 1,
+            "message": [
+                {"type": "reply", "data": {"id": "44", "text": "[语音]"}},
+                {"type": "at", "data": {"qq": "111"}},
+                {"type": "text", "data": {"text": " 这条语音说了啥"}},
+            ],
+        }
+        ev = _normalize_event(raw, "111")
+        assert ev is not None
+        assert ev.reply is not None
+        assert ev.reply.text == "[语音]"
+        assert ev.resources == ()
+
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter._enrich_reply(ev))  # type: ignore[attr-defined]
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "get_msg"
+        assert frame["params"]["message_id"] == 44
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_id": 44,
+                    "sender": {"user_id": 222},
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "voice.silk",
+                                "url": "https://qq.example/record/voice.silk",
+                                "duration": 7,
+                                "mime_type": "audio/silk",
+                            },
+                        }
+                    ],
+                    "raw_message": "[语音]",
+                },
+            }
+        )
+
+        enriched = await task
+        assert enriched.reply is not None
+        assert enriched.reply.message_id == "44"
+        assert enriched.reply.sender_id == "222"
+        assert enriched.reply.text == "[语音]"
+        assert len(enriched.reply.resources) == 1
+        voice = enriched.reply.resources[0]
+        assert voice.kind == "voice"
+        assert voice.url == "https://qq.example/record/voice.silk"
+        assert voice.duration_seconds == 7
+        assert enriched.resources == (voice,)
+
+    asyncio.run(go())
+
+
 def test_adapter_enriches_reply_from_recent_message_cache() -> None:
     async def go() -> None:
         adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
@@ -652,6 +723,68 @@ def test_adapter_enriches_reply_from_recent_message_cache() -> None:
         assert enriched.reply.message_id == "50"
         assert enriched.reply.sender_id == "222"
         assert enriched.reply.text == "测试一下引用 @X"
+        assert conn.frames == []
+
+    asyncio.run(go())
+
+
+def test_adapter_enriches_reply_voice_from_recent_cache_when_preview_text_present() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        original = _normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 52,
+                "user_id": 222,
+                "group_id": 2000000001,
+                "self_id": 111,
+                "time": 1,
+                "message": [
+                    {
+                        "type": "record",
+                        "data": {
+                            "file": "voice.silk",
+                            "url": "https://qq.example/record/voice.silk",
+                            "duration": 5,
+                        },
+                    }
+                ],
+            },
+            "111",
+        )
+        assert original is not None
+        adapter._remember_event(original)  # type: ignore[attr-defined]
+
+        reply_event = _normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 53,
+                "user_id": 333,
+                "group_id": 2000000001,
+                "self_id": 111,
+                "time": 2,
+                "message": [
+                    {"type": "reply", "data": {"id": "52", "text": "[语音]"}},
+                    {"type": "at", "data": {"qq": "111"}},
+                    {"type": "text", "data": {"text": " 这条语音说了啥"}},
+                ],
+            },
+            "111",
+        )
+        assert reply_event is not None
+
+        enriched = await adapter._enrich_reply(reply_event)  # type: ignore[attr-defined]
+
+        assert enriched.reply is not None
+        assert enriched.reply.message_id == "52"
+        assert len(enriched.reply.resources) == 1
+        assert enriched.reply.resources[0].kind == "voice"
+        assert enriched.resources == enriched.reply.resources
         assert conn.frames == []
 
     asyncio.run(go())

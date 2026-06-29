@@ -599,19 +599,64 @@ class OneBotAdapter:
 
     async def _enrich_reply(self, ev: ChatEvent) -> ChatEvent:
         reply = ev.reply
-        if not reply or reply.text.strip() or not reply.message_id:
+        if not reply or not reply.message_id:
+            return ev
+        if reply.text.strip() and reply.resources:
             return ev
         cached = self._recent_messages.get(reply.message_id)
         if cached:
-            resources = ev.resources + cached.resources if cached.resources else ev.resources
-            return replace(ev, reply=cached, resources=resources)
+            enriched = self._merge_reply_context(reply, cached)
+            return replace(ev, reply=enriched, resources=self._merge_resources(ev.resources, enriched.resources))
         fetched = await self.fetch_message(reply.message_id)
         if not fetched:
             return ev
-        resources = ev.resources
-        if fetched.resources:
-            resources = ev.resources + fetched.resources
-        return replace(ev, reply=fetched, resources=resources)
+        enriched = self._merge_reply_context(reply, fetched)
+        return replace(ev, reply=enriched, resources=self._merge_resources(ev.resources, enriched.resources))
+
+    def _merge_reply_context(self, current: ChatReply, enriched: ChatReply) -> ChatReply:
+        """Prefer fetched/cache detail while preserving useful preview fields."""
+        return replace(
+            enriched,
+            message_id=enriched.message_id or current.message_id,
+            sender_id=enriched.sender_id or current.sender_id,
+            text=enriched.text if enriched.text.strip() else current.text,
+            raw_message=enriched.raw_message or current.raw_message,
+            segments=enriched.segments or current.segments,
+            resources=enriched.resources or current.resources,
+            raw_data=enriched.raw_data or current.raw_data,
+        )
+
+    def _merge_resources(
+        self,
+        existing: tuple[ChatResource, ...],
+        added: tuple[ChatResource, ...],
+    ) -> tuple[ChatResource, ...]:
+        if not added:
+            return existing
+        merged = list(existing)
+        seen = {
+            (
+                resource.kind,
+                resource.url,
+                resource.file_id,
+                resource.name,
+                resource.source_segment,
+            )
+            for resource in existing
+        }
+        for resource in added:
+            key = (
+                resource.kind,
+                resource.url,
+                resource.file_id,
+                resource.name,
+                resource.source_segment,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(resource)
+        return tuple(merged)
 
     async def _enrich_forward(self, ev: ChatEvent) -> ChatEvent:
         if not ev.resources:
