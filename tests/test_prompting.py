@@ -277,6 +277,28 @@ def test_prompt_documents_voice_and_generic_audio_sending_rules() -> None:
     assert "文件" in prompt
 
 
+def test_task_prompt_documents_singing_is_not_spoken_tts() -> None:
+    prompt = build_agent_prompt(
+        "task",
+        "唱一首生日歌发给我",
+        make_ev(),
+        outgoing_resource_context=(
+            "可发送资源目录：downloads/qq-agent-bridge/outgoing/j1\n"
+            "资源发送令牌：token-1\n"
+            "发送泛音频文件指令：QQBOT_SEND_AUDIO: token-1 downloads/qq-agent-bridge/outgoing/j1/song.wav"
+        ),
+    )
+
+    assert "唱歌" in prompt
+    assert "TTS" in prompt
+    assert "不算唱歌" in prompt
+    assert "QQBOT_SEND_AUDIO" in prompt
+    assert "不要附加说明文字" in prompt
+    assert "歌声生成后端" in prompt
+    assert "外部 singing backend" in prompt
+    assert "不能退化成 TTS" in prompt
+
+
 def test_task_prompt_tells_cursor_to_handle_general_tasks() -> None:
     prompt = build_agent_prompt("task", "百度一下张三相关经历", make_ev())
 

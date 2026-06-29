@@ -54,6 +54,20 @@ def test_runtime_skill_teaches_voice_duration_and_audio_file_directives() -> Non
     assert "duration=" in skill
 
 
+def test_runtime_skill_teaches_singing_is_not_tts() -> None:
+    skill = build_runtime_skill("task")
+
+    assert "TTS" in skill
+    assert "朗读" in skill
+    assert "不算唱歌" in skill
+    assert "旋律线" in skill
+    assert "QQBOT_SEND_AUDIO" in skill
+    assert "不要附加说明文字" in skill
+    assert "歌声生成后端" in skill
+    assert "外部 singing backend" in skill
+    assert "不能退化成 TTS" in skill
+
+
 def test_runtime_skill_is_structured_index_not_monolith() -> None:
     skill = build_runtime_skill("task")
 
@@ -91,7 +105,15 @@ def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
         "weather.md": ("天气", "地点", "时效"),
         "office-documents.md": ("Excel", "Word", "PDF"),
         "visual-media.md": ("图片生成", "识图", "视频理解"),
-        "audio-voice-music.md": ("语音识别", "语音生成", "唱歌"),
+        "audio-voice-music.md": (
+            "语音识别",
+            "语音生成",
+            "唱歌",
+            "TTS",
+            "旋律线",
+            "歌声生成后端",
+            "外部 singing backend",
+        ),
         "agent-discipline.md": ("避免幻觉", "证据", "完成判定"),
         "qq-bridge-interface.md": ("QQBOT_SEND_FILE", "QQBOT_SEND_IMAGE", "QQBOT_PROGRESS"),
     }

@@ -193,24 +193,67 @@ def test_app_uses_configured_custom_agent_runtime() -> None:
     assert isinstance(app.cursor, CustomCommandAdapter)
 
 
-def test_bare_group_mention_casual_text_replies_without_ask_job() -> None:
+def test_bare_group_mention_casual_text_uses_chat_decision_without_ask_job() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
-        called = False
 
-        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
-            nonlocal called
-            called = True
-            return f"{cmd}:{args}"
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
 
-        app = make_app(cfg, runner, adapter)
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            assert mode == "ask"
+            assert model == "auto"
+            assert "无命令 @bot 消息" in prompt
+            return '{"action": "chat", "messages": [{"text": "确实有点东西"}]}'
 
-        await app._handle(make_ev("@123456 你好", group="group", mid="casual-at"))
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
 
-        assert not called
+        await app._handle(make_ev("@123456 原神牛逼", group="group", mid="casual-at"))
+
         assert app.policy.jobs == {}  # type: ignore[union-attr]
-        assert adapter.sent == [("group", True, "在呢", "casual-at")]
+        assert adapter.sent == [("group", True, "确实有点东西", "mention-casual-at")]
+
+    asyncio.run(go())
+
+
+def test_bare_group_mention_can_be_promoted_to_ask_by_chat_decision() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        calls: list[str] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            calls.append(prompt)
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
+            return "这是 ask 的回答"
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@123456 什么是提示词注入", group="group", mid="mention-ask"))
+        await wait_until_sent(adapter, "这是 ask 的回答")
+
+        assert len(calls) == 2
+        assert "无命令 @bot 消息" in calls[0]
+        assert "回答模式" in calls[1]
 
     asyncio.run(go())
 
@@ -430,6 +473,8 @@ def test_recent_normal_group_reply_suppresses_proactive_reply() -> None:
             progress: Any = None,
         ) -> str:
             calls.append(prompt)
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "chat", "reply": "在呢"}'
             if "最近聊天" in prompt:
                 return '{"speak": true, "reply": "不该发送"}'
             return "普通回复"
@@ -445,7 +490,8 @@ def test_recent_normal_group_reply_suppresses_proactive_reply() -> None:
         await asyncio.sleep(0.05)
         await app.proactive.stop()
 
-        assert calls == []
+        assert len(calls) == 1
+        assert "无命令 @bot 消息" in calls[0]
         assert not any("不该发送" in item[2] for item in adapter.sent)
 
     asyncio.run(go())
@@ -839,18 +885,25 @@ def test_self_question_uses_local_reply_without_cursor() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
-        called = False
 
-        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
-            nonlocal called
-            called = True
-            return "should not be used"
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
 
-        app = make_app(cfg, runner, adapter)
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            assert "无命令 @bot 消息" in prompt
+            return '{"action": "ask"}'
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
 
         await app._handle(make_ev("@123456 你是谁", group="group", mid="self-1"))
 
-        assert not called
         assert len(adapter.sent) == 1
         reply = adapter.sent[0][2]
         assert "QQ" in reply
@@ -1134,6 +1187,8 @@ def test_implicit_ask_web_task_stays_ask_with_task_guidance_in_prompt() -> None:
             progress: Any = None,
         ) -> str:
             calls.append((mode, model, prompt))
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
             return "普通回复"
 
         app = App(cfg)
@@ -1146,8 +1201,9 @@ def test_implicit_ask_web_task_stays_ask_with_task_guidance_in_prompt() -> None:
         )
         await wait_until_sent(adapter, "普通回复")
 
-        assert calls
-        mode, model, prompt = calls[0]
+        assert len(calls) == 2
+        assert "无命令 @bot 消息" in calls[0][2]
+        mode, model, prompt = calls[1]
         assert mode == "ask"
         assert model == "auto"
         assert "/task" in prompt
@@ -1315,6 +1371,8 @@ def test_unmentioned_group_text_is_used_as_ambient_context_for_ask() -> None:
             progress: Any = None,
         ) -> str:
             prompts.append(prompt)
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
             return "可以先看日志。"
 
         app = App(cfg)
@@ -1328,9 +1386,9 @@ def test_unmentioned_group_text_is_used_as_ambient_context_for_ask() -> None:
         await app._handle(make_ev("@1000000001 怎么看", group="group", mid="ambient-2"))
         await wait_until_sent(adapter, "可以先看日志")
 
-        assert "最近群聊背景：" in prompts[0]
-        assert "reader: 这个接口有点慢" in prompts[0]
-        assert "不是当前用户的直接请求" in prompts[0]
+        assert "最近群聊背景：" in prompts[1]
+        assert "reader: 这个接口有点慢" in prompts[1]
+        assert "不是当前用户的直接请求" in prompts[1]
 
     asyncio.run(go())
 
@@ -1350,6 +1408,8 @@ def test_unmentioned_command_like_text_is_not_ambient_context() -> None:
             progress: Any = None,
         ) -> str:
             prompts.append(prompt)
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
             return "ok"
 
         app = App(cfg)
@@ -1361,8 +1421,8 @@ def test_unmentioned_command_like_text_is_not_ambient_context() -> None:
         await app._handle(make_ev("@1000000001 继续", group="group", mid="ambient-cmd-ask"))
         await wait_until_sent(adapter, "ok")
 
-        assert "最近群聊背景：" not in prompts[0]
-        assert "/task hello" not in prompts[0]
+        assert "最近群聊背景：" not in prompts[1]
+        assert "/task hello" not in prompts[1]
 
     asyncio.run(go())
 
@@ -1705,6 +1765,8 @@ def test_cached_group_attachment_is_not_shared_across_senders() -> None:
             progress: Any = None,
         ) -> str:
             prompts.append(prompt)
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
             return "没看到附件"
 
         app = App(cfg)
@@ -1734,9 +1796,10 @@ def test_cached_group_attachment_is_not_shared_across_senders() -> None:
         )
         await wait_until_sent(adapter, "没看到附件")
 
-        assert len(prompts) == 1
-        assert "用户附带资源：" not in prompts[0]
-        assert "downloads/cached.jpg" not in prompts[0]
+        ask_prompts = [prompt for prompt in prompts if "无命令 @bot 消息" not in prompt]
+        assert len(ask_prompts) == 1
+        assert "用户附带资源：" not in ask_prompts[0]
+        assert "downloads/cached.jpg" not in ask_prompts[0]
 
     asyncio.run(go())
 
@@ -1746,6 +1809,7 @@ def test_cached_group_attachment_is_consumed_after_use() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
         prompts: list[str] = []
+        ask_count = 0
 
         async def fake_cursor(
             prompt: str,
@@ -1754,8 +1818,12 @@ def test_cached_group_attachment_is_consumed_after_use() -> None:
             model: str | None = None,
             progress: Any = None,
         ) -> str:
+            nonlocal ask_count
             prompts.append(prompt)
-            return f"reply {len(prompts)}"
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
+            ask_count += 1
+            return f"reply {ask_count}"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -1784,7 +1852,7 @@ def test_cached_group_attachment_is_consumed_after_use() -> None:
         await wait_until_sent(adapter, "reply 2")
 
         assert "downloads/cached.jpg" in prompts[0]
-        assert "downloads/cached.jpg" not in prompts[1]
+        assert "downloads/cached.jpg" not in prompts[2]
 
     asyncio.run(go())
 
