@@ -12,10 +12,6 @@ from pathlib import Path
 from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter
 from .config import BridgeConfig
-from .intent import (
-    casual_reply_for_group_mention,
-    should_implicit_ask_in_group,
-)
 from .memory import ConversationMemory, GroupAmbientMemory, should_include_ambient_for_task
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
@@ -23,7 +19,7 @@ from .outgoing_resources import collect_outgoing_resources
 from .policy import Job, Policy
 from .prompting import build_agent_prompt, select_profile_prompt
 from .profile_store import write_profiles_to_config
-from .proactive import ProactiveSpeaker
+from .proactive import MentionDecision, ProactiveSpeaker
 from .progress import ProgressReporter
 from .redactor import redact
 from .resources import ResourceManager, format_resource_context
@@ -108,8 +104,9 @@ class App:
         parsed = self.policy.parse(ev.text)
         has_content = bool(ev.text.strip() or ev.resources)
         default_command = "ask" if has_content and not ev.is_group else None
+        preauthorized_command: str | None = None
         if not parsed and ev.is_group and ev.mentioned_bot and has_content:
-            if should_implicit_ask_in_group(ev.text, has_resources=bool(ev.resources)):
+            if ev.resources:
                 default_command = "ask"
             else:
                 ok, reason = self.policy.allow(ev, "ask")
@@ -117,9 +114,19 @@ class App:
                     if reason not in {"duplicate", "no-mention"}:
                         await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                     return
-                await self._send_text(ev.chat_id, ev.is_group, casual_reply_for_group_mention(ev.text), ev.id)
-                await self._cleanup_policy()
-                return
+                decision = await self.proactive.decide_mention(ev)
+                if decision.action == "ask":
+                    parsed = self.policy.parse(ev.text, default_command="ask") or self.policy.parse(
+                        "", default_command="ask"
+                    )
+                    preauthorized_command = "ask"
+                elif decision.action == "chat":
+                    await self._send_mention_decision(ev, decision)
+                    await self._cleanup_policy()
+                    return
+                else:
+                    await self._cleanup_policy()
+                    return
         if not parsed and default_command:
             parsed = self.policy.parse(ev.text, default_command=default_command)
         if not parsed and ev.resources and default_command:
@@ -127,11 +134,13 @@ class App:
         if not parsed:
             return
 
-        ok, reason = self.policy.allow(ev, parsed.name)
-        if not ok:
-            if reason not in {"duplicate", "no-mention"}:
-                await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
-            return
+        if preauthorized_command != parsed.name:
+            ok, reason = self.policy.allow(ev, parsed.name)
+            if not ok:
+                if reason not in {"duplicate", "no-mention"}:
+                    await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
+                await self._cleanup_policy()
+                return
 
         if parsed.name == "help":
             txt = build_help_reply(self.cfg, ev)
@@ -357,6 +366,15 @@ class App:
             self.proactive.record_bot_send(chat_id)
             return
         await self._send_text(chat_id, True, text, echo)
+
+    async def _send_mention_decision(self, ev: ChatEvent, decision: MentionDecision) -> None:
+        replies = decision.replies
+        delay = max(0.0, self.cfg.proactive.reply_message_delay_seconds)
+        for idx, reply in enumerate(replies):
+            if idx and delay:
+                await asyncio.sleep(delay)
+            echo = f"mention-{ev.id}-{idx}" if len(replies) > 1 else f"mention-{ev.id}"
+            await self._send_proactive(ev.chat_id, reply.text, echo, reply.ats)
 
     async def _reload_config(self) -> tuple[bool, str]:
         try:

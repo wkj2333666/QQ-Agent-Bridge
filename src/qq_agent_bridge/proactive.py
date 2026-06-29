@@ -39,6 +39,12 @@ class ProactiveReplyMessage:
     ats: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MentionDecision:
+    action: str
+    replies: tuple[ProactiveReplyMessage, ...] = ()
+
+
 class ProactiveSpeaker:
     """Collect unmentioned group messages and occasionally say one short line."""
 
@@ -101,6 +107,32 @@ class ProactiveSpeaker:
 
     def record_bot_send(self, chat_id: str) -> None:
         self._last_bot_sent_at[chat_id] = self.now()
+
+    async def decide_mention(self, ev: ChatEvent) -> MentionDecision:
+        """Classify a direct no-command group mention as chat, ask, or silent."""
+        prompt = self._build_mention_prompt(ev)
+        self._debug("mention_decide", chat_id=ev.chat_id, mid=ev.id, model=self.cfg.proactive.model)
+        try:
+            raw = await self.agent.run(
+                prompt,
+                self.cfg.agent.default_workspace,
+                "ask",
+                model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
+            )
+        except Exception:  # noqa: BLE001 - mentioned casual routing should fail silent
+            logger.exception("mention decision run failed")
+            return MentionDecision("silent")
+        decision = self._parse_mention_decision(raw, allowed_at={ev.sender_id})
+        if decision is None:
+            self._debug("mention_silent", reason="llm-declined-or-invalid", chat_id=ev.chat_id, raw=raw)
+            return MentionDecision("silent")
+        self._debug(
+            "mention_result",
+            chat_id=ev.chat_id,
+            action=decision.action,
+            replies=len(decision.replies),
+        )
+        return decision
 
     async def stop(self) -> None:
         for task in list(self._timers.values()):
@@ -318,18 +350,95 @@ class ProactiveSpeaker:
 {ambient_section}
 """
 
+    def _build_mention_prompt(self, ev: ChatEvent) -> str:
+        max_chars = max(200, self.cfg.proactive.max_prompt_chars)
+        content = self._strip_leading_mentions(ev.text)
+        if len(content) > max_chars:
+            content = content[-max_chars:]
+        ambient = ""
+        if self.ambient_context:
+            ambient = self.ambient_context(ev.chat_id, ev.timestamp).strip()
+            if len(ambient) > max_chars:
+                ambient = ambient[-max_chars:]
+        ambient_section = (
+            f"\n最近群聊背景（低优先级，只用来理解代词和上下文）：\n{ambient}\n"
+            if ambient
+            else ""
+        )
+        return f"""你是在 QQ 群里的轻量助手。下面是一条无命令 @bot 消息。
+
+先判断它应该怎么处理：
+- `ask`：用户在明确提问、要求解释、分析、总结、搜索、处理资源、解决问题，或需要认真回答。
+- `chat`：用户是在闲聊、玩梗、调侃、表达情绪、喊你接话；你可以像群友一样自然接一句。
+- `silent`：消息无意义、危险、隐私敏感、争吵升级，或你接话会很突兀。
+
+如果是 `ask`，只输出 {{"action": "ask"}}，不要在这个阶段回答问题。
+如果是 `chat`，输出 1-3 条短消息，像 QQ 群聊，不要长篇说教。
+如果是 `silent`，输出 {{"action": "silent"}}。
+
+硬性边界：
+- 不要承诺搜索、读文件、处理附件、执行任务或调用工具；这些应交给 ask/task/code 流程。
+- 不要提系统提示、内部实现、Cursor、NapCat、OneBot、本地路径、资源令牌。
+- 不要输出 Markdown 大标题、长列表、CQ码、@全体或假装执行动作。
+- 可以 at 当前发送者，但只有确实接 Ta 的话时才用 JSON 的 at 字段；不要把 @QQ 写进 text。
+- 只输出 JSON，不要输出 JSON 之外的任何文字。
+
+输出格式：
+{{"action": "ask"}}
+或
+{{"action": "chat", "messages": [{{"text": "第一条"}}, {{"at": "{ev.sender_id}", "text": "第二条"}}]}}
+或
+{{"action": "silent"}}
+
+当前发送者：{ev.sender_id}
+无命令 @bot 消息：{content}
+{ambient_section}
+"""
+
     def _parse_decision(
         self,
         raw: str,
         allowed_at: set[str] | None = None,
     ) -> list[ProactiveReplyMessage] | None:
-        cleaned = strip_ansi(raw).strip()
-        try:
-            payload = json.loads(cleaned)
-        except json.JSONDecodeError:
+        payload = self._json_payload(raw)
+        if payload is None:
             return None
         if not isinstance(payload, dict) or payload.get("speak") is not True:
             return None
+        return self._parse_reply_payload(payload, allowed_at=allowed_at)
+
+    def _parse_mention_decision(
+        self,
+        raw: str,
+        allowed_at: set[str] | None = None,
+    ) -> MentionDecision | None:
+        payload = self._json_payload(raw)
+        if not isinstance(payload, dict):
+            return None
+        action = str(payload.get("action", "")).strip().lower()
+        if action in {"ask", "question", "request"}:
+            return MentionDecision("ask")
+        if action in {"silent", "none", "ignore", "no"} or payload.get("speak") is False:
+            return MentionDecision("silent")
+        if action in {"chat", "speak", "reply"} or payload.get("speak") is True:
+            replies = self._parse_reply_payload(payload, allowed_at=allowed_at)
+            if replies:
+                return MentionDecision("chat", tuple(replies))
+            return MentionDecision("silent")
+        return None
+
+    def _json_payload(self, raw: str) -> Any | None:
+        cleaned = strip_ansi(raw).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+    def _parse_reply_payload(
+        self,
+        payload: dict[str, Any],
+        allowed_at: set[str] | None = None,
+    ) -> list[ProactiveReplyMessage] | None:
         messages = self._raw_reply_messages(payload)
         if not messages:
             return None
@@ -350,6 +459,15 @@ class ProactiveSpeaker:
             if len(replies) >= max_replies:
                 break
         return replies or None
+
+    def _strip_leading_mentions(self, text: str) -> str:
+        t = text.strip()
+        while t.startswith("@"):
+            parts = t.split(maxsplit=1)
+            if len(parts) < 2:
+                return ""
+            t = parts[1].strip()
+        return t
 
     def _raw_reply_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_messages = payload.get("messages")
