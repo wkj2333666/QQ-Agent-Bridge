@@ -296,6 +296,7 @@ def test_task_prompt_documents_singing_is_not_spoken_tts() -> None:
     assert "不要附加说明文字" in prompt
     assert "歌声生成后端" in prompt
     assert "外部 singing backend" in prompt
+    assert "明确说明阻塞" in prompt
     assert "不能退化成 TTS" in prompt
 
 
