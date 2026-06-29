@@ -1,0 +1,293 @@
+# QQ Agent Bridge
+
+中文文档 | [English](README.md)
+
+QQ Agent Bridge 是一个偏安全取向的 OneBot v11 桥接层，用来把 QQ 私聊/群聊接到本地 CLI Agent，比如 Cursor Agent、Codex、Claude Code，或你自己的命令行封装。
+
+它不是 QQ 协议实现，也不是完整机器人平台。它只专注中间这一层：
+
+```text
+QQ 用户/群聊
+  -> OneBot v11 网关，例如 NapCatQQ
+  -> 反向 WebSocket
+  -> bridge core：鉴权、路由、队列、记忆、资源暂存、脱敏
+  -> 受限工作区里的本地 CLI Agent
+  -> QQ 文本、图片、文件、音频或语音回复
+```
+
+## 重要提醒
+
+本项目与腾讯、QQ、NapCatQQ、Cursor、OpenAI、Anthropic 等没有从属关系。
+
+个人 QQ 网关可能违反平台规则，也可能带来账号风险。建议先用小号测试，并自行审查所使用的网关、模型、命令行工具和部署方式。你需要对账号、凭据、消息、文件、模型调用费用和合规风险负责。
+
+## 功能
+
+- OneBot v11 反向 WebSocket 服务。
+- QQ 群聊 @ 路由，私聊默认触发。
+- owner、私聊用户、群聊 allowlist。
+- 普通用户可用只读命令：`/ask`、`/plan`、`/search`、`/task`、`/status`、`/help`、`/profile`。
+- owner 专用命令：`/code`、`/approve`、`/stop`、`/reset`、`/reload`。
+- 任务队列和全局 agent 并发限制。
+- 每个私聊/群聊独立的短期对话记忆。
+- 群聊 ambient memory，让 bot 能理解最近群聊背景，但不把背景消息当命令执行。
+- 每个群/用户可配置独立 profile，避免角色设定串群泄露。
+- 长任务进度消息和心跳。
+- 附件缓存：手机端可先发图片/文件，再 @bot 处理最近附件。
+- 支持把图片、文件、语音、音频、视频、URL、合并转发记录交给 agent。
+- 通过受保护的 `QQBOT_SEND_*` 指令发送 agent 生成的图片、文件、音频或 QQ 语音。
+- 基于 Bubblewrap 的本地 CLI Agent 沙箱。
+- Runtime skill pack：提示 agent 如何做搜索、查天气、处理办公文档、理解媒体、处理语音/音乐、避免幻觉，并遵守 QQ bridge 的资源收发协议。
+
+## 当前状态
+
+这是早期项目。Bridge 已经可用，但公开 API、配置格式和 runtime skill 格式在 `1.0` 之前都可能变化。
+
+## 快速开始
+
+```bash
+git clone <repo-url> qq-agent-bridge
+cd qq-agent-bridge
+
+cp config.example.yaml config.yaml
+# 编辑 config.yaml：
+# - owners
+# - allowed_users / allowed_groups
+# - workspaces
+# - agent.runtime 和对应运行时命令
+# - onebot.access_token
+# - QQ 网关登录后填写 bot.self_id
+
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+
+python -m src.qq_agent_bridge.main --echo-only
+```
+
+先从允许的私聊发一条消息，确认 echo 模式能收到回复。OneBot 网关连接正常后，再运行正式模式：
+
+```bash
+python -m src.qq_agent_bridge.main
+```
+
+## OneBot 网关
+
+仓库里带了一个 NapCatQQ 的 compose 模板，位于 `runtime/napcat/`。它只是部署辅助；NapCatQQ 本身是独立项目。
+
+典型启动方式：
+
+```bash
+cd runtime/napcat
+mkdir -p data/qq config plugins
+NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up
+```
+
+然后打开网关 WebUI，登录 QQ，并配置 WebSocket 客户端连接到 bridge：
+
+```text
+ws://127.0.0.1:8765/onebot
+```
+
+网关里的 access token 要和 `config.yaml` 里的 `onebot.access_token` 一致。
+
+更多细节见 [runtime/napcat/README.md](runtime/napcat/README.md)。
+
+## 常用命令
+
+私聊：
+
+```text
+你好
+/ask 解释这个报错
+/task 搜索网页并整理摘要
+```
+
+群聊：
+
+```text
+@bot 你好
+@bot /ask 解释一下
+@bot /task 总结这个链接
+```
+
+普通命令：
+
+- `/ask <文本>`：快速问答或轻量闲聊。
+- `/plan <文本>`：只读规划，不修改文件。
+- `/search <关键词>`：在配置工作区内做受限文本搜索。
+- `/task <文本>`：显式执行较完整的 agent 任务，但不修改已有工作区文件。
+- `/status`：查看运行中和排队中的任务。
+- `/help`：显示简短帮助。
+- `/profile`：查看当前 profile。
+- `/profile set <提示词>`：设置当前群或当前私聊的 profile。
+- `/profile clear`：清空当前群或当前私聊的 profile。
+
+owner 专用命令：
+
+- `/code <请求>`：允许修改授权工作区，带确认流程。
+- `/approve <job> <nonce>`：批准待确认任务。
+- `/stop <job>`：取消任务。
+- `/reset`：清空当前会话记忆和群聊背景。
+- `/reload`：热重载 `config.yaml`。
+
+群聊里只有 owner 能修改群 profile；私聊里允许用户可以修改自己的私聊 profile。
+
+## Profile
+
+Profile 是可选的角色/口吻提示词，写在 `config.yaml`：
+
+```yaml
+profiles:
+  default: |
+    - 你是一个轻量、友好、懂代码的 QQ 助手。
+  groups:
+    "2000000001": |
+      - 你是这个群里的技术助手。
+      - 回复短一点，优先给可执行建议。
+  users:
+    "1000000001": |
+      - 你是私聊里的学习搭子。
+      - 解释思路要耐心，但不要替用户做未授权决定。
+```
+
+隔离规则：
+
+- 群聊使用 `profiles.groups[group_id]`，没有则使用 `profiles.default`。
+- 私聊使用 `profiles.users[user_id]`，没有则使用 `profiles.default`。
+- 其他群/用户的 profile 不会暴露给当前 agent。
+
+## Agent Runtime
+
+开源默认不启用任何 CLI Agent。你必须在 `config.yaml` 里显式选择运行时。
+
+内置运行时：
+
+- `cursor-cli`：按内置方式调用 Cursor Agent。
+- `custom-cli`：使用 `agent.command` 命令模板，适合 Codex、Claude Code、wrapper script 或其他兼容 runner。
+
+Cursor Agent 示例：
+
+```yaml
+agent:
+  runtime: "cursor-cli"
+  binary: "cursor-agent"
+```
+
+其他 CLI 示例：
+
+```yaml
+agent:
+  runtime: "custom-cli"
+  command:
+    ask: ["your-agent", "--mode", "{mode}", "--model", "{model}", "{prompt}"]
+    plan: ["your-agent", "--mode", "{mode}", "--model", "{model}", "{prompt}"]
+    task: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
+    code: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
+```
+
+支持的占位符：
+
+- `{prompt}`：bridge 构造后的完整提示词。
+- `{workspace}`：配置中的工作区路径。
+- `{mode}`：`ask`、`plan`、`task` 或 `code`。
+- `{model}`：当前命令选择的模型名，可能为空。
+- `{stream}`：是否开启流式进度，值为 `true` 或 `false`。
+
+Codex 和 Claude Code 的 CLI 参数不会被写死在项目里，因为这些 CLI 变化较快。建议把具体参数放在 `config.yaml` 或一个 wrapper script 里。
+
+如果你的 custom command 不通过 micromamba 启动，请设置：
+
+```yaml
+agent:
+  env_runner: ""
+  require_env: false
+```
+
+关键安全约束：
+
+- `/ask` 和 `/plan` 保持只读。
+- `/task` 可以使用工具，但只能在本次任务 outbox 里创建交付物。
+- `/code` 是 owner 批准后的工作区编辑入口，未测试前建议保持关闭。
+- 工作区只来自本地配置，不接受聊天消息里的路径作为可信输入。
+- Bubblewrap 会把系统和运行时路径只读挂载，并使用私有 sandbox home 存放 agent 认证状态。
+
+## 资源发送
+
+如果 agent 生成了文件，需要在提示词指定的 per-job outbox 中创建文件，然后输出一行资源发送指令：
+
+```text
+QQBOT_SEND_IMAGE: <token> downloads/qq-agent-bridge/outgoing/<job>/image.png
+QQBOT_SEND_FILE: <token> downloads/qq-agent-bridge/outgoing/<job>/report.pdf
+QQBOT_SEND_AUDIO: <token> downloads/qq-agent-bridge/outgoing/<job>/audio.mp3
+QQBOT_SEND_VOICE: <token> downloads/qq-agent-bridge/outgoing/<job>/voice.wav duration=12
+```
+
+Bridge 会从最终回复中移除这些指令，校验 token、路径和文件大小，然后通过 OneBot 发送。
+
+QQ 语音只适合生成的人声短语音。`QQBOT_SEND_VOICE` 必须提供真实 `duration=`，并且实际时长不能超过 60 秒。泛音频、音乐、播客、长音频或无法验证时长的音频应当作为文件发送。
+
+## 安全边界
+
+- 默认 deny 配置。
+- 用户、群、工作区、命令 allowlist。
+- 群聊必须真实 @bot。
+- 私聊用户必须在 allowlist 中。
+- 允许群内普通成员使用只读命令。
+- 高风险命令 owner-only。
+- `/code` 带 nonce 确认流程。
+- 任务超时、输出长度上限、消息去重。
+- 常见 token、key、password 脱敏。
+- 防止 agent 把内部提示词/上下文回显到 QQ。
+- 暂存资源不会进入 `/search` 和对话记忆。
+- 输出资源只能来自当前任务 outbox。
+- 运行时状态和本地凭据默认被 git 忽略。
+
+## 和已有项目的区别
+
+- NapCatQQ、Lagrange 是 QQ 网关/协议实现；本项目消费 OneBot 事件，不实现 QQ 协议。
+- OneBot v11 是协议契约；本项目是构建在它之上的一个 Python bridge。
+- NoneBot2、Koishi 是通用机器人框架，插件生态更广；本项目更窄，重点是“QQ 到本地 CLI Agent”的安全桥接。
+- LangBot、CowAgent 类项目更像多平台 AI bot 系统；本项目面向能读工作区、跑任务、生成交付文件的本地 CLI Agent，并用本地策略控制它们能做什么。
+
+## 验证
+
+```bash
+. .venv/bin/activate
+python dry_run.py
+python -m pytest -q
+git diff --check
+```
+
+默认测试不会真实调用 Cursor、Codex 或 Claude CLI。如果要在自己的机器上做 smoke test：
+
+```bash
+QQ_AGENT_BRIDGE_CLI_SMOKE=1 python -m pytest tests/test_cli_smoke.py -q
+```
+
+也可以用环境变量覆盖 smoke test 命令：
+
+- `QQ_AGENT_BRIDGE_SMOKE_CURSOR_CMD`
+- `QQ_AGENT_BRIDGE_SMOKE_CODEX_CMD`
+- `QQ_AGENT_BRIDGE_SMOKE_CLAUDE_CMD`
+
+## 仓库卫生
+
+不要提交真实运行状态或敏感信息：
+
+- `config.yaml`
+- `.env`
+- 二维码、cookie、QQ 凭据、登录截图
+- OneBot/NapCat token
+- Cursor/Codex/Claude auth state
+- `runtime/*/data/`
+- `runtime/*/config/`
+- `runtime/*/plugins/`
+- `workspace/downloads/`
+- 私聊/群聊日志
+
+公开仓库前请阅读 [SECURITY.md](SECURITY.md) 和 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
+
+## License
+
+MIT License. See [LICENSE](LICENSE).

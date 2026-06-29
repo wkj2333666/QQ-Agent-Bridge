@@ -1,0 +1,97 @@
+owners:
+- '1000000001'
+allowed_users:
+- '1000000001'
+allowed_groups: []
+workspaces:
+  /opt/qq-agent-bridge/workspace: true
+commands:
+  ask: true
+  plan: true
+  search: true
+  task: true
+  code: false
+  status: true
+  help: true
+  profile: true
+  reset: true
+  stop: true
+  approve: true
+  shell: false
+dangerous_requires_confirm: true
+max_runtime_seconds: 300
+max_output_chars: 4000
+max_finished_jobs: 200
+max_seen_messages: 1000
+memory:
+  enabled: true
+  max_messages: 32
+  max_chars: 6000
+ambient_memory:
+  enabled: true
+  allowed_groups: []
+  max_messages: 8
+  max_chars: 1200
+  max_message_chars: 180
+  max_age_seconds: 900
+  min_chars: 4
+  ignored_prefixes:
+  - /
+  - ／
+  - '!'
+  - ！
+resources:
+  enabled: true
+  root: downloads/qq-agent-bridge
+  max_items: 4
+  max_bytes: 8388608
+  max_total_bytes: 20971520
+  cache_enabled: true
+  cache_ttl_seconds: 600
+  cache_max_items: 4
+  allowed_kinds:
+  - image
+  - file
+  - audio
+  - video
+  - url
+progress:
+  enabled: true
+  first_heartbeat_seconds: 30
+  heartbeat_seconds: 45
+  min_progress_interval_seconds: 8
+  max_progress_messages: 8
+  max_progress_chars: 240
+profiles:
+  default: ''
+  groups: {}
+  users: {}
+onebot:
+  host: 127.0.0.1
+  port: 8765
+  path: /onebot
+  access_token: test-token-123
+agent:
+  runtime: cursor-cli
+  binary: cursor-agent
+  default_workspace: /opt/qq-agent-bridge/workspace
+  env_runner: micromamba
+  env_name: base
+  require_env: true
+  use_bwrap: true
+  bwrap_binary: bwrap
+  force_task_tools: true
+  sandbox_home: /tmp/qq-agent-bridge/cursor-home
+  chat_model: auto
+  task_model: composer
+  max_concurrent_jobs: 2
+  env_allowlist:
+  - PATH
+  - HOME
+  - USER
+  max_runtime_seconds: 300
+  max_output_chars: 4000
+bot:
+  self_id: ''
+  mention_name: ''
+log_level: INFO

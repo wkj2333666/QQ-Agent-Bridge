@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Venv
+.venv/
+venv/
+ENV/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Project
+data/
+*.log
+config.yaml
+!config.example.yaml
+
+# Secrets / auth
+*.token
+*qr*.png
+*qr*.jpg
+.env
+secrets/
+
+# Cursor / agent
+.cursor/
+.codex/
+.worktrees
+agent-cli-state.json
+.qq-agent-sandbox/
+workspace/.qq-agent-sandbox/
+workspace/downloads/
+
+# Runtime containers
+runtime/*/data/
+runtime/*/config/
+runtime/*/plugins/
+runtime/*/logs/
