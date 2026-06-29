@@ -1,0 +1,4 @@
+interface:
+  display_name: "QQ Agent Bridge"
+  short_description: "Build safe QQ OneBot bridges for coding agents"
+  default_prompt: "Use $qq-agent-bridge to design a safe QQ OneBot bridge for a local coding agent."

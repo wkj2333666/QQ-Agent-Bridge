@@ -1,0 +1,143 @@
+# QQ Agent Bridge - safe defaults, deny by default
+# Copy to config.yaml and edit. Never commit real tokens or QR data.
+
+owners:
+  - "1000000001"   # your QQ as owner
+
+allowed_users:
+  - "1000000001"   # private-chat users; allowed group members can use read-only commands when mentioning bot
+
+allowed_groups: []   # add group ids as strings when ready, e.g. "123456"
+
+workspaces:
+  "/opt/qq-agent-bridge/workspace": true
+
+commands:
+  ask: true      # read / explain / propose
+  plan: true     # read-only planning, no file edits
+  search: true   # read-only literal search in configured workspace
+  task: true     # general agent task entry, no existing workspace file edits
+  code: false    # allow edits? set true after testing
+  status: true
+  help: true
+  profile: true  # view/set current group or private profile; group edits are owner-only
+  reset: true    # owner-only; clears current conversation memory
+  stop: true     # owner-only
+  approve: true  # owner-only
+  reload: true   # owner-only; reloads config.yaml without reconnecting OneBot
+  shell: false   # disabled; never enable lightly
+
+dangerous_requires_confirm: true
+max_runtime_seconds: 300
+max_output_chars: 4000
+max_finished_jobs: 200
+max_seen_messages: 1000
+
+memory:
+  enabled: true
+  max_messages: 32
+  max_chars: 6000
+
+ambient_memory:
+  enabled: true
+  allowed_groups: []        # empty = reuse allowed_groups; set explicit group ids to narrow scope
+  max_messages: 8
+  max_chars: 1200
+  max_message_chars: 180
+  max_age_seconds: 900
+  min_chars: 4
+  ignored_prefixes: ["/", "／", "!", "！"]
+
+resources:
+  enabled: true
+  root: "downloads/qq-agent-bridge"
+  max_items: 4
+  max_bytes: 8388608
+  max_total_bytes: 20971520
+  cache_enabled: true
+  cache_ttl_seconds: 600
+  cache_max_items: 4
+  allowed_kinds: ["image", "file", "audio", "voice", "video", "url", "forward"]
+
+progress:
+  enabled: true
+  first_heartbeat_seconds: 30
+  heartbeat_seconds: 45
+  min_progress_interval_seconds: 8
+  max_progress_messages: 8
+  max_progress_chars: 240
+
+proactive:
+  enabled: true
+  debug: false
+  allowed_groups: []       # empty = reuse allowed_groups; set explicit group ids for tighter rollout
+  batch_seconds: 8
+  min_messages: 2
+  max_batch_messages: 8
+  cooldown_seconds: 16
+  quiet_after_bot_seconds: 16
+  max_per_hour: 180
+  max_prompt_chars: 1200
+  max_reply_chars: 160
+  max_reply_messages: 3
+  reply_message_delay_seconds: 0.6
+  model: "auto"
+  blacklist_keywords: ["别插嘴", "不要插嘴", "闭嘴", "机器人别说话"]
+  ignored_prefixes: ["/"]
+
+profiles:
+  default: ""  # empty = use built-in QQ bot identity/profile
+  groups:
+    # "123456": |
+    #   你是这个群里的项目管家。说话轻松、短句优先，主动把问题拆成可执行步骤。
+  users:
+    # "1000000001": |
+    #   你是私聊里的学习搭子。优先解释思路，语气耐心，不替用户做未授权的决定。
+
+# OneBot
+onebot:
+  host: "127.0.0.1"
+  port: 8765
+  path: "/onebot"
+  access_token: "change-this-to-strong-token"  # must match gateway config
+
+# Agent runtime - choose explicitly before running
+agent:
+  runtime: ""  # required: "cursor-cli" or "custom-cli"
+  binary: ""   # cursor-cli default binary is cursor-agent when left empty
+  # custom-cli command templates. Supported placeholders:
+  # {prompt}, {workspace}, {mode}, {model}, {stream}
+  # Example:
+  # command:
+  #   ask: ["your-agent", "--mode", "{mode}", "--model", "{model}", "{prompt}"]
+  #   plan: ["your-agent", "--mode", "{mode}", "--model", "{model}", "{prompt}"]
+  #   task: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
+  #   code: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
+  # If your custom command is not managed by micromamba, set env_runner: "" and require_env: false.
+  command: {}
+  default_workspace: "/opt/qq-agent-bridge/workspace"
+  env_runner: "micromamba"
+  env_name: "base"
+  require_env: true
+  use_bwrap: true
+  bwrap_binary: "bwrap"
+  force_task_tools: true
+  sandbox_home: "/tmp/qq-agent-bridge/agent-home"
+  chat_model: "auto"                  # fast route for short QQ replies
+  task_model: "composer"              # stronger tool-using route for QQ tasks
+  max_concurrent_jobs: 2
+  env_allowlist:
+    - "PATH"
+    - "HOME"
+    - "USER"
+  max_runtime_seconds: 300
+  max_output_chars: 4000
+
+# Bot self
+bot:
+  self_id: ""  # fill after login, e.g. "1234567890"
+  mention_name: ""  # optional display name; plain text "@name" is not treated as a real mention
+  reply_chunk_delay_seconds: 0.2  # small pause between split long-message chunks
+
+# Logging
+log_level: "INFO"

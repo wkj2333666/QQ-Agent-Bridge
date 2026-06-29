@@ -1,0 +1,22 @@
+# Lagrange.OneBot gateway - reverse WS to local bridge
+# Run: cd runtime/lagrange && docker compose up -d
+#
+# After start: docker logs -f lagrange  --> scan QR to login
+# Then note the QQ number (self_id), put into ../../config.yaml bot.self_id
+#
+# Bridge must be listening first on the reverse url.
+
+services:
+  lagrange:
+    image: ghcr.io/lagrangedev/lagrange.onebot:edge
+    container_name: lagrange
+    restart: "no"
+    # Use host network for easy localhost WS from container -> host bridge
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+      - ./appsettings.json:/app/appsettings.json:ro
+    environment:
+      - UID=${UID:-1000}
+      - GID=${GID:-1000}
+    # No ports needed with host mode; reverse WS goes outbound

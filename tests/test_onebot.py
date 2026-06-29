@@ -1,0 +1,750 @@
+"""OneBot event normalization tests."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+import asyncio
+import json
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from qq_agent_bridge.onebot import _extract_text, _is_mentioned, _normalize_event  # type: ignore
+from qq_agent_bridge.onebot import OneBotAdapter  # type: ignore
+
+
+def test_extract_array() -> None:
+    msg = [{"type": "at", "data": {"qq": "111"}}, {"type": "text", "data": {"text": "hi"}}]
+    assert "hi" in _extract_text(msg)
+
+
+def test_mentioned() -> None:
+    assert _is_mentioned([{"type": "at", "data": {"qq": "123"}}], "123")
+    assert not _is_mentioned("@示例机器人 /task hello", "123", "示例机器人")
+    assert not _is_mentioned("plain", "123")
+
+
+def test_normalize_private() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 42,
+        "user_id": 1000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": "hello",
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert not ev.is_group
+    assert ev.text == "hello"
+    assert ev.sender_id == "1000000001"
+
+
+def test_normalize_rejects_wrong_self_id() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 42,
+        "user_id": 1000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": "hello",
+    }
+    assert _normalize_event(raw, "222") is None
+
+
+def test_normalize_rejects_non_numeric_ids() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 42,
+        "user_id": "1000000001",
+        "group_id": "abc",
+        "self_id": 111,
+        "time": 1,
+        "message": "hello",
+    }
+    assert _normalize_event(raw, "111") is None
+
+
+def test_normalize_preserves_image_file_and_url_resources() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 42,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {"type": "at", "data": {"qq": "111"}},
+            {"type": "text", "data": {"text": " 看看这个 https://example.com/a?b=1 "}},
+            {
+                "type": "image",
+                "data": {
+                    "file": "cat.jpg",
+                    "url": "https://qq.example/image/cat.jpg",
+                },
+            },
+            {
+                "type": "file",
+                "data": {
+                    "file": "notes.pdf",
+                    "name": "notes.pdf",
+                    "url": "https://qq.example/file/notes.pdf",
+                },
+            },
+        ],
+    }
+
+    ev = _normalize_event(raw, "111")
+
+    assert ev is not None
+    assert ev.text == "@111  看看这个 https://example.com/a?b=1"
+    assert [(r.kind, r.name, r.url) for r in ev.resources] == [
+        ("url", "https://example.com/a?b=1", "https://example.com/a?b=1"),
+        ("image", "cat.jpg", "https://qq.example/image/cat.jpg"),
+        ("file", "notes.pdf", "https://qq.example/file/notes.pdf"),
+    ]
+
+
+def test_normalize_record_segment_as_qq_voice_resource() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "private",
+        "message_id": 49,
+        "user_id": 1000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {
+                "type": "record",
+                "data": {
+                    "file": "voice.silk",
+                    "url": "https://qq.example/record/voice.silk",
+                    "duration": 12,
+                    "mime_type": "audio/silk",
+                },
+            }
+        ],
+    }
+
+    ev = _normalize_event(raw, "111")
+
+    assert ev is not None
+    assert len(ev.resources) == 1
+    voice = ev.resources[0]
+    assert voice.kind == "voice"
+    assert voice.name == "voice.silk"
+    assert voice.url == "https://qq.example/record/voice.silk"
+    assert voice.duration_seconds == 12
+    assert ev.segments[0].type == "voice"
+
+
+def test_normalize_rejects_text_mention_name_fallback() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 42,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": "@示例机器人 /task hello",
+    }
+
+    ev = _normalize_event(raw, "111", "示例机器人")
+
+    assert ev is not None
+    assert not ev.mentioned_bot
+    assert ev.text == "@示例机器人 /task hello"
+
+
+def test_normalize_cq_at_string_to_parseable_text() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 43,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": "[CQ:at,qq=111] /task hello",
+    }
+
+    ev = _normalize_event(raw, "111")
+
+    assert ev is not None
+    assert ev.mentioned_bot
+    assert ev.text == "@111 /task hello"
+
+
+def test_normalize_structured_reply_segment() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 44,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {"type": "reply", "data": {"id": "43", "qq": "222", "text": "原消息内容"}},
+            {"type": "at", "data": {"qq": "111"}},
+            {"type": "text", "data": {"text": " 总结一下"}},
+        ],
+    }
+
+    ev = _normalize_event(raw, "111")
+
+    assert ev is not None
+    assert ev.reply is not None
+    assert ev.reply.message_id == "43"
+    assert ev.reply.sender_id == "222"
+    assert ev.reply.text == "原消息内容"
+    assert ev.text == "@111  总结一下"
+    assert ev.segments[0].type == "reply"
+
+
+def test_normalize_cq_reply_string_keeps_reply_id_out_of_user_text() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 45,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": "[CQ:reply,id=43][CQ:at,qq=111] 总结一下",
+    }
+
+    ev = _normalize_event(raw, "111")
+
+    assert ev is not None
+    assert ev.reply is not None
+    assert ev.reply.message_id == "43"
+    assert ev.text == "@111 总结一下"
+
+
+def test_normalize_napcat_display_reply_string() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 47,
+        "user_id": 1000000004,
+        "group_id": 2000000002,
+        "self_id": 1000000001,
+        "time": 1,
+        "message": (
+            "[回复消息 [示例用户(1000000002)] 测试一下引用 @X (1000000004)  ] "
+            "[CQ:at,qq=1000000002] 这句话是什么意思 [CQ:at,qq=1000000001]"
+        ),
+    }
+
+    ev = _normalize_event(raw, "1000000001")
+
+    assert ev is not None
+    assert ev.mentioned_bot
+    assert ev.reply is not None
+    assert ev.reply.sender_id == "1000000002"
+    assert ev.reply.text == "测试一下引用 @X (1000000004)"
+    assert "回复消息" not in ev.text
+    assert "这句话是什么意思" in ev.text
+
+
+def test_normalize_napcat_display_reply_inside_text_segment() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 48,
+        "user_id": 1000000004,
+        "group_id": 2000000002,
+        "self_id": 1000000001,
+        "time": 1,
+        "message": [
+            {
+                "type": "text",
+                "data": {
+                    "text": "[回复消息 [示例用户(1000000002)] 测试一下引用  ] "
+                },
+            },
+            {"type": "at", "data": {"qq": "1000000002"}},
+            {"type": "text", "data": {"text": " 这句话是什么意思 "}},
+            {"type": "at", "data": {"qq": "1000000001"}},
+        ],
+    }
+
+    ev = _normalize_event(raw, "1000000001")
+
+    assert ev is not None
+    assert ev.reply is not None
+    assert ev.reply.sender_id == "1000000002"
+    assert ev.reply.text == "测试一下引用"
+    assert "回复消息" not in ev.text
+    assert "这句话是什么意思" in ev.text
+
+
+def test_normalize_napcat_forward_json_segment_preserves_chat_record_context() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 60,
+        "user_id": 1000000004,
+        "group_id": 2000000002,
+        "self_id": 1000000001,
+        "time": 1,
+        "message": [
+            {"type": "at", "data": {"qq": "1000000001"}},
+            {"type": "text", "data": {"text": " 总结这个聊天记录 "}},
+            {
+                "type": "json",
+                "data": {
+                    "data": json.dumps(
+                        {
+                            "app": "com.tencent.multimsg",
+                            "prompt": "[聊天记录]",
+                            "meta": {
+                                "detail": {
+                                    "resid": "forward-resid-1",
+                                    "summary": "群聊的聊天记录",
+                                    "news": [
+                                        {"text": "Alice: 第一条 https://example.com/a"},
+                                        {"text": "Bob: 第二条"},
+                                    ],
+                                }
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+            },
+        ],
+    }
+
+    ev = _normalize_event(raw, "1000000001")
+
+    assert ev is not None
+    assert ev.mentioned_bot
+    assert ev.text == "@1000000001  总结这个聊天记录"
+    assert ev.segments[-1].type == "forward"
+    assert len(ev.resources) == 1
+    forward = ev.resources[0]
+    assert forward.kind == "forward"
+    assert forward.file_id == "forward-resid-1"
+    assert forward.name == "群聊的聊天记录"
+    assert forward.raw_data["messages"] == [
+        {"text": "Alice: 第一条 https://example.com/a"},
+        {"text": "Bob: 第二条"},
+    ]
+
+
+def test_normalize_forward_segment_marks_downloadable_merged_record_without_fetching() -> None:
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 61,
+        "user_id": 1000000004,
+        "group_id": 2000000002,
+        "self_id": 1000000001,
+        "time": 1,
+        "message": [
+            {"type": "at", "data": {"qq": "1000000001"}},
+            {"type": "text", "data": {"text": " 看下 "}},
+            {
+                "type": "forward",
+                "data": {
+                    "id": "forward-msg-1",
+                    "summary": "3条转发消息",
+                },
+            },
+        ],
+    }
+
+    ev = _normalize_event(raw, "1000000001")
+
+    assert ev is not None
+    assert ev.text == "@1000000001  看下"
+    assert ev.resources[0].kind == "forward"
+    assert ev.resources[0].file_id == "forward-msg-1"
+    assert ev.resources[0].raw_data["messages"] == []
+
+
+class FakeConn:
+    def __init__(self) -> None:
+        self.frames: list[str] = []
+
+    async def send(self, data: str) -> None:
+        self.frames.append(data)
+
+
+def test_send_image_uses_onebot_image_segment(tmp_path: Path) -> None:
+    async def go() -> None:
+        image = tmp_path / "plot.png"
+        image.write_bytes(b"png")
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_image("123", True, image, "img-echo")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_group_msg"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["message"][0]["type"] == "image"
+        assert frame["params"]["message"][0]["data"]["file"] == image.resolve().as_uri()
+        assert frame["echo"] == "img-echo"
+
+    asyncio.run(go())
+
+
+def test_adapter_fetches_json_forward_even_when_preview_messages_exist() -> None:
+    async def go() -> None:
+        raw = {
+            "post_type": "message",
+            "message_type": "group",
+            "message_id": 63,
+            "user_id": 1000000004,
+            "group_id": 2000000002,
+            "self_id": 1000000001,
+            "time": 1,
+            "message": [
+                {"type": "at", "data": {"qq": "1000000001"}},
+                {
+                    "type": "json",
+                    "data": {
+                        "data": json.dumps(
+                            {
+                                "app": "com.tencent.multimsg",
+                                "prompt": "[聊天记录]",
+                                "meta": {
+                                    "detail": {
+                                        "resid": "forward-json-1",
+                                        "summary": "群聊的聊天记录",
+                                        "news": [{"text": "preview only"}],
+                                    }
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+                    },
+                },
+            ],
+        }
+        ev = _normalize_event(raw, "1000000001")
+        assert ev is not None
+        assert ev.resources[0].raw_data["messages"] == [{"text": "preview only"}]
+
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "1000000001")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter._enrich_forward(ev))  # type: ignore[attr-defined]
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "get_forward_msg"
+        assert frame["params"] == {"message_id": "forward-json-1", "id": "forward-json-1"}
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "messages": [
+                        {
+                            "sender": {"user_id": 222, "nickname": "Alice"},
+                            "message": [{"type": "text", "data": {"text": "完整内容"}}],
+                        }
+                    ]
+                },
+            }
+        )
+
+        enriched = await task
+        forward = enriched.resources[0]
+        assert forward.raw_data["source"] == "onebot-forward-fetched"
+        assert forward.raw_data["messages"] == [
+            {"sender_id": "222", "sender_name": "Alice", "text": "完整内容"}
+        ]
+
+    asyncio.run(go())
+
+
+def test_send_file_uses_upload_action(tmp_path: Path) -> None:
+    async def go() -> None:
+        report = tmp_path / "report.pdf"
+        report.write_bytes(b"pdf")
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_file("123", True, report, "file-echo")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "upload_group_file"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["file"] == report.resolve().as_uri()
+        assert frame["params"]["name"] == "report.pdf"
+        assert frame["echo"] == "file-echo"
+
+    asyncio.run(go())
+
+
+def test_send_voice_uses_onebot_record_segment(tmp_path: Path) -> None:
+    async def go() -> None:
+        voice = tmp_path / "reply.silk"
+        voice.write_bytes(b"silk")
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_voice("123", False, voice, "voice-echo")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_private_msg"
+        assert frame["params"]["user_id"] == 123
+        assert frame["params"]["message"][0]["type"] == "record"
+        assert frame["params"]["message"][0]["data"]["file"] == voice.resolve().as_uri()
+        assert frame["echo"] == "voice-echo"
+
+    asyncio.run(go())
+
+
+def test_send_at_uses_onebot_at_segment() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_at("123", "456", "这句接得上", "at-echo")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_group_msg"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["message"] == [
+            {"type": "at", "data": {"qq": 456}},
+            {"type": "text", "data": {"text": " 这句接得上"}},
+        ]
+        assert frame["echo"] == "at-echo"
+
+    asyncio.run(go())
+
+
+def test_send_ats_uses_multiple_onebot_at_segments() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_ats("123", ("456", "789"), "都出来冒个泡", "ats-echo")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_group_msg"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["message"] == [
+            {"type": "at", "data": {"qq": 456}},
+            {"type": "at", "data": {"qq": 789}},
+            {"type": "text", "data": {"text": " 都出来冒个泡"}},
+        ]
+        assert frame["echo"] == "ats-echo"
+
+    asyncio.run(go())
+
+
+def test_adapter_enriches_reply_by_fetching_quoted_message() -> None:
+    async def go() -> None:
+        raw = {
+            "post_type": "message",
+            "message_type": "group",
+            "message_id": 46,
+            "user_id": 1000000001,
+            "group_id": 2000000001,
+            "self_id": 111,
+            "time": 1,
+            "message": [
+                {"type": "reply", "data": {"id": "43"}},
+                {"type": "at", "data": {"qq": "111"}},
+                {"type": "text", "data": {"text": " 看看"}},
+            ],
+        }
+        ev = _normalize_event(raw, "111")
+        assert ev is not None
+        assert ev.reply is not None
+        assert ev.reply.text == ""
+
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter._enrich_reply(ev))  # type: ignore[attr-defined]
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "get_msg"
+        assert frame["params"]["message_id"] == 43
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_id": 43,
+                    "sender": {"user_id": 222},
+                    "message": [{"type": "text", "data": {"text": "被引用的原文"}}],
+                    "raw_message": "被引用的原文",
+                },
+            }
+        )
+
+        enriched = await task
+        assert enriched.reply is not None
+        assert enriched.reply.message_id == "43"
+        assert enriched.reply.sender_id == "222"
+        assert enriched.reply.text == "被引用的原文"
+
+    asyncio.run(go())
+
+
+def test_adapter_enriches_reply_from_recent_message_cache() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        original = _normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 50,
+                "user_id": 222,
+                "group_id": 2000000001,
+                "self_id": 111,
+                "time": 1,
+                "message": "测试一下引用 @X",
+            },
+            "111",
+        )
+        assert original is not None
+        adapter._remember_event(original)  # type: ignore[attr-defined]
+
+        reply_event = _normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 51,
+                "user_id": 333,
+                "group_id": 2000000001,
+                "self_id": 111,
+                "time": 2,
+                "message": [
+                    {"type": "reply", "data": {"id": "50"}},
+                    {"type": "at", "data": {"qq": "111"}},
+                    {"type": "text", "data": {"text": " 这句话是什么意思"}},
+                ],
+            },
+            "111",
+        )
+        assert reply_event is not None
+
+        enriched = await adapter._enrich_reply(reply_event)  # type: ignore[attr-defined]
+
+        assert enriched.reply is not None
+        assert enriched.reply.message_id == "50"
+        assert enriched.reply.sender_id == "222"
+        assert enriched.reply.text == "测试一下引用 @X"
+        assert conn.frames == []
+
+    asyncio.run(go())
+
+
+def test_adapter_enriches_forward_segment_by_fetching_merged_content() -> None:
+    async def go() -> None:
+        raw = {
+            "post_type": "message",
+            "message_type": "group",
+            "message_id": 62,
+            "user_id": 1000000004,
+            "group_id": 2000000002,
+            "self_id": 1000000001,
+            "time": 1,
+            "message": [
+                {"type": "at", "data": {"qq": "1000000001"}},
+                {"type": "text", "data": {"text": " 总结 "}},
+                {"type": "forward", "data": {"id": "forward-msg-2", "summary": "2条转发消息"}},
+            ],
+        }
+        ev = _normalize_event(raw, "1000000001")
+        assert ev is not None
+        assert ev.resources[0].raw_data["messages"] == []
+
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "1000000001")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter._enrich_forward(ev))  # type: ignore[attr-defined]
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "get_forward_msg"
+        assert frame["params"] == {"message_id": "forward-msg-2", "id": "forward-msg-2"}
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "messages": [
+                        {
+                            "sender": {"user_id": 222, "nickname": "Alice"},
+                            "message": [
+                                {"type": "text", "data": {"text": "第一条 https://example.com/a"}}
+                            ],
+                        },
+                        {
+                            "sender": {"user_id": 333, "nickname": "Bob"},
+                            "message": [
+                                {
+                                    "type": "image",
+                                    "data": {
+                                        "file": "pic.jpg",
+                                        "url": "https://qq.example/pic.jpg",
+                                    },
+                                }
+                            ],
+                        },
+                    ]
+                },
+            }
+        )
+
+        enriched = await task
+        forward = enriched.resources[0]
+        assert forward.kind == "forward"
+        assert forward.raw_data["messages"] == [
+            {
+                "sender_id": "222",
+                "sender_name": "Alice",
+                "text": "第一条 https://example.com/a",
+                "resources": [
+                    {
+                        "kind": "url",
+                        "name": "https://example.com/a",
+                        "url": "https://example.com/a",
+                    }
+                ],
+            },
+            {
+                "sender_id": "333",
+                "sender_name": "Bob",
+                "text": "",
+                "resources": [
+                    {
+                        "kind": "image",
+                        "name": "pic.jpg",
+                        "url": "https://qq.example/pic.jpg",
+                    }
+                ],
+            },
+        ]
+
+    asyncio.run(go())

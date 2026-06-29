@@ -1,0 +1,4 @@
+interface:
+  display_name: "QQ Agent Runtime"
+  short_description: "Keep CLI agents faithful to QQ /task and /code semantics"
+  default_prompt: "Use $qq-agent-runtime when invoking a CLI agent from a QQ bot task."
