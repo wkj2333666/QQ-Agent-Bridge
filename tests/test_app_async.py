@@ -17,7 +17,7 @@ from qq_agent_bridge.cursor_adapter import CustomCommandAdapter  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Job, Policy  # type: ignore
 from qq_agent_bridge.resources import PreparedResource  # type: ignore
-from qq_agent_bridge.types import ChatEvent, ChatResource  # type: ignore
+from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource  # type: ignore
 
 
 def extract_outgoing_prompt_context(prompt: str) -> tuple[str, str]:
@@ -1944,6 +1944,124 @@ def test_unmentioned_group_attachment_is_cached_for_next_sender_mention() -> Non
         assert len(prompts) == 1
         assert "用户附带资源：" in prompts[0]
         assert "downloads/cached.jpg" in prompts[0]
+
+    asyncio.run(go())
+
+
+def test_quoted_voice_resource_is_passed_to_agent_prompt() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        prompts: list[str] = []
+        voice = ChatResource(
+            kind="voice",
+            url="https://qq.example/record/voice.silk",
+            name="voice.silk",
+            duration_seconds=5,
+        )
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            prompts.append(prompt)
+            return "这条语音我收到了"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        async def fake_prepare(ev: ChatEvent) -> tuple[PreparedResource, ...]:
+            assert ev.reply is not None
+            assert ev.reply.resources == (voice,)
+            assert ev.resources == (voice,)
+            return (
+                PreparedResource(
+                    kind="voice",
+                    name="voice.silk",
+                    local_path="downloads/quoted-voice.silk",
+                    duration_seconds=5,
+                ),
+            )
+
+        app.resources.prepare = fake_prepare  # type: ignore[attr-defined, method-assign]
+
+        base = make_ev("@1000000001 /ask 这条语音说了啥", group="group", mid="quoted-voice")
+        ev = ChatEvent(
+            id=base.id,
+            platform=base.platform,
+            chat_id=base.chat_id,
+            sender_id=base.sender_id,
+            is_group=base.is_group,
+            mentioned_bot=base.mentioned_bot,
+            text=base.text,
+            timestamp=base.timestamp,
+            resources=(voice,),
+            reply=ChatReply(
+                message_id="52",
+                sender_id="speaker",
+                text="[语音]",
+                raw_message="[语音]",
+                resources=(voice,),
+            ),
+        )
+
+        await app._handle(ev)
+        await wait_until_sent(adapter, "这条语音我收到了")
+
+        assert len(prompts) == 1
+        assert "被引用的消息：" in prompts[0]
+        assert "引用资源1：voice voice.silk https://qq.example/record/voice.silk" in prompts[0]
+        assert "用户附带资源：" in prompts[0]
+        assert "voice: downloads/quoted-voice.silk duration=5s" in prompts[0]
+
+    asyncio.run(go())
+
+
+def test_quoted_voice_preview_without_resource_fails_fast() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        called = False
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            nonlocal called
+            called = True
+            return "不该启动任务"
+
+        app = make_app(cfg, runner, adapter)
+        base = make_ev("@1000000001 /task 这个语音说了什么", group="group", mid="voice-preview-only")
+        ev = ChatEvent(
+            id=base.id,
+            platform=base.platform,
+            chat_id=base.chat_id,
+            sender_id=base.sender_id,
+            is_group=base.is_group,
+            mentioned_bot=base.mentioned_bot,
+            text=base.text,
+            timestamp=base.timestamp,
+            reply=ChatReply(
+                sender_id="2735842535",
+                text="[语音 10s]",
+                raw_message="[语音 10s]",
+            ),
+        )
+
+        await app._handle(ev)
+
+        assert not called
+        assert adapter.sent == [
+            (
+                "group",
+                True,
+                "我看到了引用语音预览，但没有拿到可处理的语音文件。请直接把语音发给我，或让 QQ/NapCat 提供引用原消息。",
+                "voice-preview-only",
+            )
+        ]
 
     asyncio.run(go())
 

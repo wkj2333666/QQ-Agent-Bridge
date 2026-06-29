@@ -144,6 +144,16 @@ class App:
                 await self._cleanup_policy()
                 return
 
+        if self._missing_quoted_voice_resource(ev, parsed.name):
+            await self._send_text(
+                ev.chat_id,
+                ev.is_group,
+                "我看到了引用语音预览，但没有拿到可处理的语音文件。请直接把语音发给我，或让 QQ/NapCat 提供引用原消息。",
+                ev.id,
+            )
+            await self._cleanup_policy()
+            return
+
         if parsed.name == "help":
             txt = build_help_reply(self.cfg, ev)
             await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
@@ -253,6 +263,21 @@ class App:
         if cfg.allowed_groups and ev.chat_id not in cfg.allowed_groups:
             return False
         return True
+
+    def _missing_quoted_voice_resource(self, ev: ChatEvent, cmd: str) -> bool:
+        if cmd not in {"ask", "plan", "task"} or not ev.reply:
+            return False
+        if self._has_voice_resource(ev):
+            return False
+        quoted_text = (ev.reply.text or ev.reply.raw_message).strip()
+        return quoted_text.startswith("[语音") and quoted_text.endswith("]")
+
+    def _has_voice_resource(self, ev: ChatEvent) -> bool:
+        if any(resource.kind == "voice" for resource in ev.resources):
+            return True
+        if ev.reply and any(resource.kind == "voice" for resource in ev.reply.resources):
+            return True
+        return False
 
     def _schedule_reply(self, job: Job) -> None:
         self._start_heartbeat(job)
