@@ -271,6 +271,21 @@ QQ_AGENT_BRIDGE_CLI_SMOKE=1 python -m pytest tests/test_cli_smoke.py -q
 - `QQ_AGENT_BRIDGE_SMOKE_CODEX_CMD`
 - `QQ_AGENT_BRIDGE_SMOKE_CLAUDE_CMD`
 
+如果要真实调用 agent runtime 跑较慢的 contract E2E：
+
+```bash
+QQ_AGENT_BRIDGE_AGENT_E2E=1 \
+QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
+QQ_AGENT_BRIDGE_E2E_CHAT_MODEL=auto \
+QQ_AGENT_BRIDGE_E2E_TASK_MODEL=kimi-k2.5 \
+python -m pytest tests/test_agent_e2e.py -q
+```
+
+Codex、Claude Code 或自定义 wrapper 可以使用 `custom-cli`：
+设置 `QQ_AGENT_BRIDGE_E2E_RUNTIME=custom-cli`，并提供
+`QQ_AGENT_BRIDGE_E2E_ASK_CMD`、`QQ_AGENT_BRIDGE_E2E_TASK_CMD` 等命令模板。
+模板支持 `{prompt}`、`{workspace}`、`{mode}`、`{model}`、`{stream}`。
+
 ## 仓库卫生
 
 不要提交真实运行状态或敏感信息：

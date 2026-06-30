@@ -300,6 +300,21 @@ QQ_AGENT_BRIDGE_CLI_SMOKE=1 python -m pytest tests/test_cli_smoke.py -q
 You can override commands with `QQ_AGENT_BRIDGE_SMOKE_CURSOR_CMD`,
 `QQ_AGENT_BRIDGE_SMOKE_CODEX_CMD`, or `QQ_AGENT_BRIDGE_SMOKE_CLAUDE_CMD`.
 
+To run slower contract tests against a real agent runtime:
+
+```bash
+QQ_AGENT_BRIDGE_AGENT_E2E=1 \
+QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
+QQ_AGENT_BRIDGE_E2E_CHAT_MODEL=auto \
+QQ_AGENT_BRIDGE_E2E_TASK_MODEL=kimi-k2.5 \
+python -m pytest tests/test_agent_e2e.py -q
+```
+
+For Codex, Claude Code, or another wrapper, set
+`QQ_AGENT_BRIDGE_E2E_RUNTIME=custom-cli` and provide command templates such as
+`QQ_AGENT_BRIDGE_E2E_ASK_CMD` and `QQ_AGENT_BRIDGE_E2E_TASK_CMD`. Templates may
+use `{prompt}`, `{workspace}`, `{mode}`, `{model}`, and `{stream}`.
+
 ## Repository Hygiene
 
 Do not commit real runtime state:

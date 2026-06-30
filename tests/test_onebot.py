@@ -530,6 +530,26 @@ def test_send_at_uses_onebot_at_segment() -> None:
     asyncio.run(go())
 
 
+def test_send_text_can_quote_message() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send("123", True, "这句接得上", "quote-echo", reply_to="43")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_group_msg"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["message"] == [
+            {"type": "reply", "data": {"id": 43}},
+            {"type": "text", "data": {"text": "这句接得上"}},
+        ]
+        assert frame["echo"] == "quote-echo"
+
+    asyncio.run(go())
+
+
 def test_send_ats_uses_multiple_onebot_at_segments() -> None:
     async def go() -> None:
         adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
@@ -547,6 +567,28 @@ def test_send_ats_uses_multiple_onebot_at_segments() -> None:
             {"type": "text", "data": {"text": " 都出来冒个泡"}},
         ]
         assert frame["echo"] == "ats-echo"
+
+    asyncio.run(go())
+
+
+def test_send_ats_can_quote_message_before_mentions() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        await adapter.send_ats("123", ("456", "789"), "都出来冒个泡", "ats-quote", reply_to="43")
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "send_group_msg"
+        assert frame["params"]["group_id"] == 123
+        assert frame["params"]["message"] == [
+            {"type": "reply", "data": {"id": 43}},
+            {"type": "at", "data": {"qq": 456}},
+            {"type": "at", "data": {"qq": 789}},
+            {"type": "text", "data": {"text": " 都出来冒个泡"}},
+        ]
+        assert frame["echo"] == "ats-quote"
 
     asyncio.run(go())
 

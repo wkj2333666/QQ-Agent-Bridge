@@ -745,11 +745,18 @@ class OneBotAdapter:
             await c.close()
         self._conns.clear()
 
-    async def send(self, chat_id: str, is_group: bool, text: str, echo: str | None = None) -> None:
+    async def send(
+        self,
+        chat_id: str,
+        is_group: bool,
+        text: str,
+        echo: str | None = None,
+        reply_to: str | None = None,
+    ) -> None:
         await self._send_text_segments(
             chat_id,
             is_group,
-            [{"type": "text", "data": {"text": text}}],
+            self._reply_segments(reply_to) + [{"type": "text", "data": {"text": text}}],
             echo,
         )
 
@@ -759,8 +766,9 @@ class OneBotAdapter:
         qq: str,
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
-        await self.send_ats(chat_id, (qq,), text, echo)
+        await self.send_ats(chat_id, (qq,), text, echo, reply_to=reply_to)
 
     async def send_ats(
         self,
@@ -768,8 +776,9 @@ class OneBotAdapter:
         qqs: tuple[str, ...],
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
-        segments: list[dict[str, Any]] = []
+        segments: list[dict[str, Any]] = self._reply_segments(reply_to)
         for qq in qqs:
             qq_value: str | int = int(qq) if qq.isdigit() else qq
             segments.append({"type": "at", "data": {"qq": qq_value}})
@@ -780,6 +789,12 @@ class OneBotAdapter:
             segments,
             echo,
         )
+
+    def _reply_segments(self, reply_to: str | None) -> list[dict[str, Any]]:
+        if not reply_to:
+            return []
+        reply_id: str | int = int(reply_to) if reply_to.isdigit() else reply_to
+        return [{"type": "reply", "data": {"id": reply_id}}]
 
     async def send_image(
         self,

@@ -40,7 +40,9 @@ def write_wav(path: Path, duration_seconds: int, sample_rate: int = 8000) -> Non
 class FakeAdapter:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool, str, str | None]] = []
+        self.sent_reply_to: list[tuple[str | None, str | None]] = []
         self.sent_at: list[tuple[str, str, str, str | None]] = []
+        self.sent_at_reply_to: list[tuple[str | None, str | None]] = []
         self.sent_images: list[tuple[str, bool, Path, str | None]] = []
         self.sent_files: list[tuple[str, bool, Path, str | None]] = []
         self.sent_voices: list[tuple[str, bool, Path, str | None]] = []
@@ -51,8 +53,11 @@ class FakeAdapter:
         is_group: bool,
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
         self.sent.append((chat_id, is_group, text, echo))
+        if reply_to is not None:
+            self.sent_reply_to.append((echo, reply_to))
 
     async def send_image(
         self,
@@ -87,8 +92,11 @@ class FakeAdapter:
         qq: str,
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
         self.sent_at.append((chat_id, qq, text, echo))
+        if reply_to is not None:
+            self.sent_at_reply_to.append((echo, reply_to))
 
     async def send_ats(
         self,
@@ -96,9 +104,12 @@ class FakeAdapter:
         qqs: tuple[str, ...],
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
         for qq in qqs:
             self.sent_at.append((chat_id, qq, text, echo))
+        if reply_to is not None:
+            self.sent_at_reply_to.append((echo, reply_to))
 
 
 def make_cfg() -> BridgeConfig:
@@ -134,6 +145,7 @@ def make_ev(
     mid: str = "m1",
     mentioned: bool = True,
     resources: tuple[ChatResource, ...] = (),
+    reply: ChatReply | None = None,
 ) -> ChatEvent:
     return ChatEvent(
         id=mid,
@@ -145,6 +157,7 @@ def make_ev(
         text=text,
         timestamp=1,
         resources=resources,
+        reply=reply,
     )
 
 
@@ -532,6 +545,68 @@ def test_unmentioned_group_messages_can_trigger_batched_proactive_reply() -> Non
         assert adapter.sent == [
             ("group", True, "我插一句，先看现象再猜原因会稳一点。", "proactive-pro-3")
         ]
+        assert adapter.sent_reply_to == [("proactive-pro-3", "pro-3")]
+
+    asyncio.run(go())
+
+
+def test_direct_mention_chat_reply_quotes_current_message() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.cooldown_seconds = 0
+        cfg.proactive.quiet_after_bot_seconds = 0
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            assert "无命令 @bot 消息" in prompt
+            return '{"action": "chat", "reply": "这句我接住了"}'
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@1000000001 原神牛逼", group="group", mentioned=True, mid="mention-chat"))
+        await wait_until_sent(adapter, "这句我接住了")
+
+        assert adapter.sent == [("group", True, "这句我接住了", "mention-mention-chat")]
+        assert adapter.sent_reply_to == [("mention-mention-chat", "mention-chat")]
+
+    asyncio.run(go())
+
+
+def test_direct_mention_chat_reply_quotes_only_first_message() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.cooldown_seconds = 0
+        cfg.proactive.quiet_after_bot_seconds = 0
+        cfg.proactive.reply_message_delay_seconds = 0
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(*args: Any, **kwargs: Any) -> str:
+            return '{"action": "chat", "messages": [{"text": "第一句"}, {"text": "第二句"}]}'
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@1000000001 接两句", group="group", mentioned=True, mid="mention-multi"))
+        await wait_until_sent(adapter, "第二句")
+
+        assert adapter.sent == [
+            ("group", True, "第一句", "mention-mention-multi-0"),
+            ("group", True, "第二句", "mention-mention-multi-1"),
+        ]
+        assert adapter.sent_reply_to == [("mention-mention-multi-0", "mention-multi")]
 
     asyncio.run(go())
 
@@ -564,6 +639,7 @@ def test_unmentioned_group_proactive_reply_can_at_recent_sender() -> None:
         await app.proactive.stop()
 
         assert adapter.sent_at == [("group", "12345", "你这个梗接住了", "proactive-pro-at-3")]
+        assert adapter.sent_at_reply_to == [("proactive-pro-at-3", "pro-at-3")]
         assert adapter.sent == []
 
     asyncio.run(go())
@@ -1107,6 +1183,48 @@ def test_self_question_uses_local_reply_without_cursor() -> None:
         assert "助手" in reply
         for forbidden in ("Cursor", "cursor", "NapCat", "OneBot", "/home/", "token"):
             assert forbidden not in reply
+
+    asyncio.run(go())
+
+
+def test_events_from_bot_self_are_ignored() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.bot.self_id = "1000000001"
+        called = False
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(*args: Any, **kwargs: Any) -> str:
+            nonlocal called
+            called = True
+            return "不该回复自己"
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(
+            make_ev(
+                "@1000000001 这是 bot 自己发出的群消息",
+                sender="1000000001",
+                group="group",
+                mentioned=True,
+                mid="self-group",
+            )
+        )
+        await app._handle(
+            make_ev(
+                "这是 bot 自己发出的私聊消息",
+                sender="1000000001",
+                mentioned=True,
+                mid="self-private",
+            )
+        )
+
+        assert not called
+        assert adapter.sent == []
 
     asyncio.run(go())
 
@@ -2251,6 +2369,96 @@ def test_reset_clears_current_conversation_memory() -> None:
         assert "历史对话：" not in prompts[1]
         assert "第一轮" not in prompts[1]
         assert "ambient 背景" not in prompts[1]
+
+    asyncio.run(go())
+
+
+def test_reset_clears_pending_proactive_batch() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 60
+        cfg.proactive.min_messages = 3
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        await app._handle(make_ev("先攒着别发", group="group", mentioned=False, mid="pending-reset-1"))
+        assert "group" in app.proactive._batches  # type: ignore[attr-defined]
+
+        await app._handle(make_ev("/reset", sender="owner", group="group", mid="pending-reset-2"))
+
+        assert "group" not in app.proactive._batches  # type: ignore[attr-defined]
+        assert "group" not in app.proactive._timers  # type: ignore[attr-defined]
+
+    asyncio.run(go())
+
+
+def test_profile_update_clears_pending_proactive_batch(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 60
+        cfg.proactive.min_messages = 3
+        cfg.profiles.default = "旧默认人设"
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "bot: {self_id: '1000000001'}\n"
+            "onebot: {host: 127.0.0.1, port: 1, access_token: ''}\n"
+            "agent: {default_workspace: /tmp}\n"
+            "auth: {owners: ['owner'], allowed_users: ['reader'], allowed_groups: ['group']}\n"
+            "commands: {profile: true, reset: true}\n"
+            "profiles:\n  default: 旧默认人设\n  groups: {}\n  users: {}\n",
+            encoding="utf-8",
+        )
+
+        app = App(cfg, config_path=config_path)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        await app._handle(make_ev("这个旧人设别带进下一轮", group="group", mentioned=False, mid="pending-profile-1"))
+        assert "group" in app.proactive._batches  # type: ignore[attr-defined]
+
+        await app._handle(
+            make_ev("/profile set 你是新的群聊技术搭子", sender="owner", group="group", mid="pending-profile-2")
+        )
+
+        assert "group" not in app.proactive._batches  # type: ignore[attr-defined]
+        assert "group" not in app.proactive._timers  # type: ignore[attr-defined]
+
+    asyncio.run(go())
+
+
+def test_denied_profile_update_keeps_pending_proactive_batch(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 60
+        cfg.proactive.min_messages = 3
+        config_path = tmp_path / "config.yml"
+        config_path.write_text(
+            "bot: {self_id: '1000000001'}\n"
+            "onebot: {host: 127.0.0.1, port: 1, access_token: ''}\n"
+            "agent: {default_workspace: /tmp}\n"
+            "auth: {owners: ['owner'], allowed_users: ['reader'], allowed_groups: ['group']}\n"
+            "commands: {profile: true}\n"
+            "profiles:\n  default: 默认\n  groups: {}\n  users: {}\n",
+            encoding="utf-8",
+        )
+
+        app = App(cfg, config_path=config_path)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        await app._handle(make_ev("这条还在等插话", group="group", mentioned=False, mid="pending-denied-1"))
+        assert "group" in app.proactive._batches  # type: ignore[attr-defined]
+
+        await app._handle(
+            make_ev("/profile set 非 owner 不该成功", sender="reader", group="group", mid="pending-denied-2")
+        )
+
+        assert "group" in app.proactive._batches  # type: ignore[attr-defined]
 
     asyncio.run(go())
 
