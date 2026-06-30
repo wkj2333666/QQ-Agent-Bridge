@@ -310,6 +310,11 @@ QQ_AGENT_BRIDGE_E2E_TASK_MODEL=kimi-k2.5 \
 python -m pytest tests/test_agent_e2e.py -q
 ```
 
+For `cursor-cli`, these tests use `bwrap` by default so Cursor can trust the
+temporary pytest workspace without an interactive prompt. Set
+`QQ_AGENT_BRIDGE_E2E_BWRAP=0` only if your command wrapper handles workspace
+trust another way.
+
 For Codex, Claude Code, or another wrapper, set
 `QQ_AGENT_BRIDGE_E2E_RUNTIME=custom-cli` and provide command templates such as
 `QQ_AGENT_BRIDGE_E2E_ASK_CMD` and `QQ_AGENT_BRIDGE_E2E_TASK_CMD`. Templates may
