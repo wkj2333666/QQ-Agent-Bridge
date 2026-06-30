@@ -5,6 +5,7 @@ import asyncio
 import os
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -36,8 +37,10 @@ def _make_cfg(workspace: Path, mode: str = "ask") -> BridgeConfig:
     cfg.agent.env_runner = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_RUNNER", "")
     cfg.agent.env_name = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME", "")
     cfg.agent.require_env = False
-    cfg.agent.use_bwrap = os.environ.get("QQ_AGENT_BRIDGE_E2E_BWRAP", "") == "1"
-    cfg.agent.force_task_tools = False
+    cfg.agent.use_bwrap = os.environ.get("QQ_AGENT_BRIDGE_E2E_BWRAP", "1") != "0"
+    if runtime == "cursor-cli" and cfg.agent.use_bwrap and not shutil.which(cfg.agent.bwrap_binary):
+        pytest.skip("cursor-cli E2E needs bwrap for temporary workspace trust; set QQ_AGENT_BRIDGE_E2E_BWRAP=0 to override")
+    cfg.agent.force_task_tools = runtime == "cursor-cli" and cfg.agent.use_bwrap
     cfg.agent.max_runtime_seconds = int(os.environ.get("QQ_AGENT_BRIDGE_E2E_TIMEOUT", "90"))
     cfg.agent.max_output_chars = 8000
     cfg.resources.root = "downloads/qq-agent-bridge"
@@ -65,6 +68,40 @@ def _make_ev(text: str, chat_id: str = "e2e-user") -> ChatEvent:
     )
 
 
+def test_cursor_e2e_uses_bwrap_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_RUNTIME", raising=False)
+    monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_BWRAP", raising=False)
+
+    cfg = _make_cfg(tmp_path, "ask")
+
+    assert cfg.agent.runtime == "cursor-cli"
+    assert cfg.agent.use_bwrap
+
+
+def test_cursor_e2e_forces_task_tools_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_RUNTIME", raising=False)
+    monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_BWRAP", raising=False)
+
+    cfg = _make_cfg(tmp_path, "task")
+
+    assert cfg.agent.force_task_tools
+
+
+def test_cursor_e2e_can_disable_bwrap_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("QQ_AGENT_BRIDGE_E2E_RUNTIME", "cursor-cli")
+    monkeypatch.setenv("QQ_AGENT_BRIDGE_E2E_BWRAP", "0")
+
+    cfg = _make_cfg(tmp_path, "ask")
+
+    assert not cfg.agent.use_bwrap
+
+
 async def _run_agent(prompt: str, cfg: BridgeConfig, mode: str, model: str | None) -> str:
     adapter = build_agent_adapter(cfg)
     return await adapter.run(prompt, cfg.agent.default_workspace, mode, model=model)
@@ -72,7 +109,7 @@ async def _run_agent(prompt: str, cfg: BridgeConfig, mode: str, model: str | Non
 
 def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:
     _require_e2e()
-    cfg = _make_cfg(tmp_path, "ask")
+    cfg = _make_cfg(tmp_path, "task")
     token = "QQ_AGENT_BRIDGE_E2E_OK_FIXED"
     prompt = build_agent_prompt(
         "ask",
@@ -81,7 +118,7 @@ def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:
         profile_prompt="你是 QQ bot 测试对象，必须严格遵守当前用户要求。",
     )
 
-    out = asyncio.run(_run_agent(prompt, cfg, "ask", os.environ.get("QQ_AGENT_BRIDGE_E2E_CHAT_MODEL", "auto")))
+    out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_CHAT_MODEL", "auto")))
 
     assert token in out
     assert "Cursor" not in out
