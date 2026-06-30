@@ -81,6 +81,8 @@ class App:
         )
 
     async def _handle(self, ev: ChatEvent) -> None:
+        if self._is_self_event(ev):
+            return
         if ev.is_group and not ev.mentioned_bot:
             if self._should_cache_unmentioned_resources(ev):
                 self.attachment_cache.remember(ev)
@@ -176,7 +178,15 @@ class App:
             return
 
         if parsed.name == "profile":
+            profile_action, _profile_value = self._parse_profile_args(parsed.args)
             txt = self._handle_profile_command(ev, parsed.args)
+            if (
+                ev.is_group
+                and profile_action in {"set", "clear"}
+                and not txt.startswith("[denied]")
+                and not txt.startswith("[error]")
+            ):
+                self.proactive.reset_chat(ev.chat_id)
             await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
             await self._cleanup_policy()
             return
@@ -186,6 +196,8 @@ class App:
                 self.memory.reset(ev)
             if self.cfg.ambient_memory.enabled and ev.is_group:
                 self.ambient_memory.reset(ev)
+            if ev.is_group:
+                self.proactive.reset_chat(ev.chat_id)
             await self._send_text(ev.chat_id, ev.is_group, "已清空当前会话记忆和最近群聊背景", ev.id)
             await self._cleanup_policy()
             return
@@ -244,6 +256,9 @@ class App:
             if progress:
                 await self._send_text(ev.chat_id, ev.is_group, progress, f"{ev.id}-progress")
             self._schedule_reply(job)
+
+    def _is_self_event(self, ev: ChatEvent) -> bool:
+        return bool(self.cfg.bot.self_id and ev.sender_id == self.cfg.bot.self_id)
 
     def _should_cache_unmentioned_resources(self, ev: ChatEvent) -> bool:
         if not self.cfg.resources.enabled or not self.cfg.resources.cache_enabled:
@@ -373,8 +388,9 @@ class App:
         is_group: bool,
         text: str,
         echo: str | None = None,
+        reply_to: str | None = None,
     ) -> None:
-        await self.adapter.send(chat_id, is_group, text, echo)
+        await self.adapter.send(chat_id, is_group, text, echo, reply_to=reply_to)
         if is_group:
             self.proactive.record_bot_send(chat_id)
 
@@ -384,15 +400,16 @@ class App:
         text: str,
         echo: str | None = None,
         ats: tuple[str, ...] = (),
+        reply_to: str | None = None,
     ) -> None:
         if ats:
             if len(ats) == 1:
-                await self.adapter.send_at(chat_id, ats[0], text, echo)
+                await self.adapter.send_at(chat_id, ats[0], text, echo, reply_to=reply_to)
             else:
-                await self.adapter.send_ats(chat_id, ats, text, echo)
+                await self.adapter.send_ats(chat_id, ats, text, echo, reply_to=reply_to)
             self.proactive.record_bot_send(chat_id)
             return
-        await self._send_text(chat_id, True, text, echo)
+        await self._send_text(chat_id, True, text, echo, reply_to=reply_to)
 
     async def _send_mention_decision(self, ev: ChatEvent, decision: MentionDecision) -> None:
         replies = decision.replies
@@ -401,7 +418,8 @@ class App:
             if idx and delay:
                 await asyncio.sleep(delay)
             echo = f"mention-{ev.id}-{idx}" if len(replies) > 1 else f"mention-{ev.id}"
-            await self._send_proactive(ev.chat_id, reply.text, echo, reply.ats)
+            reply_to = ev.id if idx == 0 else None
+            await self._send_proactive(ev.chat_id, reply.text, echo, reply.ats, reply_to=reply_to)
 
     async def _reload_config(self) -> tuple[bool, str]:
         try:
