@@ -320,6 +320,23 @@ For Codex, Claude Code, or another wrapper, set
 `QQ_AGENT_BRIDGE_E2E_ASK_CMD` and `QQ_AGENT_BRIDGE_E2E_TASK_CMD`. Templates may
 use `{prompt}`, `{workspace}`, `{mode}`, `{model}`, and `{stream}`.
 
+To run semantic capability evals, enable the opt-in suite below. These tests run
+the target agent, then ask a judge agent to score whether the result satisfied
+the capability criteria. Hard checks still verify required tokens, forbidden
+claims, and similar deterministic conditions.
+
+```bash
+QQ_AGENT_BRIDGE_CAPABILITY_EVAL=1 \
+QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
+QQ_AGENT_BRIDGE_CAPABILITY_CHAT_MODEL=auto \
+QQ_AGENT_BRIDGE_CAPABILITY_TASK_MODEL=kimi-k2.5 \
+python -m pytest tests/test_agent_capability_eval.py -q
+```
+
+By default the judge uses the same runtime. Override it with
+`QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_RUNTIME`, `QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_MODEL`,
+or `QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_ASK_CMD` when you want an independent judge.
+
 ## Repository Hygiene
 
 Do not commit real runtime state:
