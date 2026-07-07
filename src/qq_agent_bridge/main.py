@@ -12,7 +12,7 @@ from pathlib import Path
 from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter
 from .config import BridgeConfig
-from .memory import ConversationMemory, GroupAmbientMemory, should_include_ambient_for_task
+from .memory import ConversationMemory, GroupAmbientMemory
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
 from .outgoing_resources import collect_outgoing_resources
@@ -78,6 +78,7 @@ class App:
             self.agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
+            remember=self._remember_proactive_exchange,
         )
 
     async def _handle(self, ev: ChatEvent) -> None:
@@ -87,7 +88,9 @@ class App:
             if self._should_cache_unmentioned_resources(ev):
                 self.attachment_cache.remember(ev)
             if self._should_remember_ambient(ev):
-                self.ambient_memory.remember(ev)
+                remembered = self.ambient_memory.remember(ev)
+                if remembered and self.cfg.memory.enabled:
+                    self.memory.append_user_message(ev)
             if not self.echo_only:
                 self.proactive.observe(ev)
             return
@@ -353,7 +356,7 @@ class App:
             )
         else:
             clean_result, outgoing, warnings = result, (), []
-        if self.cfg.memory.enabled and job.cmd in {"ask", "plan"} and clean_result.strip():
+        if self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"} and clean_result.strip():
             self.memory.append_exchange(job.event, job.args or job.event.text, clean_result)
         reply_text = clean_result
         if warnings:
@@ -420,6 +423,40 @@ class App:
             echo = f"mention-{ev.id}-{idx}" if len(replies) > 1 else f"mention-{ev.id}"
             reply_to = ev.id if idx == 0 else None
             await self._send_proactive(ev.chat_id, reply.text, echo, reply.ats, reply_to=reply_to)
+        if self.cfg.memory.enabled and replies:
+            self.memory.append_exchange(ev, ev.text, "\n".join(reply.text for reply in replies))
+
+    def _remember_proactive_exchange(self, batch, replies) -> None:
+        if not self.cfg.memory.enabled or not batch or not replies:
+            return
+        for msg in batch:
+            ev = ChatEvent(
+                id=msg.id,
+                platform="qq",
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                is_group=True,
+                mentioned_bot=False,
+                text=msg.text,
+                timestamp=msg.timestamp,
+            )
+            self.memory.append_user_message(ev)
+        last = batch[-1]
+        ev = ChatEvent(
+            id=f"proactive:{last.id}",
+            platform="qq",
+            chat_id=last.chat_id,
+            sender_id=self.cfg.bot.self_id or "bot",
+            is_group=True,
+            mentioned_bot=False,
+            text="",
+            timestamp=last.timestamp,
+        )
+        self.memory.append_assistant_message(
+            ev,
+            "\n".join(reply.text for reply in replies),
+            message_id=f"proactive:{last.id}:assistant",
+        )
 
     async def _reload_config(self) -> tuple[bool, str]:
         try:
@@ -456,6 +493,7 @@ class App:
             self.agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
+            remember=self._remember_proactive_exchange,
         )
         return True, "配置已重载。OneBot 连接参数变更需要重启。"
 
@@ -629,9 +667,7 @@ class App:
             return ""
         if not self.cfg.is_group_allowed(ev.chat_id):
             return ""
-        if cmd == "ask":
-            return self.ambient_memory.format_context(ev)
-        if cmd == "task" and should_include_ambient_for_task(text):
+        if cmd in {"ask", "plan", "task", "code"}:
             return self.ambient_memory.format_context(ev)
         return ""
 

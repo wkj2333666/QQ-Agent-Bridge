@@ -11,6 +11,7 @@ from .types import ChatEvent
 class MemoryMessage:
     speaker: str
     text: str
+    message_id: str = ""
 
 
 class ConversationMemory:
@@ -25,11 +26,28 @@ class ConversationMemory:
         return f"private:{ev.sender_id}"
 
     def append_exchange(self, ev: ChatEvent, user_text: str, assistant_text: str) -> None:
+        user_label = ev.sender_id if ev.is_group else "用户"
+        self._append(ev, user_label, user_text, ev.id)
+        self._append(ev, "助手", assistant_text, f"{ev.id}:assistant" if ev.id else "")
+
+    def append_user_message(self, ev: ChatEvent, text: str | None = None) -> None:
+        user_label = ev.sender_id if ev.is_group else "用户"
+        self._append(ev, user_label, ev.text if text is None else text, ev.id)
+
+    def append_assistant_message(self, ev: ChatEvent, text: str, message_id: str = "") -> None:
+        self._append(ev, "助手", text, message_id or (f"{ev.id}:assistant" if ev.id else ""))
+
+    def _append(self, ev: ChatEvent, speaker: str, text: str, message_id: str = "") -> None:
+        clean = text.strip()
+        if not clean:
+            return
         key = self.key_for(ev)
         messages = self._messages.setdefault(key, [])
-        user_label = ev.sender_id if ev.is_group else "用户"
-        messages.append(MemoryMessage(user_label, user_text.strip()))
-        messages.append(MemoryMessage("助手", assistant_text.strip()))
+        if message_id and any(
+            msg.message_id == message_id and msg.speaker == speaker and msg.text == clean for msg in messages
+        ):
+            return
+        messages.append(MemoryMessage(speaker, clean, message_id))
         self._trim(key)
 
     def format_history(self, ev: ChatEvent) -> str:
