@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.proactive import ProactiveSpeaker  # type: ignore
-from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource  # type: ignore
+from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource, ChatSegment  # type: ignore
 
 
 def make_ev(text: str, mid: str, sender: str = "reader", group: str = "group") -> ChatEvent:
@@ -415,6 +415,97 @@ def test_proactive_prompt_includes_quoted_context_from_batch() -> None:
         assert "image" in prompts[0]
 
     asyncio.run(go())
+
+
+def test_proactive_prompt_marks_other_mentions_as_not_bot() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.bot.self_id = "99999"
+        cfg.proactive.min_messages = 1
+        prompts: list[str] = []
+
+        class FakeCursor:
+            async def run(
+                self,
+                prompt: str,
+                workspace: str | None = None,
+                mode: str = "ask",
+                model: str | None = None,
+                progress: Any = None,
+            ) -> str:
+                prompts.append(prompt)
+                return '{"speak": false, "reply": ""}'
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            raise AssertionError("should not send")
+
+        speaker = ProactiveSpeaker(cfg, FakeCursor(), send)  # type: ignore[arg-type]
+        speaker.observe(
+            ChatEvent(
+                id="mention-other",
+                platform="qq",
+                chat_id="group",
+                sender_id="reader",
+                is_group=True,
+                mentioned_bot=False,
+                text="@12345 你不要再吃那个了",
+                timestamp=1,
+                segments=(
+                    ChatSegment(type="mention", text="@12345 ", qq="12345"),
+                    ChatSegment(type="text", text="你不要再吃那个了"),
+                ),
+            )
+        )
+
+        await wait_for(lambda: len(prompts) == 1)
+        await speaker.stop()
+
+        assert "消息 @对象：12345(不是你)" in prompts[0]
+        assert "不是 @你的内容不要代入自己" in prompts[0]
+
+    asyncio.run(go())
+
+
+def test_direct_mention_prompt_preserves_other_mentions_and_strips_only_bot_mention() -> None:
+    cfg = make_cfg()
+    cfg.bot.self_id = "99999"
+
+    async def send(
+        chat_id: str,
+        text: str,
+        echo: str | None = None,
+        ats: tuple[str, ...] = (),
+        reply_to: str | None = None,
+    ) -> None:
+        raise AssertionError("should not send")
+
+    speaker = ProactiveSpeaker(cfg, object(), send)
+    ev = ChatEvent(
+        id="direct-other-first",
+        platform="qq",
+        chat_id="group",
+        sender_id="reader",
+        is_group=True,
+        mentioned_bot=True,
+        text="@12345 @99999 这句话是什么意思",
+        timestamp=1,
+        segments=(
+            ChatSegment(type="mention", text="@12345 ", qq="12345"),
+            ChatSegment(type="mention", text="@99999 ", qq="99999"),
+            ChatSegment(type="text", text="这句话是什么意思"),
+        ),
+    )
+
+    prompt = speaker._build_mention_prompt(ev)  # type: ignore[attr-defined]
+
+    assert "当前消息 @对象：12345(不是你), 99999(你)" in prompt
+    assert "无命令 @bot 消息：@12345 这句话是什么意思" in prompt
 
 
 def test_proactive_sends_up_to_three_messages_with_allowed_at() -> None:

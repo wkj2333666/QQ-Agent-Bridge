@@ -281,6 +281,116 @@ def test_bare_group_mention_can_be_promoted_to_ask_by_chat_decision() -> None:
     asyncio.run(go())
 
 
+def test_task_result_is_shared_with_following_ask_context() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        prompts: list[tuple[str, str]] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            prompts.append((mode, prompt))
+            if mode == "task":
+                return "TASK_RESULT_42"
+            return "ASK_DONE"
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@123456 /task 记住这个任务结果", group="group", mid="task-shared"))
+        await wait_until_sent(adapter, "TASK_RESULT_42")
+        await app._handle(make_ev("@123456 /ask 刚才任务结果是什么", group="group", mid="ask-after-task"))
+        await wait_until_sent(adapter, "ASK_DONE")
+
+        ask_prompts = [prompt for mode, prompt in prompts if mode == "ask" and "回答模式" in prompt]
+        assert ask_prompts
+        assert "TASK_RESULT_42" in ask_prompts[-1]
+
+    asyncio.run(go())
+
+
+def test_proactive_chat_reply_is_shared_with_following_ask_context() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.proactive.min_messages = 1
+        cfg.proactive.batch_seconds = 0.01
+        cfg.proactive.quiet_after_bot_seconds = 0
+        cfg.proactive.cooldown_seconds = 0
+        prompts: list[str] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            if "下面是群友最近几条未 @ 你的聊天" in prompt:
+                return '{"speak": true, "reply": "PROACTIVE_REPLY_42"}'
+            prompts.append(prompt)
+            return "ASK_AFTER_PROACTIVE"
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("群友刚说了一句背景", group="group", mid="ambient-1", mentioned=False))
+        await wait_until_sent(adapter, "PROACTIVE_REPLY_42")
+        await app._handle(make_ev("@123456 /ask 你刚才接了什么话", group="group", mid="ask-after-proactive"))
+        await wait_until_sent(adapter, "ASK_AFTER_PROACTIVE")
+
+        assert prompts
+        assert "群友刚说了一句背景" in prompts[-1]
+        assert "PROACTIVE_REPLY_42" in prompts[-1]
+
+    asyncio.run(go())
+
+
+def test_task_prompt_includes_recent_ordinary_group_chat_without_magic_keywords() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        prompts: list[str] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            if mode == "task":
+                prompts.append(prompt)
+                return "TASK_DONE"
+            return '{"speak": false, "reply": ""}'
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("昨天麦当劳吃完肚子疼", group="group", mid="ordinary-1", mentioned=False))
+        await app._handle(make_ev("@123456 /task 生成一个简短建议", group="group", mid="task-after-ordinary"))
+        await wait_until_sent(adapter, "TASK_DONE")
+
+        assert prompts
+        assert "昨天麦当劳吃完肚子疼" in prompts[-1]
+
+    asyncio.run(go())
+
+
 def test_bare_group_mention_ask_promotion_ignores_interjection_cooldown() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -1742,7 +1852,7 @@ def test_unmentioned_command_like_text_is_not_ambient_context() -> None:
     asyncio.run(go())
 
 
-def test_task_uses_ambient_context_only_when_referencing_prior_chat() -> None:
+def test_task_uses_ambient_context_for_recent_group_chat() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
@@ -1770,14 +1880,15 @@ def test_task_uses_ambient_context_only_when_referencing_prior_chat() -> None:
         await app._handle(make_ev("/task 根据刚才聊天整理行动项", group="group", mid="task-amb-3"))
         await wait_until_sent(adapter, "reply 2")
 
-        assert "最近群聊背景：" not in prompts[0]
+        assert "今天讨论接口超时" in prompts[0]
+        assert "最近群聊背景：" in prompts[0]
         assert "今天讨论接口超时" in prompts[1]
         assert "最近群聊背景：" in prompts[1]
 
     asyncio.run(go())
 
 
-def test_code_does_not_include_ambient_context() -> None:
+def test_code_includes_recent_group_chat_context() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
@@ -1804,8 +1915,8 @@ def test_code_does_not_include_ambient_context() -> None:
         await app._handle(make_ev("/code 根据刚才聊天改 README", sender="owner", group="group", mid="code-amb-2"))
         await wait_until_sent(adapter, "done")
 
-        assert "最近群聊背景：" not in prompts[0]
-        assert "刚才说要改 README" not in prompts[0]
+        assert "最近群聊背景：" in prompts[0]
+        assert "刚才说要改 README" in prompts[0]
 
     asyncio.run(go())
 

@@ -23,6 +23,7 @@ SendProactive = Callable[[str, str, str | None, tuple[str, ...], str | None], Aw
 AmbientContext = Callable[[str, int], str]
 
 _LEADING_TEXT_AT_RE = re.compile(r"^@(\d{5,12})(?:\s+|$)")
+_TEXT_AT_RE = re.compile(r"@(\d{5,12})")
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class _QueuedMessage:
     text: str
     timestamp: int
     reply_context: str = ""
+    mentions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,9 @@ class MentionDecision:
     replies: tuple[ProactiveReplyMessage, ...] = ()
 
 
+RememberProactive = Callable[[tuple[_QueuedMessage, ...], tuple[ProactiveReplyMessage, ...]], None]
+
+
 class ProactiveSpeaker:
     """Collect unmentioned group messages and occasionally say one short line."""
 
@@ -57,12 +62,14 @@ class ProactiveSpeaker:
         send: SendProactive,
         now: Callable[[], float] | None = None,
         ambient_context: AmbientContext | None = None,
+        remember: RememberProactive | None = None,
     ) -> None:
         self.cfg = cfg
         self.agent = agent
         self.send = send
         self.now = now or time.monotonic
         self.ambient_context = ambient_context
+        self.remember = remember
         self._batches: dict[str, list[_QueuedMessage]] = {}
         self._timers: dict[str, asyncio.Task[None]] = {}
         self._max_seen = max(1, cfg.max_seen_messages)
@@ -85,6 +92,7 @@ class ProactiveSpeaker:
                 text=ev.text.strip(),
                 timestamp=ev.timestamp,
                 reply_context=self._format_reply_context(ev.reply),
+                mentions=self._message_mentions(ev),
             )
         )
         self._debug(
@@ -277,6 +285,8 @@ class ProactiveSpeaker:
                 quote=reply_to,
                 reply=reply.text,
             )
+        if self.remember:
+            self.remember(tuple(batch), tuple(replies))
         self._record_proactive_send(chat_id)
 
     async def _send_reply(
@@ -370,7 +380,12 @@ class ProactiveSpeaker:
         lines: list[str] = []
         for msg in batch[-self.cfg.proactive.max_batch_messages :]:
             text = msg.text.replace("\n", " ").strip()
-            lines.append(f"{msg.sender_id}: {text}")
+            mentions = getattr(msg, "mentions", None)
+            if mentions is None and isinstance(msg, ChatEvent):
+                mentions = self._message_mentions(msg)
+            mentions = mentions or ()
+            mention_label = self._format_mention_targets(mentions)
+            lines.append(f"{msg.sender_id}（消息 @对象：{mention_label}）: {text}")
         transcript = "\n".join(lines)
         if len(transcript) > max_chars:
             transcript = transcript[-max_chars:]
@@ -398,6 +413,7 @@ class ProactiveSpeaker:
 - 不要输出 Markdown 大标题、长列表、CQ码、@全体或假装执行动作。
 - 回复必须像 QQ 群聊，中文，1-3条短消息优先；一次最多 {self._max_reply_messages()} 条，每条最多 {self.cfg.proactive.max_reply_chars} 字。
 - 可以 at 最近聊天里的真实发送者，但只能在确实接某个人的话时使用；要 at 时使用 JSON 的 at 字段，不要把 @QQ 写进 text；不要 @ 全体，不要 @ 不在最近聊天里的 QQ。
+- 不是 @你的内容不要代入自己；消息行里的“@对象：xxx(不是你)”表示它在叫别人，只能当作背景理解。
 - 只输出 JSON，不要输出 JSON 之外的任何文字。
 
 输出格式：
@@ -415,9 +431,10 @@ class ProactiveSpeaker:
 
     def _build_mention_prompt(self, ev: ChatEvent) -> str:
         max_chars = max(200, self.cfg.proactive.max_prompt_chars)
-        content = self._strip_leading_mentions(ev.text)
+        content = self._strip_bot_mentions(ev.text)
         if len(content) > max_chars:
             content = content[-max_chars:]
+        mention_targets = self._format_mention_targets(self._message_mentions(ev))
         ambient = ""
         if self.ambient_context:
             ambient = self.ambient_context(ev.chat_id, ev.timestamp).strip()
@@ -467,6 +484,7 @@ class ProactiveSpeaker:
 - 不要输出 Markdown 大标题、长列表、CQ码、@全体或假装执行动作。
 - 可以 at 当前发送者，但只有确实接 Ta 的话时才用 JSON 的 at 字段；不要把 @QQ 写进 text。
 - 不要引入当前消息、被引用消息或最近群聊背景里没有出现的具体事件、身体状态、关系或设定；没把握就说接错了或不确定。
+- 当前消息里 @别人 不等于 @你；不是 @你的内容不要代入自己，只能作为上下文。
 {self_correction_rule}- 只输出 JSON，不要输出 JSON 之外的任何文字。
 
 输出格式：
@@ -477,6 +495,7 @@ class ProactiveSpeaker:
 {{"action": "silent"}}
 
 当前发送者：{ev.sender_id}
+当前消息 @对象：{mention_targets}
 无命令 @bot 消息：{content}
 {reply_section}
 {ambient_section}
@@ -626,6 +645,31 @@ class ProactiveSpeaker:
                 return ""
             t = parts[1].strip()
         return t
+
+    def _strip_bot_mentions(self, text: str) -> str:
+        self_id = str(self.cfg.bot.self_id or "").strip()
+        if not self_id:
+            return text.strip()
+        stripped = re.sub(rf"@{re.escape(self_id)}(?:\s+|$)", " ", text.strip())
+        return " ".join(stripped.split())
+
+    def _message_mentions(self, ev: ChatEvent) -> tuple[str, ...]:
+        mentions: list[str] = []
+        for seg in ev.segments:
+            if seg.type == "mention" and seg.qq:
+                mentions.append(str(seg.qq))
+        mentions.extend(_TEXT_AT_RE.findall(ev.text))
+        return self._dedupe_ats(tuple(mentions))
+
+    def _format_mention_targets(self, mentions: tuple[str, ...]) -> str:
+        if not mentions:
+            return "无"
+        self_id = str(self.cfg.bot.self_id or "").strip()
+        parts = []
+        for qq in mentions:
+            label = "你" if self_id and qq == self_id else "不是你"
+            parts.append(f"{qq}({label})")
+        return ", ".join(parts)
 
     def _raw_reply_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_messages = payload.get("messages")
