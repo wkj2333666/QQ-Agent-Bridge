@@ -417,8 +417,12 @@ class CursorAdapter:
         )
         buffer = ProgressLineBuffer()
         output_parts: list[str] = []
+        assistant_messages: list[str] = []
         async for line in self._stream_lines(proc.stdout):
-            text = self._stream_text_from_line(line)
+            kind, text = self._stream_event_from_line(line)
+            if kind == "message":
+                assistant_messages.append(text)
+                continue
             clean_lines, progress_lines = buffer.feed(text)
             output_parts.extend(clean_lines)
             for item in progress_lines:
@@ -435,7 +439,31 @@ class CursorAdapter:
                 logger.exception("progress callback failed")
         await proc.wait()
         stderr = await stderr_task
-        return "\n".join(output_parts), (stderr or b"").decode("utf-8", "replace")
+        delta_output = "\n".join(output_parts).strip()
+        final_parts: list[str] = []
+        intermediate_messages: list[str] = []
+        if assistant_messages:
+            if delta_output:
+                intermediate_messages.extend(assistant_messages)
+                final_parts.append(delta_output)
+            else:
+                intermediate_messages.extend(assistant_messages[:-1])
+                final_parts.append(assistant_messages[-1])
+        else:
+            final_parts.append(delta_output)
+        for message in intermediate_messages:
+            clean_message, progress_lines = strip_progress_directives(message)
+            for item in progress_lines:
+                try:
+                    await progress(item)
+                except Exception:  # noqa: BLE001 - progress should not fail the job
+                    logger.exception("progress callback failed")
+            if clean_message.strip():
+                try:
+                    await progress(clean_message)
+                except Exception:  # noqa: BLE001 - progress should not fail the job
+                    logger.exception("progress callback failed")
+        return "\n".join(part for part in final_parts if part).strip(), (stderr or b"").decode("utf-8", "replace")
 
     async def _stream_lines(self, stream: asyncio.StreamReader):
         pending = b""
@@ -451,17 +479,33 @@ class CursorAdapter:
             yield pending.decode("utf-8", "replace")
 
     def _stream_text_from_line(self, line: str) -> str:
+        _kind, text = self._stream_event_from_line(line)
+        return text
+
+    def _stream_event_from_line(self, line: str) -> tuple[str, str]:
         stripped = line.strip()
         if not stripped:
-            return line
+            return "delta", line
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
-            return line
+            return "delta", line
         if not self._is_assistant_stream_payload(payload):
-            return ""
+            return "", ""
         text = self._extract_stream_text(payload)
-        return text if text else ""
+        return (self._stream_event_kind(payload), text) if text else ("", "")
+
+    def _stream_event_kind(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return "delta"
+        markers = " ".join(
+            str(payload.get(key, "")).lower() for key in ("type", "event", "role", "name")
+        )
+        if "assistant_message" in markers:
+            return "message"
+        if payload.get("role") == "assistant" and "message" in payload:
+            return "message"
+        return "delta"
 
     def _is_assistant_stream_payload(self, payload: Any) -> bool:
         if not isinstance(payload, dict):
