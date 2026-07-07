@@ -290,6 +290,23 @@ Codex、Claude Code 或自定义 wrapper 可以使用 `custom-cli`：
 `QQ_AGENT_BRIDGE_E2E_ASK_CMD`、`QQ_AGENT_BRIDGE_E2E_TASK_CMD` 等命令模板。
 模板支持 `{prompt}`、`{workspace}`、`{mode}`、`{model}`、`{stream}`。
 
+如果要跑语义层面的能力评测，可以启用下面这个 opt-in 测试。它会先调用目标
+agent 执行任务，再调用 judge agent 评判是否满足能力标准；同时仍会做确定性的
+硬检查，比如必须包含 token、不能出现禁止措辞等。
+
+```bash
+QQ_AGENT_BRIDGE_CAPABILITY_EVAL=1 \
+QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
+QQ_AGENT_BRIDGE_CAPABILITY_CHAT_MODEL=auto \
+QQ_AGENT_BRIDGE_CAPABILITY_TASK_MODEL=kimi-k2.5 \
+python -m pytest tests/test_agent_capability_eval.py -q
+```
+
+默认 judge 复用同一个 runtime。需要独立裁判时，可以设置
+`QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_RUNTIME`、
+`QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_MODEL` 或
+`QQ_AGENT_BRIDGE_CAPABILITY_JUDGE_ASK_CMD`。
+
 ## 仓库卫生
 
 不要提交真实运行状态或敏感信息：
