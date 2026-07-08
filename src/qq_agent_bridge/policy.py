@@ -178,18 +178,31 @@ class Policy:
         return jid
 
     def cancel(self, jid: str, uid: str) -> bool:
-        job = self.jobs.get(jid)
-        if not job:
-            return False
+        ok, _jid, _job, _reason = self.cancel_by_ref(jid, uid, default_ref="")
+        return ok
+
+    def cancel_by_ref(
+        self,
+        ref: str | None,
+        uid: str,
+        *,
+        default_ref: str = "-1",
+    ) -> tuple[bool, str | None, Job | None, str]:
         if not self.cfg.is_owner(uid):
-            return False
+            return False, None, None, "owner-only"
+        jid, job = self.resolve_job_ref(ref, default_ref=default_ref)
+        if not job:
+            return False, None, None, "unknown job"
         if job.task and not job.task.done():
             job.task.cancel()
-            return True
-        if job.state == "waiting_approval":
             job.state = "cancelled"
-            return True
-        return False
+            job.result = "[cancelled]"
+            return True, jid, job, "ok"
+        if job.state in {"queued", "running", "waiting_approval"}:
+            job.state = "cancelled"
+            job.result = "[cancelled]"
+            return True, jid, job, "ok"
+        return False, jid, job, "not-running"
 
     def reload_config(self, cfg: BridgeConfig) -> None:
         self.cfg = cfg
@@ -197,23 +210,74 @@ class Policy:
         if not active:
             self._semaphore = asyncio.Semaphore(max(1, cfg.agent.max_concurrent_jobs))
 
-    def get_status(self, jid: str | None = None) -> str:
-        if jid:
-            j = self.jobs.get(jid)
-            if not j:
-                return "unknown job"
-            return f"{jid}: {j.cmd} {j.state}"
-        running = [f"{k}:{v.cmd}" for k, v in self.jobs.items() if v.state == "running"]
-        queued = [f"{k}:{v.cmd}" for k, v in self.jobs.items() if v.state == "queued"]
-        waiting = [f"{k}:{v.cmd}" for k, v in self.jobs.items() if v.state == "waiting_approval"]
+    def resolve_job_ref(
+        self,
+        ref: str | None,
+        *,
+        default_ref: str | None = None,
+    ) -> tuple[str | None, Job | None]:
+        raw = (ref or "").strip()
+        if not raw and default_ref is not None:
+            raw = default_ref
+        if not raw:
+            return None, None
+        if raw in self.jobs:
+            return raw, self.jobs[raw]
+
+        prefix_matches = [(jid, job) for jid, job in self.jobs.items() if jid.startswith(raw)]
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+
+        try:
+            idx = int(raw)
+        except ValueError:
+            return None, None
+        items = list(self.jobs.items())
+        if idx < 0:
+            idx = len(items) + idx
+        if idx < 0 or idx >= len(items):
+            return None, None
+        return items[idx]
+
+    def get_status(self, job_ref: str | None = None) -> str:
+        ref = (job_ref or "").strip()
+        if ref:
+            jid, job = self.resolve_job_ref(ref)
+            if not job or not jid:
+                return f"unknown job: {ref}"
+            return self.format_job_line(jid, job)
+
+        items = list(self.jobs.items())
+        if not items:
+            return "jobs: none"
+        running = sum(1 for _jid, job in items if job.state == "running")
+        queued = sum(1 for _jid, job in items if job.state == "queued")
+        waiting = sum(1 for _jid, job in items if job.state == "waiting_approval")
+        lines = [f"jobs: running:{running} queued:{queued} waiting_approval:{waiting}"]
+        lines.extend(self.format_job_line(jid, job) for jid, job in items)
+        return "\n".join(lines)
+
+    def format_job_line(self, jid: str, job: Job) -> str:
+        idx = self._job_index(jid)
+        index = "?" if idx is None else str(idx)
         return (
-            "running: "
-            + (", ".join(running) or "none")
-            + "; queued: "
-            + (", ".join(queued) or "none")
-            + "; waiting_approval: "
-            + (", ".join(waiting) or "none")
+            f"{index}. {jid} {job.cmd} {job.state} "
+            f"by {job.event.sender_id}: {self._job_summary(job)}"
         )
+
+    def _job_index(self, jid: str) -> int | None:
+        for idx, existing in enumerate(self.jobs):
+            if existing == jid:
+                return idx
+        return None
+
+    def _job_summary(self, job: Job) -> str:
+        summary = " ".join((job.args or job.event.text or "").split())
+        if not summary:
+            return "(empty)"
+        if len(summary) <= 60:
+            return summary
+        return summary[:57].rstrip() + "..."
 
     async def cleanup(self) -> None:
         for j in list(self.jobs.values()):

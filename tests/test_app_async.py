@@ -1002,6 +1002,72 @@ def test_status_path_runs_cleanup_for_seen_messages() -> None:
     asyncio.run(go())
 
 
+def test_status_accepts_job_index_argument() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+
+        for idx, text in enumerate(("/task old status target", "/task latest status target")):
+            ev = make_ev(text, group="group", mid=f"manual-status-{idx}")
+            parsed = app.policy.parse(ev.text)  # type: ignore[union-attr]
+            assert parsed is not None
+            jid, _ = app.policy.start_job(ev, parsed)  # type: ignore[union-attr]
+            app.policy.jobs[jid].state = "queued"  # type: ignore[union-attr]
+
+        await app._handle(make_ev("/status -1", group="group", mid="status-index"))
+
+        assert adapter.sent[-1][2].count("latest status target") == 1
+        assert "old status target" not in adapter.sent[-1][2]
+
+    asyncio.run(go())
+
+
+def test_stop_without_argument_cancels_latest_job_and_names_it() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        release = asyncio.Event()
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            await release.wait()
+            return "done"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("/task oldest job", group="group", mid="stop-latest-1"))
+        await app._handle(make_ev("/task newest job", group="group", mid="stop-latest-2"))
+        first_jid, second_jid = list(app.policy.jobs)  # type: ignore[union-attr]
+
+        await app._handle(make_ev("/stop", sender="owner", group="group", mid="stop-latest-3"))
+        await asyncio.sleep(0)
+
+        assert app.policy.jobs[second_jid].state == "cancelled"  # type: ignore[union-attr]
+        assert app.policy.jobs[first_jid].state != "cancelled"  # type: ignore[union-attr]
+        assert "已停止" in adapter.sent[-1][2]
+        assert "newest job" in adapter.sent[-1][2]
+        assert "stop : False" not in adapter.sent[-1][2]
+
+        release.set()
+        tasks = [job.task for job in app.policy.jobs.values() if job.task]  # type: ignore[union-attr]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(go())
+
+
 def test_help_lists_reset_command() -> None:
     async def go() -> None:
         adapter = FakeAdapter()

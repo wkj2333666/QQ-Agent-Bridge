@@ -175,7 +175,8 @@ class App:
                 return
 
         if parsed.name == "status":
-            st = self.policy.get_status()
+            ref = parsed.args.split()[0] if parsed.args else None
+            st = self.policy.get_status(ref)
             await self._send_text(ev.chat_id, ev.is_group, st, ev.id)
             await self._cleanup_policy()
             return
@@ -213,13 +214,18 @@ class App:
             return
 
         if parsed.name == "stop":
-            jid = parsed.args.split()[0] if parsed.args else ""
-            okc = self.policy.cancel(jid, ev.sender_id)
-            if okc:
+            ref = parsed.args.split()[0] if parsed.args else ""
+            okc, jid, job, reason = self.policy.cancel_by_ref(ref, ev.sender_id)
+            if okc and jid:
                 reporter = self._progress_reporters.pop(jid, None)
                 if reporter:
                     reporter.stop()
-            await self._send_text(ev.chat_id, ev.is_group, f"stop {jid}: {okc}", ev.id)
+                label = self.policy.format_job_line(jid, job) if job else jid
+                text = f"已停止 {label}"
+            else:
+                shown_ref = ref or "-1"
+                text = f"停止失败：{reason} ({shown_ref})。可以先用 /status 看任务列表。"
+            await self._send_text(ev.chat_id, ev.is_group, text, ev.id)
             await self._cleanup_policy()
             return
 
@@ -340,7 +346,12 @@ class App:
             current = asyncio.current_task()
             if current and current.cancelling():
                 raise
-            result = "[cancelled]"
+            reporter = self._progress_reporters.pop(job.id, None)
+            if reporter:
+                reporter.stop()
+            self._outgoing_jobs.pop(job.event.id, None)
+            await self._cleanup_policy()
+            return
         if job.allow_outgoing_resources and job.outgoing_dir and job.outgoing_token:
             clean_result, outgoing, warnings = collect_outgoing_resources(
                 result,
