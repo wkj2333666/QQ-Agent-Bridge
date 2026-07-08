@@ -434,6 +434,10 @@ class CursorAdapter:
 
         async for line in self._stream_lines(proc.stdout):
             kind, text = self._stream_event_from_line(line)
+            if kind == "progress":
+                if text:
+                    await send_progress(text)
+                continue
             if kind == "message":
                 clean_message, progress_lines = strip_progress_directives(text)
                 for item in progress_lines:
@@ -491,10 +495,49 @@ class CursorAdapter:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
             return "delta", line
+        progress = self._stream_progress_from_payload(payload)
+        if progress:
+            return "progress", progress
         if not self._is_assistant_stream_payload(payload):
             return "", ""
         text = self._extract_stream_text(payload)
         return (self._stream_event_kind(payload), text) if text else ("", "")
+
+    def _stream_progress_from_payload(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if str(payload.get("type", "")).lower() != "tool_call":
+            return ""
+        subtype = str(payload.get("subtype", "")).lower()
+        if subtype not in {"started", "completed"}:
+            return ""
+        description = self._extract_tool_description(payload)
+        if not description:
+            description = "调用工具"
+        prefix = "正在执行" if subtype == "started" else "已完成"
+        return f"{prefix}：{description}"
+
+    def _extract_tool_description(self, payload: Any) -> str:
+        candidates: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                description = value.get("description")
+                if isinstance(description, str):
+                    candidates.append(description)
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        tool_call = payload.get("tool_call") if isinstance(payload, dict) else None
+        visit(tool_call)
+        for candidate in candidates:
+            cleaned = " ".join(candidate.split()).strip()
+            if cleaned:
+                return redact(cleaned)[:80]
+        return ""
 
     def _stream_event_kind(self, payload: Any) -> str:
         if not isinstance(payload, dict):

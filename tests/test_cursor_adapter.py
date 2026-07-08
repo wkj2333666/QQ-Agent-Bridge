@@ -285,6 +285,68 @@ def test_streaming_sends_intermediate_assistant_message_before_process_exit() ->
     assert out == "最终结果：查完了。"
 
 
+def test_streaming_sends_tool_call_progress_before_process_exit() -> None:
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, stdout: asyncio.StreamReader, stderr: asyncio.StreamReader) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def run_case() -> str:
+        cfg = BridgeConfig(workspaces={"/tmp": True})
+        adapter = CursorAdapter(cfg)
+        stdout = asyncio.StreamReader(limit=64 * 1024)
+        stderr = asyncio.StreamReader(limit=64 * 1024)
+        progress: list[str] = []
+        progress_seen = asyncio.Event()
+
+        async def record_progress(text: str) -> None:
+            progress.append(text)
+            progress_seen.set()
+
+        task = asyncio.create_task(
+            adapter._communicate_streaming(  # noqa: SLF001
+                FakeProc(stdout, stderr),  # type: ignore[arg-type]
+                record_progress,
+            )
+        )
+        started = {
+            "type": "tool_call",
+            "subtype": "started",
+            "tool_call": {"description": "查看图片生成与 QQ 发送规范"},
+        }
+        stdout.feed_data(
+            (json.dumps(started, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+
+        try:
+            await asyncio.wait_for(progress_seen.wait(), timeout=0.2)
+        finally:
+            stdout.feed_data(
+                (
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "最终结果"}},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            stdout.feed_eof()
+            stderr.feed_eof()
+        out, _err = await task
+
+        assert progress == ["正在执行：查看图片生成与 QQ 发送规范"]
+        return out
+
+    out = asyncio.run(run_case())
+
+    assert out == "最终结果"
+
+
 def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = True
