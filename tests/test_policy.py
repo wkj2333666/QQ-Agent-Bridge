@@ -333,6 +333,77 @@ def test_status_reports_running_and_queued_jobs_when_limited() -> None:
     asyncio.run(go())
 
 
+def test_status_lists_readable_indices_and_summaries() -> None:
+    cfg = BridgeConfig(
+        owners=["1000000001"],
+        allowed_users=["1000000001"],
+        commands={"task": True},
+    )
+    pol = Policy(cfg, fake_runner)
+
+    for idx, text in enumerate(("/task old job", "/task newest job")):
+        ev = make_ev(text, mid=f"status-index-{idx}")
+        parsed = pol.parse(ev.text)
+        assert parsed is not None
+        jid, _ = pol.start_job(ev, parsed)
+        pol.jobs[jid].state = "running" if idx == 0 else "queued"
+
+    status = pol.get_status()
+    assert "0." in status
+    assert "1." in status
+    assert "running" in status
+    assert "queued" in status
+    assert "1000000001" in status
+    assert "old job" in status
+    assert "newest job" in status
+
+
+def test_status_resolves_positive_and_negative_indices() -> None:
+    cfg = BridgeConfig(
+        owners=["1000000001"],
+        allowed_users=["1000000001"],
+        commands={"task": True},
+    )
+    pol = Policy(cfg, fake_runner)
+
+    for idx, text in enumerate(("/task first summary", "/task latest summary")):
+        ev = make_ev(text, mid=f"status-ref-{idx}")
+        parsed = pol.parse(ev.text)
+        assert parsed is not None
+        pol.start_job(ev, parsed)
+
+    assert "first summary" in pol.get_status("0")
+    assert "latest summary" in pol.get_status("-1")
+    assert "unknown job" in pol.get_status("3")
+
+
+def test_cancel_by_ref_defaults_to_latest_job() -> None:
+    cfg = BridgeConfig(
+        owners=["owner"],
+        commands={"code": True},
+        dangerous_requires_confirm=True,
+        workspaces={"/tmp": True},
+    )
+    cfg.agent.default_workspace = "/tmp"
+    pol = Policy(cfg, fake_runner)
+
+    jids: list[str] = []
+    for idx in range(2):
+        ev = make_ev(f"/code edit {idx}", sender="owner", mid=f"cancel-ref-{idx}")
+        parsed = pol.parse(ev.text)
+        assert parsed is not None
+        jid, _ = pol.start_job(ev, parsed)
+        jids.append(jid)
+
+    ok, jid, job, reason = pol.cancel_by_ref("", "owner")
+
+    assert ok, reason
+    assert jid == jids[-1]
+    assert job is pol.jobs[jids[-1]]
+    assert pol.jobs[jids[-1]].state == "cancelled"
+    assert pol.jobs[jids[0]].state == "waiting_approval"
+
+
 def test_multiple_jobs_can_run_concurrently() -> None:
     async def go() -> None:
         active = 0
