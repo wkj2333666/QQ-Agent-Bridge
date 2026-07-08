@@ -417,52 +417,53 @@ class CursorAdapter:
         )
         buffer = ProgressLineBuffer()
         output_parts: list[str] = []
-        assistant_messages: list[str] = []
+        pending_assistant_message: str | None = None
+
+        async def send_progress(text: str) -> None:
+            try:
+                await progress(text)
+            except Exception:  # noqa: BLE001 - progress should not fail the job
+                logger.exception("progress callback failed")
+
+        async def flush_pending_assistant_message() -> None:
+            nonlocal pending_assistant_message
+            if not pending_assistant_message:
+                return
+            await send_progress(pending_assistant_message)
+            pending_assistant_message = None
+
         async for line in self._stream_lines(proc.stdout):
             kind, text = self._stream_event_from_line(line)
             if kind == "message":
-                assistant_messages.append(text)
+                clean_message, progress_lines = strip_progress_directives(text)
+                for item in progress_lines:
+                    await send_progress(item)
+                if clean_message.strip():
+                    await flush_pending_assistant_message()
+                    pending_assistant_message = clean_message
                 continue
+            if text:
+                await flush_pending_assistant_message()
             clean_lines, progress_lines = buffer.feed(text)
             output_parts.extend(clean_lines)
             for item in progress_lines:
-                try:
-                    await progress(item)
-                except Exception:  # noqa: BLE001 - progress should not fail the job
-                    logger.exception("progress callback failed")
+                await send_progress(item)
         clean_lines, progress_lines = buffer.finish()
         output_parts.extend(clean_lines)
         for item in progress_lines:
-            try:
-                await progress(item)
-            except Exception:  # noqa: BLE001 - progress should not fail the job
-                logger.exception("progress callback failed")
+            await send_progress(item)
         await proc.wait()
         stderr = await stderr_task
         delta_output = "\n".join(output_parts).strip()
         final_parts: list[str] = []
-        intermediate_messages: list[str] = []
-        if assistant_messages:
+        if pending_assistant_message:
             if delta_output:
-                intermediate_messages.extend(assistant_messages)
+                await flush_pending_assistant_message()
                 final_parts.append(delta_output)
             else:
-                intermediate_messages.extend(assistant_messages[:-1])
-                final_parts.append(assistant_messages[-1])
+                final_parts.append(pending_assistant_message)
         else:
             final_parts.append(delta_output)
-        for message in intermediate_messages:
-            clean_message, progress_lines = strip_progress_directives(message)
-            for item in progress_lines:
-                try:
-                    await progress(item)
-                except Exception:  # noqa: BLE001 - progress should not fail the job
-                    logger.exception("progress callback failed")
-            if clean_message.strip():
-                try:
-                    await progress(clean_message)
-                except Exception:  # noqa: BLE001 - progress should not fail the job
-                    logger.exception("progress callback failed")
         return "\n".join(part for part in final_parts if part).strip(), (stderr or b"").decode("utf-8", "replace")
 
     async def _stream_lines(self, stream: asyncio.StreamReader):

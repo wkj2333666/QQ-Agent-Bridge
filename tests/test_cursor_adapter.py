@@ -231,6 +231,60 @@ def test_streaming_sends_intermediate_assistant_messages_as_progress() -> None:
     assert out == "最终结果：查完了。"
 
 
+def test_streaming_sends_intermediate_assistant_message_before_process_exit() -> None:
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, stdout: asyncio.StreamReader, stderr: asyncio.StreamReader) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def run_case() -> str:
+        cfg = BridgeConfig(workspaces={"/tmp": True})
+        adapter = CursorAdapter(cfg)
+        stdout = asyncio.StreamReader(limit=64 * 1024)
+        stderr = asyncio.StreamReader(limit=64 * 1024)
+        progress: list[str] = []
+        progress_seen = asyncio.Event()
+
+        async def record_progress(text: str) -> None:
+            progress.append(text)
+            progress_seen.set()
+
+        task = asyncio.create_task(
+            adapter._communicate_streaming(  # noqa: SLF001
+                FakeProc(stdout, stderr),  # type: ignore[arg-type]
+                record_progress,
+            )
+        )
+        first = {"type": "assistant_message", "message": {"content": "我先查一下资料。"}}
+        second = {"type": "assistant_message", "message": {"content": "最终结果：查完了。"}}
+        stdout.feed_data(
+            (json.dumps(first, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+        await asyncio.sleep(0)
+        stdout.feed_data(
+            (json.dumps(second, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+
+        try:
+            await asyncio.wait_for(progress_seen.wait(), timeout=0.2)
+        finally:
+            stdout.feed_eof()
+            stderr.feed_eof()
+        out, _err = await task
+
+        assert progress == ["我先查一下资料。"]
+        return out
+
+    out = asyncio.run(run_case())
+
+    assert out == "最终结果：查完了。"
+
+
 def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = True
