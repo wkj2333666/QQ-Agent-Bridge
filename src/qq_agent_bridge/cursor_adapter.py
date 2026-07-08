@@ -435,6 +435,7 @@ class CursorAdapter:
         async for line in self._stream_lines(proc.stdout):
             kind, text = self._stream_event_from_line(line)
             if kind == "progress":
+                await flush_pending_assistant_message()
                 if text:
                     await send_progress(text)
                 continue
@@ -512,10 +513,21 @@ class CursorAdapter:
         if subtype not in {"started", "completed"}:
             return ""
         description = self._extract_tool_description(payload)
-        if not description:
-            description = "调用工具"
-        prefix = "正在执行" if subtype == "started" else "已完成"
-        return f"{prefix}：{description}"
+        return self._user_visible_tool_progress(description, completed=subtype == "completed")
+
+    def _user_visible_tool_progress(self, description: str, *, completed: bool) -> str:
+        text = description.lower()
+        if any(item in text for item in ("read", "reference", "skill", "规范", "说明", "查看", "读取")):
+            return "相关说明已看完。" if completed else "正在查看相关说明。"
+        if any(item in text for item in ("tts", "voice", "speech", "audio", "语音", "人声", "音频")):
+            return "语音生成完成。" if completed else "正在生成语音。"
+        if any(item in text for item in ("image", "picture", "draw", "paint", "图片", "图像", "绘图", "画")):
+            return "图片处理完成。" if completed else "正在处理图片。"
+        if any(item in text for item in ("search", "web", "browse", "fetch", "搜索", "联网", "网页", "资料")):
+            return "资料查找完成。" if completed else "正在查找资料。"
+        if any(item in text for item in ("file", "write", "save", "create", "文件", "保存", "创建", "写入")):
+            return "文件处理完成。" if completed else "正在处理文件。"
+        return "这一步处理完了。" if completed else "正在处理任务的一步。"
 
     def _extract_tool_description(self, payload: Any) -> str:
         candidates: list[str] = []
@@ -542,6 +554,9 @@ class CursorAdapter:
     def _stream_event_kind(self, payload: Any) -> str:
         if not isinstance(payload, dict):
             return "delta"
+        event_type = str(payload.get("type", "")).lower()
+        if event_type == "assistant":
+            return "message"
         markers = " ".join(
             str(payload.get(key, "")).lower() for key in ("type", "event", "role", "name")
         )

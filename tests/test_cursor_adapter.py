@@ -339,12 +339,117 @@ def test_streaming_sends_tool_call_progress_before_process_exit() -> None:
             stderr.feed_eof()
         out, _err = await task
 
-        assert progress == ["正在执行：查看图片生成与 QQ 发送规范"]
+        assert progress == ["正在查看相关说明。"]
         return out
 
     out = asyncio.run(run_case())
 
     assert out == "最终结果"
+
+
+def test_streaming_flushes_assistant_progress_before_tool_call_progress() -> None:
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, stdout: asyncio.StreamReader, stderr: asyncio.StreamReader) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def run_case() -> tuple[str, list[str]]:
+        cfg = BridgeConfig(workspaces={"/tmp": True})
+        adapter = CursorAdapter(cfg)
+        stdout = asyncio.StreamReader(limit=64 * 1024)
+        stderr = asyncio.StreamReader(limit=64 * 1024)
+        progress: list[str] = []
+        two_progress_messages_seen = asyncio.Event()
+
+        async def record_progress(text: str) -> None:
+            progress.append(text)
+            if len(progress) >= 2:
+                two_progress_messages_seen.set()
+
+        task = asyncio.create_task(
+            adapter._communicate_streaming(  # noqa: SLF001
+                FakeProc(stdout, stderr),  # type: ignore[arg-type]
+                record_progress,
+            )
+        )
+        assistant_progress = {
+            "type": "assistant",
+            "message": {"content": "正在生成说明图，先查看图片生成与 QQ 发送规范。"},
+        }
+        tool_started = {
+            "type": "tool_call",
+            "subtype": "started",
+            "tool_call": {"description": "查看图片生成与 QQ 发送规范"},
+        }
+        stdout.feed_data(
+            (
+                json.dumps(assistant_progress, ensure_ascii=False)
+                + "\n"
+                + json.dumps(tool_started, ensure_ascii=False)
+                + "\n"
+            ).encode("utf-8")
+        )
+
+        try:
+            await asyncio.wait_for(two_progress_messages_seen.wait(), timeout=0.2)
+        finally:
+            stdout.feed_data(
+                (
+                    json.dumps(
+                        {"type": "assistant", "message": {"content": "画好啦！"}},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            stdout.feed_eof()
+            stderr.feed_eof()
+        out, _err = await task
+        return out, progress
+
+    out, progress = asyncio.run(run_case())
+
+    assert progress[:2] == [
+        "正在生成说明图，先查看图片生成与 QQ 发送规范。",
+        "正在查看相关说明。",
+    ]
+    assert out == "画好啦！"
+
+
+def test_streaming_tool_call_progress_hides_internal_tool_details() -> None:
+    cfg = BridgeConfig(workspaces={"/tmp": True})
+    adapter = CursorAdapter(cfg)
+
+    started = adapter._stream_progress_from_payload(  # noqa: SLF001
+        {
+            "type": "tool_call",
+            "subtype": "started",
+            "tool_call": {"description": "Generate loli-style TTS with edge-tts"},
+        }
+    )
+    completed = adapter._stream_progress_from_payload(  # noqa: SLF001
+        {
+            "type": "tool_call",
+            "subtype": "completed",
+            "tool_call": {"description": "Generate loli-style TTS with edge-tts"},
+        }
+    )
+    generic = adapter._stream_progress_from_payload(  # noqa: SLF001
+        {"type": "tool_call", "subtype": "started", "tool_call": {}}
+    )
+
+    assert started == "正在生成语音。"
+    assert completed == "语音生成完成。"
+    assert generic == "正在处理任务的一步。"
+    visible = "\n".join((started, completed, generic)).lower()
+    assert "edge" not in visible
+    assert "tts" not in visible
+    assert "调用工具" not in visible
 
 
 def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
