@@ -377,6 +377,31 @@ def test_status_resolves_positive_and_negative_indices() -> None:
     assert "unknown job" in pol.get_status("3")
 
 
+def test_status_hides_finished_jobs_and_indexes_only_active_jobs() -> None:
+    cfg = BridgeConfig(
+        owners=["1000000001"],
+        allowed_users=["1000000001"],
+        commands={"task": True},
+    )
+    pol = Policy(cfg, fake_runner)
+
+    for idx, text in enumerate(("/task finished summary", "/task running summary")):
+        ev = make_ev(text, mid=f"status-active-{idx}")
+        parsed = pol.parse(ev.text)
+        assert parsed is not None
+        jid, _ = pol.start_job(ev, parsed)
+        pol.jobs[jid].state = "done" if idx == 0 else "running"
+
+    status = pol.get_status()
+
+    assert "finished summary" not in status
+    assert "running summary" in status
+    assert "0." in status
+    assert "1." not in status
+    assert "running summary" in pol.get_status("0")
+    assert "unknown job" in pol.get_status("-2")
+
+
 def test_cancel_by_ref_defaults_to_latest_job() -> None:
     cfg = BridgeConfig(
         owners=["owner"],
