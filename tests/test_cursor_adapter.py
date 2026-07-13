@@ -442,14 +442,77 @@ def test_streaming_tool_call_progress_hides_internal_tool_details() -> None:
     generic = adapter._stream_progress_from_payload(  # noqa: SLF001
         {"type": "tool_call", "subtype": "started", "tool_call": {}}
     )
+    transcription = adapter._stream_progress_from_payload(  # noqa: SLF001
+        {
+            "type": "tool_call",
+            "subtype": "started",
+            "tool_call": {"description": "Transcribe Bilibili video audio by chapters"},
+        }
+    )
 
     assert started == "正在生成语音。"
     assert completed == "语音生成完成。"
-    assert generic == "正在处理任务的一步。"
-    visible = "\n".join((started, completed, generic)).lower()
+    assert generic == ""
+    assert transcription == "正在转写视频字幕。"
+    visible = "\n".join((started, completed, generic, transcription)).lower()
     assert "edge" not in visible
     assert "tts" not in visible
     assert "调用工具" not in visible
+
+
+def test_streaming_preserves_resource_directive_from_intermediate_message() -> None:
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, stdout: asyncio.StreamReader, stderr: asyncio.StreamReader) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def run_case() -> tuple[str, list[str]]:
+        cfg = BridgeConfig(workspaces={"/tmp": True})
+        adapter = CursorAdapter(cfg)
+        stdout = asyncio.StreamReader(limit=64 * 1024)
+        stderr = asyncio.StreamReader(limit=64 * 1024)
+        lines = [
+            {
+                "type": "assistant_message",
+                "message": {
+                    "content": (
+                        "讲义已经生成。\n"
+                        "QQBOT_SEND_FILE: send-token downloads/outgoing/lecture.md"
+                    )
+                },
+            },
+            {"type": "assistant_message", "message": {"content": "视频总结完成。"}},
+        ]
+        stdout.feed_data(
+            ("\n".join(json.dumps(item, ensure_ascii=False) for item in lines) + "\n").encode(
+                "utf-8"
+            )
+        )
+        stdout.feed_eof()
+        stderr.feed_eof()
+        progress: list[str] = []
+
+        async def record_progress(text: str) -> None:
+            progress.append(text)
+
+        out, _err = await adapter._communicate_streaming(  # noqa: SLF001
+            FakeProc(stdout, stderr),  # type: ignore[arg-type]
+            record_progress,
+        )
+        return out, progress
+
+    out, progress = asyncio.run(run_case())
+
+    assert progress == ["讲义已经生成。"]
+    assert out == (
+        "视频总结完成。\n"
+        "QQBOT_SEND_FILE: send-token downloads/outgoing/lecture.md"
+    )
 
 
 def test_ask_command_does_not_force_tools_inside_bwrap() -> None:

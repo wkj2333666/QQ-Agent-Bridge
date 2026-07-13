@@ -20,6 +20,7 @@ commands:
   code: false    # allow edits? set true after testing
   status: true
   help: true
+  schedule: true # persistent scheduled tasks; group mutations are owner-only
   profile: true  # view/set current group or private profile; group edits are owner-only
   reset: true    # owner-only; clears current conversation memory
   stop: true     # owner-only
@@ -28,7 +29,7 @@ commands:
   shell: false   # disabled; never enable lightly
 
 dangerous_requires_confirm: true
-max_runtime_seconds: 300
+max_runtime_seconds: 1800
 max_output_chars: 4000
 max_finished_jobs: 200
 max_seen_messages: 1000
@@ -63,9 +64,30 @@ progress:
   enabled: true
   first_heartbeat_seconds: 30
   heartbeat_seconds: 45
+  max_heartbeat_messages: 6
   min_progress_interval_seconds: 8
   max_progress_messages: 8
   max_progress_chars: 240
+
+scheduler:
+  enabled: false                 # set true after checking timezone and permissions
+  database_path: "data/schedules.sqlite3" # changing this at runtime requires a bridge restart
+  timezone: "Asia/Shanghai"
+  natural_language_enabled: true
+  natural_language_model: "auto" # model interprets time; bridge validates the RRULE
+  natural_language_timeout_seconds: 60
+  natural_language_progress_seconds: 15
+  allow_private_users: true
+  allow_unbounded: true          # permits arbitrary recurrences without COUNT/UNTIL
+  min_interval_seconds: 60
+  max_schedules_per_chat: 20
+  max_concurrent_runs: 4
+  max_run_history_per_schedule: 100
+  max_occurrences: 100           # cap for finite COUNT/UNTIL schedules
+  max_payload_chars: 2000
+  misfire_grace_seconds: 300
+  max_consecutive_failures: 5
+  debug: false
 
 proactive:
   enabled: true
@@ -130,7 +152,7 @@ agent:
     - "PATH"
     - "HOME"
     - "USER"
-  max_runtime_seconds: 300
+  max_runtime_seconds: 1800
   max_output_chars: 4000
 
 # Bot self

@@ -27,11 +27,13 @@ QQ 用户/群聊
 - QQ 群聊 @ 路由，私聊默认触发。
 - owner、私聊用户、群聊 allowlist。
 - 普通用户可用只读命令：`/ask`、`/plan`、`/search`、`/task`、`/status`、`/help`、`/profile`。
+- 持久化 `/schedule`；群内修改操作仅限 owner，允许的私聊用户可按配置管理自己的定时任务。
 - owner 专用命令：`/code`、`/approve`、`/stop`、`/reset`、`/reload`。
 - 任务队列和全局 agent 并发限制。
 - 每个私聊/群聊独立的短期对话记忆。
 - 群聊 ambient memory，让 bot 能理解最近群聊背景，但不把背景消息当命令执行。
 - 每个群/用户可配置独立 profile，避免角色设定串群泄露。
+- SQLite 持久化定时任务，支持单次、执行 N 次、限定时间范围和任意无限周期。
 - 长任务进度消息和心跳。
 - 附件缓存：手机端可先发图片/文件，再 @bot 处理最近附件。
 - 支持把图片、文件、语音、音频、视频、URL、合并转发记录交给 agent。
@@ -117,6 +119,9 @@ ws://127.0.0.1:8765/onebot
 - `/plan <文本>`：只读规划，不修改文件。
 - `/search <关键词>`：在配置工作区内做受限文本搜索。
 - `/task <文本>`：显式执行较完整的 agent 任务，但不修改已有工作区文件。
+- `/schedule <自然语言>`：创建持久化定时任务；时间由模型理解，再由 bridge 严格校验后保存。
+- `/schedule help`：查看单次、有限次数、有限时间、无限周期和高级任意周期示例。
+- `/schedule list|show|pause|resume|run|cancel`：用 ID、`0`/`1` 或 `-1`/`-2` 管理任务。
 - `/status`：查看运行中和排队中的任务。
 - `/help`：显示简短帮助。
 - `/profile`：查看当前 profile。
@@ -132,6 +137,23 @@ owner 专用命令：
 - `/reload`：热重载 `config.yaml`。
 
 群聊里只有 owner 能修改群 profile；私聊里允许用户可以修改自己的私聊 profile。
+
+群聊里只有 owner 能创建、暂停、恢复、立即执行或取消定时任务；开启
+`scheduler.allow_private_users` 后，允许的私聊用户可以管理自己的定时任务。
+开源示例默认关闭 scheduler，请先检查 `config.example.yaml` 里的时区和限制再开启。
+任务保存在 SQLite 中，bridge 重启后会继续调度。所有周期统一表示为 RFC 5545
+RRULE，因此“工作日”“每两周周二”“每月最后一个工作日”等规则不需要写死新的周期类型。
+调度限制支持 `/reload` 热更新；修改 `scheduler.database_path` 后需要重启 bridge。
+
+示例：
+
+```text
+/schedule 明天早上十点提醒我喝水 噔噔噔
+/schedule 每天早上八点告诉我北京市天气
+/schedule 每月最后一个工作日下午六点整理本月工作
+/schedule every 2h count 5 -- task 检查服务状态
+/schedule every 1h forever -- task 检查服务状态
+```
 
 ## Profile
 

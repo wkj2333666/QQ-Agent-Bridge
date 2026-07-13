@@ -25,12 +25,15 @@ QQ user/group
 - Owner/user/group allowlists.
 - Read-only `/ask`, `/plan`, `/search`, `/task`, `/status`, `/help`, `/profile`
   command set for ordinary users.
+- Persistent `/schedule`; group mutations are owner-only, while allowed private
+  users can manage their own schedules when enabled.
 - Owner-only `/code`, `/approve`, `/stop`, `/reset`, `/reload`.
 - Queueing and global agent concurrency limits.
 - Short-term conversation memory per private chat or group.
 - Ambient group context for natural chat without treating background messages
   as commands.
 - Configurable per-group and per-user profiles.
+- Persistent one-shot, finite, bounded, and arbitrary recurring schedules.
 - Long-task progress messages and heartbeat updates.
 - Attachment cache for mobile-friendly flows: send an image/file first, then
   mention the bot to process it.
@@ -136,6 +139,13 @@ Common commands:
 - `/search <keyword>`: bounded literal search in the configured workspace.
 - `/task <text>`: explicit tool-using agent task without modifying existing
   workspace files.
+- `/schedule <natural language>`: create a persistent scheduled `send`, `ask`,
+  or `task`. Natural-language time interpretation is validated as RFC 5545
+  recurrence data before it is stored.
+- `/schedule help`: show examples for one-shot, counted, bounded, unbounded,
+  and advanced arbitrary recurrence rules.
+- `/schedule list|show|pause|resume|run|cancel`: manage schedules by ID or by
+  indices such as `0` and `-1`.
 - `/status`: show running and queued jobs.
 - `/help`: show a short QQ-friendly help message.
 - `/profile`: show the current profile.
@@ -152,6 +162,16 @@ Owner-only commands:
 
 In groups, only owners can change the group profile. In private chats, an
 allowed user can change their own private profile.
+
+In groups, only owners can create, pause, resume, run, or cancel schedules.
+Allowed private-chat users can manage their own schedules when
+`scheduler.allow_private_users` is enabled. The scheduler is disabled by
+default; review the timezone and limits in `config.example.yaml` before
+enabling it. Schedules use durable SQLite storage and resume after a bridge
+restart. Arbitrary recurrence is represented by one RFC 5545 RRULE, so rules
+such as weekdays, every second Tuesday, or the last workday of each month do
+not require hardcoded period types. Scheduler limits can be hot-reloaded;
+changing `scheduler.database_path` requires a bridge restart.
 
 ## Profiles
 

@@ -538,6 +538,9 @@ class OneBotAdapter:
         self._recent_message_ids: deque[str] = deque()
         self._max_recent_messages = 500
 
+    def is_connected(self) -> bool:
+        return bool(self._conns)
+
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
         addr = f"{self.host}:{self.port}"

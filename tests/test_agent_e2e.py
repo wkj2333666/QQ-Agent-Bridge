@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import os
 import re
 import shlex
@@ -20,6 +21,7 @@ from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Policy  # type: ignore
 from qq_agent_bridge.prompting import build_agent_prompt  # type: ignore
+from qq_agent_bridge.schedule_parser import NaturalLanguageScheduleParser  # type: ignore
 from qq_agent_bridge.types import ChatEvent  # type: ignore
 
 
@@ -174,6 +176,52 @@ def test_cursor_e2e_can_disable_bwrap_explicitly(
 async def _run_agent(prompt: str, cfg: BridgeConfig, mode: str, model: str | None) -> str:
     adapter = build_agent_adapter(cfg)
     return await adapter.run(prompt, cfg.agent.default_workspace, mode, model=model)
+
+
+def test_real_agent_interprets_arbitrary_schedule_as_rrule(tmp_path: Path) -> None:
+    _require_e2e()
+    cfg = _make_cfg(tmp_path, "ask")
+    cfg.scheduler.enabled = True
+    cfg.scheduler.timezone = "Asia/Shanghai"
+    cfg.scheduler.natural_language_model = os.environ.get(
+        "QQ_AGENT_BRIDGE_E2E_CHAT_MODEL",
+        "auto",
+    )
+    adapter = build_agent_adapter(cfg)
+
+    class ReadOnlyE2EAdapter:
+        async def run(
+            self,
+            prompt: str,
+            workspace: str,
+            mode: str,
+            model: str | None = None,
+            progress=None,
+        ) -> str:
+            runner_mode = (
+                "task"
+                if cfg.agent.runtime == "cursor-cli" and cfg.agent.use_bwrap
+                else mode
+            )
+            return await adapter.run(prompt, workspace, runner_mode, model=model)
+
+    parser = NaturalLanguageScheduleParser(cfg, ReadOnlyE2EAdapter())
+
+    outcome = asyncio.run(
+        parser.parse(
+            "每月最后一个工作日下午六点整理本月工作",
+            now=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        )
+    )
+
+    assert outcome.spec is not None, outcome.clarification
+    assert outcome.spec.kind == "rrule"
+    assert outcome.spec.action in {"ask", "task"}
+    assert {
+        "FREQ=MONTHLY",
+        "BYDAY=MO,TU,WE,TH,FR",
+        "BYSETPOS=-1",
+    }.issubset(set((outcome.spec.rrule or "").split(";")))
 
 
 def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:

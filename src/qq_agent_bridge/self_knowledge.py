@@ -10,6 +10,7 @@ READABLE_COMMANDS: tuple[tuple[str, str], ...] = (
     ("plan", "拆方案"),
     ("search", "搜项目"),
     ("task", "做任务"),
+    ("schedule", "定时任务"),
     ("status", "看状态"),
     ("help", "看帮助"),
     ("profile", "人设"),

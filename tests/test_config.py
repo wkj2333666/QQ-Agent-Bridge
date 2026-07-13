@@ -61,6 +61,7 @@ def test_example_config_enables_long_task_progress() -> None:
     assert cfg.progress.enabled
     assert cfg.progress.first_heartbeat_seconds == 30
     assert cfg.progress.heartbeat_seconds == 45
+    assert cfg.progress.max_heartbeat_messages == 6
     assert cfg.progress.min_progress_interval_seconds == 8
     assert cfg.progress.max_progress_messages == 8
     assert cfg.progress.max_progress_chars == 240

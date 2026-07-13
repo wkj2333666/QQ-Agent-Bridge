@@ -83,6 +83,7 @@ class ProgressConfig:
     enabled: bool = True
     first_heartbeat_seconds: int = 30
     heartbeat_seconds: int = 45
+    max_heartbeat_messages: int = 6
     min_progress_interval_seconds: int = 8
     max_progress_messages: int = 8
     max_progress_chars: int = 240
@@ -108,6 +109,28 @@ class ProactiveConfig:
         default_factory=lambda: ["别插嘴", "不要插嘴", "闭嘴", "机器人别说话"]
     )
     ignored_prefixes: list[str] = field(default_factory=lambda: ["/"])
+
+
+@dataclass
+class SchedulerConfig:
+    enabled: bool = False
+    database_path: str = "data/schedules.sqlite3"
+    timezone: str = "Asia/Shanghai"
+    natural_language_enabled: bool = True
+    natural_language_model: str = "auto"
+    natural_language_timeout_seconds: int = 60
+    natural_language_progress_seconds: int = 15
+    allow_private_users: bool = True
+    allow_unbounded: bool = True
+    min_interval_seconds: int = 60
+    max_schedules_per_chat: int = 20
+    max_concurrent_runs: int = 4
+    max_run_history_per_schedule: int = 100
+    max_occurrences: int = 100
+    max_payload_chars: int = 2000
+    misfire_grace_seconds: int = 300
+    max_consecutive_failures: int = 5
+    debug: bool = False
 
 
 @dataclass
@@ -137,6 +160,7 @@ class BridgeConfig:
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
     progress: ProgressConfig = field(default_factory=ProgressConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     profiles: ProfileConfig = field(default_factory=ProfileConfig)
     log_level: str = "INFO"
 
@@ -154,6 +178,7 @@ class BridgeConfig:
         resources = ResourcesConfig(**raw.get("resources", {}))
         progress = ProgressConfig(**raw.get("progress", {}))
         proactive = ProactiveConfig(**raw.get("proactive", {}))
+        scheduler = SchedulerConfig(**raw.get("scheduler", {}))
         profiles = _load_profiles(raw.get("profiles", {}))
         return cls(
             owners=raw.get("owners", []),
@@ -174,6 +199,7 @@ class BridgeConfig:
             resources=resources,
             progress=progress,
             proactive=proactive,
+            scheduler=scheduler,
             profiles=profiles,
             log_level=raw.get("log_level", "INFO"),
         )
