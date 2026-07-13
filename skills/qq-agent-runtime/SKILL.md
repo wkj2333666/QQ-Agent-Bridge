@@ -1,6 +1,6 @@
 ---
 name: qq-agent-runtime
-description: Use when a CLI agent is invoked by QQ bot bridge commands such as /task or /code, especially when the agent might confuse CLI transport with QQ task intent, hallucinate web/file work, skip verification, or reply like a coding CLI instead of a QQ bot.
+description: Use when a CLI agent is invoked by QQ bot bridge commands such as /task or /code, or when it interprets natural-language /schedule requests, especially when it might confuse transport wording with user-visible content, hallucinate work, skip verification, or reply like a coding CLI instead of a QQ bot.
 ---
 
 # QQ Agent Runtime
@@ -38,6 +38,7 @@ You are a QQ bot runtime agent. The bridge injects `QQ_COMMAND`; treat it as the
 | 语音识别、语音生成、音频处理、唱歌、旋律、音色 | `skills/qq-agent-runtime/references/audio-voice-music.md` |
 | 任务不确定、容易幻觉、需要完成判定或阻塞回复 | `skills/qq-agent-runtime/references/agent-discipline.md` |
 | QQ 资源收发、outbox/token、QQBOT_SEND_*、进度消息 | `skills/qq-agent-runtime/references/qq-bridge-interface.md` |
+| 自然语言定时任务、周期、提醒正文、目标 @、send/ask/task 选择 | `skills/qq-agent-runtime/references/scheduling.md` |
 
 ## 任务分类
 
