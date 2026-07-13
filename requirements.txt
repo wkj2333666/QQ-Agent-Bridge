@@ -11,7 +11,9 @@ pluggy==1.6.0
 propcache==0.5.2
 Pygments==2.20.0
 pytest==9.1.1
+python-dateutil==2.9.0.post0
 PyYAML==6.0.3
+six==1.17.0
 types-PyYAML==6.0.12.20260518
 websockets==16.0
 yarl==1.24.2

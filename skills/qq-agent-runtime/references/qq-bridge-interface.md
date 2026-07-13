@@ -22,6 +22,8 @@ QQBOT_SEND_VOICE: <token> downloads/qq-agent-bridge/outgoing/<job>/voice.wav dur
 - 不要泄露 token；不要把 token 放进解释文字。
 - `QQBOT_SEND_AUDIO` 按文件发送；`QQBOT_SEND_VOICE` 只用于 <=60 秒、可验证真实时长的短人声。
 - 发送前确认文件存在、非空、路径在 outbox。
+- 任何准备交给用户的成品都必须在最终响应中带发送指令；不能只声称“文件做好了”，也不能把成品静默留在 outbox。
+- 如果先前的流式步骤已经输出过发送指令，最终响应仍应保留该指令；bridge 会去重并完成交付。
 
 ## Progress
 

@@ -327,6 +327,8 @@ def test_task_prompt_allows_deliverable_files_in_outbox_without_code() -> None:
     assert ".xlsx" in prompt
     assert "输出资源目录" in prompt
     assert "不要修改项目文件" in prompt
+    assert "不能只留在输出资源目录" in prompt
+    assert "最终响应" in prompt
 
 
 def test_task_prompt_requires_sources_for_public_web_research() -> None:

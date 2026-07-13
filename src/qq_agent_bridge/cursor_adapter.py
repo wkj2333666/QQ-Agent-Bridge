@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import stat
@@ -19,6 +20,22 @@ from .redactor import redact, strip_ansi
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str], Awaitable[None]]
+
+_OUTGOING_DIRECTIVE_RE = re.compile(
+    r"^\s*QQBOT_SEND_(?:IMAGE|FILE|VOICE|AUDIO)\s*:\s*.+?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _split_outgoing_directives(text: str) -> tuple[str, tuple[str, ...]]:
+    kept: list[str] = []
+    directives: list[str] = []
+    for line in text.splitlines():
+        if _OUTGOING_DIRECTIVE_RE.match(line):
+            directives.append(line.strip())
+        else:
+            kept.append(line)
+    return "\n".join(kept).strip(), tuple(directives)
 
 
 class CursorAdapter:
@@ -417,7 +434,17 @@ class CursorAdapter:
         )
         buffer = ProgressLineBuffer()
         output_parts: list[str] = []
+        outgoing_directives: list[str] = []
+        seen_outgoing_directives: set[str] = set()
         pending_assistant_message: str | None = None
+
+        def retain_outgoing_directives(text: str) -> str:
+            clean, directives = _split_outgoing_directives(text)
+            for directive in directives:
+                if directive not in seen_outgoing_directives:
+                    outgoing_directives.append(directive)
+                    seen_outgoing_directives.add(directive)
+            return clean
 
         async def send_progress(text: str) -> None:
             try:
@@ -441,11 +468,14 @@ class CursorAdapter:
                 continue
             if kind == "message":
                 clean_message, progress_lines = strip_progress_directives(text)
+                clean_message = retain_outgoing_directives(clean_message)
                 for item in progress_lines:
                     await send_progress(item)
                 if clean_message.strip():
                     await flush_pending_assistant_message()
                     pending_assistant_message = clean_message
+                elif outgoing_directives:
+                    await flush_pending_assistant_message()
                 continue
             if text:
                 await flush_pending_assistant_message()
@@ -459,7 +489,7 @@ class CursorAdapter:
             await send_progress(item)
         await proc.wait()
         stderr = await stderr_task
-        delta_output = "\n".join(output_parts).strip()
+        delta_output = retain_outgoing_directives("\n".join(output_parts).strip())
         final_parts: list[str] = []
         if pending_assistant_message:
             if delta_output:
@@ -469,6 +499,7 @@ class CursorAdapter:
                 final_parts.append(pending_assistant_message)
         else:
             final_parts.append(delta_output)
+        final_parts.extend(outgoing_directives)
         return "\n".join(part for part in final_parts if part).strip(), (stderr or b"").decode("utf-8", "replace")
 
     async def _stream_lines(self, stream: asyncio.StreamReader):
@@ -517,6 +548,10 @@ class CursorAdapter:
 
     def _user_visible_tool_progress(self, description: str, *, completed: bool) -> str:
         text = description.lower()
+        if any(item in text for item in ("transcrib", "subtitle", "caption", "字幕", "转写")):
+            return "视频字幕转写完成。" if completed else "正在转写视频字幕。"
+        if any(item in text for item in ("bilibili", "b站", "video", "视频", "download", "下载")):
+            return "视频内容获取完成。" if completed else "正在获取视频内容。"
         if any(item in text for item in ("read", "reference", "skill", "规范", "说明", "查看", "读取")):
             return "相关说明已看完。" if completed else "正在查看相关说明。"
         if any(item in text for item in ("tts", "voice", "speech", "audio", "语音", "人声", "音频")):
@@ -527,7 +562,7 @@ class CursorAdapter:
             return "资料查找完成。" if completed else "正在查找资料。"
         if any(item in text for item in ("file", "write", "save", "create", "文件", "保存", "创建", "写入")):
             return "文件处理完成。" if completed else "正在处理文件。"
-        return "这一步处理完了。" if completed else "正在处理任务的一步。"
+        return ""
 
     def _extract_tool_description(self, payload: Any) -> str:
         candidates: list[str] = []

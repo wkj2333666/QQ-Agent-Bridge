@@ -125,6 +125,17 @@ def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
             assert needle in text, f"{filename} missing {needle}"
 
 
+def test_runtime_skill_requires_every_user_deliverable_to_be_sent() -> None:
+    skill = (ROOT / "skills" / "qq-agent-runtime" / "SKILL.md").read_text(encoding="utf-8")
+    interface = (
+        ROOT / "skills" / "qq-agent-runtime" / "references" / "qq-bridge-interface.md"
+    ).read_text(encoding="utf-8")
+
+    assert "不能只留在 outbox" in skill
+    assert "最终响应" in skill
+    assert "不能只声称“文件做好了”" in interface
+
+
 def test_runtime_skill_forbids_internal_prompt_echo() -> None:
     skill = build_runtime_skill("task")
 

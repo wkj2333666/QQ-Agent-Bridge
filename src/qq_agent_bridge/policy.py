@@ -29,8 +29,18 @@ COMMANDS: set[str] = {
     "profile",
     "reset",
     "reload",
+    "schedule",
 }
-READ_ONLY_COMMANDS: set[str] = {"ask", "plan", "search", "task", "status", "help", "profile"}
+READ_ONLY_COMMANDS: set[str] = {
+    "ask",
+    "plan",
+    "search",
+    "task",
+    "status",
+    "help",
+    "profile",
+    "schedule",
+}
 OWNER_ONLY_COMMANDS: set[str] = COMMANDS - READ_ONLY_COMMANDS
 
 
@@ -50,6 +60,12 @@ class Job:
     outgoing_token: str | None = None
     outgoing_dir_dev: int | None = None
     outgoing_dir_ino: int | None = None
+    timeout_seconds: float | None = None
+    source: str = "chat"
+    schedule_id: str | None = None
+    schedule_run_id: int | None = None
+    scheduled_for: int | None = None
+    reply_ats: tuple[str, ...] = ()
 
 
 JobRunner = Callable[[Job], Awaitable[str]]
@@ -146,7 +162,11 @@ class Policy:
                 job.state = "running"
                 result = await asyncio.wait_for(
                     self.runner(job),
-                    timeout=self.cfg.effective_max_runtime(),
+                    timeout=(
+                        job.timeout_seconds
+                        if job.timeout_seconds is not None
+                        else self.cfg.effective_max_runtime()
+                    ),
                 )
             job.state = "done"
             job.result = redact(result)[: self.cfg.effective_max_chars()]
@@ -262,9 +282,10 @@ class Policy:
     def format_job_line(self, jid: str, job: Job) -> str:
         idx = self._job_index(jid, active_only=True)
         index = "?" if idx is None else str(idx)
+        origin = f" schedule:{job.schedule_id}" if job.schedule_id else ""
         return (
             f"{index}. {jid} {job.cmd} {job.state} "
-            f"by {job.event.sender_id}: {self._job_summary(job)}"
+            f"by {job.event.sender_id}{origin}: {self._job_summary(job)}"
         )
 
     def _job_index(self, jid: str, *, active_only: bool = False) -> int | None:
