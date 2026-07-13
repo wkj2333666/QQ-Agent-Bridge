@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.runtime_skill import (  # type: ignore
     build_runtime_skill,
+    build_schedule_interpreter_skill,
     prepare_runtime_skill_bundle,
 )
 
@@ -80,6 +81,7 @@ def test_runtime_skill_is_structured_index_not_monolith() -> None:
     assert "skills/qq-agent-runtime/references/audio-voice-music.md" in skill
     assert "skills/qq-agent-runtime/references/agent-discipline.md" in skill
     assert "skills/qq-agent-runtime/references/qq-bridge-interface.md" in skill
+    assert "skills/qq-agent-runtime/references/scheduling.md" in skill
     assert "大型能力细节放在 references" in skill
 
 
@@ -117,12 +119,23 @@ def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
         ),
         "agent-discipline.md": ("避免幻觉", "证据", "完成判定"),
         "qq-bridge-interface.md": ("QQBOT_SEND_FILE", "QQBOT_SEND_IMAGE", "QQBOT_PROGRESS"),
+        "scheduling.md": ("send_text", "连接词", "语义分段"),
     }
 
     for filename, needles in expected.items():
         text = (refs / filename).read_text(encoding="utf-8")
         for needle in needles:
             assert needle in text, f"{filename} missing {needle}"
+
+
+def test_schedule_interpreter_skill_loads_only_scheduling_reference() -> None:
+    skill = build_schedule_interpreter_skill()
+
+    assert '<skill name="qq-agent-runtime:scheduling">' in skill
+    assert "send_text" in skill
+    assert "并说谢森同我爱你" in skill
+    assert "并说这两个字很好玩" in skill
+    assert "web-search.md" not in skill
 
 
 def test_runtime_skill_requires_every_user_deliverable_to_be_sent() -> None:

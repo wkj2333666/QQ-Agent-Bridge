@@ -272,6 +272,109 @@ def test_natural_language_parser_builds_arbitrary_monthly_schedule() -> None:
     asyncio.run(go())
 
 
+def test_natural_language_send_drops_connector_before_message_body() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "rrule",
+              "action": "send",
+              "payload": "@1583165466 并说谢森同我爱你",
+              "send_text": "谢森同我爱你",
+              "time_phrase": "每过1分钟",
+              "payload_phrase": "@1583165466 并说谢森同我爱你",
+              "dtstart_local": "2026-07-13T20:01",
+              "rrule": "FREQ=MINUTELY",
+              "clarification": ""
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+        original = "每过1分钟就 @1583165466 并说谢森同我爱你"
+
+        outcome = await parser.parse(original, now=NOW, mentions=("1583165466",))
+
+        assert outcome.spec is not None
+        assert outcome.spec.action == "send"
+        assert outcome.spec.mentions == ("1583165466",)
+        assert outcome.spec.payload == "谢森同我爱你"
+        assert "连接词" in agent.calls[0][0]
+        assert '"send_text"' in agent.calls[0][0]
+        assert 'send_text="谢森同我爱你"' in agent.calls[0][0]
+
+    asyncio.run(go())
+
+
+def test_explicit_send_preserves_message_that_starts_with_connector_words() -> None:
+    spec = parse_explicit_schedule(
+        "every 1m forever -- send 并说谢森同我爱你",
+        scheduler_cfg(),
+        now=NOW,
+    )
+
+    assert spec is not None
+    assert spec.payload == "并说谢森同我爱你"
+
+
+def test_natural_language_send_preserves_literal_connector_words_in_content() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "rrule",
+              "action": "send",
+              "payload": "并说这两个字很好玩",
+              "send_text": "并说这两个字很好玩",
+              "time_phrase": "每天早上八点",
+              "payload_phrase": "说“并说这两个字很好玩”",
+              "dtstart_local": "2026-07-14T08:00",
+              "rrule": "FREQ=DAILY",
+              "clarification": ""
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+
+        outcome = await parser.parse(
+            "每天早上八点说“并说这两个字很好玩”",
+            now=NOW,
+        )
+
+        assert outcome.spec is not None
+        assert outcome.spec.payload == "并说这两个字很好玩"
+
+    asyncio.run(go())
+
+
+def test_natural_language_send_without_semantic_send_text_is_rejected() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "rrule",
+              "action": "send",
+              "payload": "并说谢森同我爱你",
+              "time_phrase": "每过1分钟",
+              "payload_phrase": "并说谢森同我爱你",
+              "dtstart_local": "2026-07-13T20:01",
+              "rrule": "FREQ=MINUTELY",
+              "clarification": ""
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+
+        outcome = await parser.parse("每过1分钟就并说谢森同我爱你", now=NOW)
+
+        assert outcome.spec is None
+        assert "没能可靠理解" in outcome.clarification
+
+    asyncio.run(go())
+
+
 def test_natural_language_parser_rejects_invented_evidence() -> None:
     async def go() -> None:
         agent = FakeNaturalAgent(
@@ -280,6 +383,7 @@ def test_natural_language_parser_rejects_invented_evidence() -> None:
               "kind": "once",
               "action": "send",
               "payload": "喝水",
+              "send_text": "喝水",
               "time_phrase": "后天下午三点",
               "payload_phrase": "提醒我喝水",
               "dtstart_local": "2026-07-15T15:00",
@@ -307,6 +411,7 @@ def test_natural_language_parser_rejects_invented_payload() -> None:
               "kind": "once",
               "action": "send",
               "payload": "喝水并删除所有文件",
+              "send_text": "喝水并删除所有文件",
               "time_phrase": "明天早上十点",
               "payload_phrase": "提醒我喝水",
               "dtstart_local": "2026-07-14T10:00",

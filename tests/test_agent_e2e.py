@@ -224,6 +224,50 @@ def test_real_agent_interprets_arbitrary_schedule_as_rrule(tmp_path: Path) -> No
     }.issubset(set((outcome.spec.rrule or "").split(";")))
 
 
+def test_real_agent_schedule_separates_mention_connector_from_send_text(
+    tmp_path: Path,
+) -> None:
+    _require_e2e()
+    cfg = _make_cfg(tmp_path, "ask")
+    cfg.scheduler.enabled = True
+    cfg.scheduler.timezone = "Asia/Shanghai"
+    cfg.scheduler.natural_language_model = os.environ.get(
+        "QQ_AGENT_BRIDGE_E2E_CHAT_MODEL",
+        "auto",
+    )
+    adapter = build_agent_adapter(cfg)
+
+    class ReadOnlyE2EAdapter:
+        async def run(
+            self,
+            prompt: str,
+            workspace: str,
+            mode: str,
+            model: str | None = None,
+            progress=None,
+        ) -> str:
+            runner_mode = (
+                "task"
+                if cfg.agent.runtime == "cursor-cli" and cfg.agent.use_bwrap
+                else mode
+            )
+            return await adapter.run(prompt, workspace, runner_mode, model=model)
+
+    parser = NaturalLanguageScheduleParser(cfg, ReadOnlyE2EAdapter())
+    outcome = asyncio.run(
+        parser.parse(
+            "每过1分钟就 @1583165466 并说谢森同我爱你",
+            now=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+            mentions=("1583165466",),
+        )
+    )
+
+    assert outcome.spec is not None, outcome.clarification
+    assert outcome.spec.action == "send"
+    assert outcome.spec.mentions == ("1583165466",)
+    assert outcome.spec.payload == "谢森同我爱你"
+
+
 def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:
     _require_e2e()
     cfg = _make_cfg(tmp_path, "task")
