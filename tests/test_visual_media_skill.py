@@ -61,14 +61,14 @@ def test_visual_media_reference_defines_an_evidence_driven_video_workflow() -> N
     )
     _require_related_phrases(
         text,
-        ("拿到", "获取", "取得", "获得", "读取到"),
-        ("后", "之后", "再", "才"),
+        ("字幕", "转写", "音频", "画面", "抽帧", "实际媒体", "内容证据"),
+        ("后", "之后", "再", "才", "仅基于", "基于"),
         ("总结", "概括", "回答", "回复"),
-        "content evidence acquisition and the ensuing answer",
+        "direct video-content evidence and the ensuing answer",
     )
 
 
-def test_visual_media_reference_names_bilibili_and_a_chinese_video_platform_or_category() -> None:
+def test_visual_media_reference_names_bilibili_short_urls_and_a_platform_agnostic_workflow() -> None:
     text = _reference_text()
 
     _require_any(text, ("Bilibili", "哔哩哔哩", "B站"), "Bilibili")
@@ -76,16 +76,13 @@ def test_visual_media_reference_names_bilibili_and_a_chinese_video_platform_or_c
     _require_any(
         text,
         (
-            "抖音",
-            "快手",
-            "小红书",
-            "腾讯视频",
-            "优酷",
-            "爱奇艺",
-            "中文视频平台",
-            "国内视频平台",
+            "网页视频理解",
+            "网页视频",
+            "视频平台链接",
+            "跨平台视频",
+            "通用视频链接",
         ),
-        "a representative Chinese video platform or category",
+        "a platform-agnostic video workflow",
     )
 
 
@@ -110,12 +107,13 @@ def test_visual_media_reference_uses_conditional_audio_and_frame_fallbacks() -> 
         "missing captions and an audio fallback",
     )
     _require_any(text, ("转写", "语音识别", "transcrib"), "audio transcription")
-    _require_related_phrases(
-        text,
-        ("必要时", "如果需要", "需要视觉信息", "需要画面信息"),
-        ("时", "则", "再", "才"),
-        ("抽帧", "采样帧", "视频帧"),
-        "a conditional frame-inspection fallback",
+    conditional_frame_pattern = (
+        r"(?:必要时|如果需要|需要视觉信息|需要画面信息)"
+        r"[^。！？；\n]{0,80}(?:抽帧|采样帧|视频帧)"
+    )
+    assert re.search(conditional_frame_pattern, text), (
+        "visual-media reference must make frame inspection conditional; "
+        "for example, '必要时抽帧'"
     )
     _require_any(text, ("多个时间段", "多个时段", "多段采样", "多帧"), "multi-range frame sampling")
 
@@ -133,19 +131,49 @@ def test_visual_media_reference_handles_local_video_attachments() -> None:
 def test_visual_media_reference_treats_access_controls_as_honest_blockers() -> None:
     text = _reference_text()
 
-    for marker in ("登录", "cookie", "403", "429"):
-        assert marker.casefold() in text.casefold(), (
-            f"visual-media reference missing access-control marker {marker!r}"
-        )
     _require_any(text, ("不要绕过", "禁止绕过", "不应绕过"), "access-control bypass ban")
     _require_any(text, ("不要伪造", "不得伪造", "不可伪造"), "cookie or session fabrication ban")
-    _require_any(
-        text,
-        ("不要写“视频内容概括”", "不输出视频内容概括", "不声称视频内容", "不作内容概括"),
-        "withholding video-content claims without direct evidence",
+    instruction_pattern = re.compile(r"[^。！？\n]+")
+    truthful_blocker_instruction = next(
+        (
+            instruction
+            for instruction in instruction_pattern.findall(text)
+            if all(
+                marker.casefold() in instruction.casefold()
+                for marker in ("登录", "cookie", "403", "429")
+            )
+            and any(
+                phrase in instruction
+                for phrase in (
+                    "不要写“视频内容概括”",
+                    "不输出视频内容概括",
+                    "不声称视频内容",
+                    "不作内容概括",
+                    "不要总结视频内容",
+                    "不总结视频内容",
+                )
+            )
+            and any(
+                phrase in instruction
+                for phrase in (
+                    "已验证元数据",
+                    "已确认的元数据",
+                    "仅列元数据",
+                    "只列元数据",
+                )
+            )
+            and any(
+                phrase in instruction
+                for phrase in ("阻塞点", "说明阻塞", "报告阻塞", "阻塞回复")
+            )
+        ),
+        None,
     )
-    _require_any(text, ("已验证元数据", "已确认的元数据", "仅列元数据"), "verified metadata reply")
-    _require_any(text, ("阻塞点", "说明阻塞", "报告阻塞", "阻塞回复"), "reported blocker")
+    assert truthful_blocker_instruction, (
+        "visual-media reference must state in one instruction that 登录/cookie/403/429 "
+        "failures do not permit content summaries and only allow verified metadata plus "
+        "the blocker"
+    )
 
 
 def test_visual_media_reference_bounds_long_video_work_and_cleans_temporary_media() -> None:
