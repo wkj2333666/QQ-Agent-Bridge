@@ -26,6 +26,7 @@ from qq_agent_bridge.policy import Policy  # type: ignore
 from qq_agent_bridge.prompting import build_agent_prompt  # type: ignore
 from qq_agent_bridge.schedule_parser import NaturalLanguageScheduleParser  # type: ignore
 from qq_agent_bridge.types import ChatEvent  # type: ignore
+from test_schedule_app import FakeAgent
 
 
 _E2E_ENV = "QQ_AGENT_BRIDGE_AGENT_E2E"
@@ -223,7 +224,13 @@ def test_voice_transcription_e2e_injects_only_verified_transcript(
         binary, model = _write_fake_whisper(
             tmp_path, transcript=transcript, exit_code=exit_code
         )
-        cfg = _make_cfg(tmp_path, "task")
+        cfg = BridgeConfig(workspaces={str(tmp_path): True})
+        cfg.agent.default_workspace = str(tmp_path)
+        cfg.agent.runtime = ""
+        cfg.agent.use_bwrap = False
+        cfg.agent.require_env = False
+        cfg.resources.root = "downloads/qq-agent-bridge"
+        cfg.commands = {"task": True}
         cfg.allowed_users = ["10001"]
         cfg.whisper.enabled = True
         cfg.whisper.binary = str(binary)
@@ -231,11 +238,12 @@ def test_voice_transcription_e2e_injects_only_verified_transcript(
         cfg.whisper.cache_enabled = False
         cfg.whisper.cache_root = str(tmp_path / "whisper-cache")
         adapter = _CaptureAdapter({"url": "https://onebot.invalid/voice.wav"})
-        prompts: list[str] = []
-        modes: list[str] = []
+        agent = FakeAgent(["语音任务已处理"])
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
+        app.agent = agent
+        app.cursor = agent
         app.resources = app._build_resource_manager(cfg)
 
         async def fake_fetch(url: str, _limit: int) -> tuple[bytes, str]:
@@ -244,18 +252,6 @@ def test_voice_transcription_e2e_injects_only_verified_transcript(
 
         app.resources.fetch = fake_fetch
 
-        async def fake_agent(
-            prompt: str,
-            _workspace: str,
-            mode: str,
-            model: str | None = None,
-            progress: Any = None,
-        ) -> str:
-            prompts.append(prompt)
-            modes.append(mode)
-            return "语音任务已处理"
-
-        app.agent.run = fake_agent  # type: ignore[method-assign]
         app.policy = Policy(cfg, app._agent_runner)
         event = _normalize_event(
             {
@@ -278,21 +274,21 @@ def test_voice_transcription_e2e_injects_only_verified_transcript(
         assert event.resources[0].kind == "voice"
 
         await app._handle(event)
-        await _wait_for(lambda: len(prompts) == 1, timeout=5.0)
+        await _wait_for(lambda: len(agent.calls) == 1, timeout=5.0)
 
         assert adapter.get_record_calls == [{"file": "voice.silk", "out_format": "wav"}]
-        assert len(prompts) == 1
-        assert modes == ["task"]
+        assert len(agent.calls) == 1
+        prompt, _workspace, mode, _model = agent.calls[0]
+        assert mode == "task"
+        transcript_lines = [
+            line for line in prompt.splitlines() if line.startswith("  transcript")
+        ]
         if exit_code == 0:
-            assert (
+            assert transcript_lines == [
                 "  transcript (verified by local Whisper, language=zh): 我是测试语音"
-                in prompts[0]
-            )
-            assert prompts[0].count("我是测试语音") == 1
+            ]
         else:
-            assert "  transcript: unavailable (Whisper failed)" in prompts[0]
-            assert "我是测试语音" not in prompts[0]
-            assert "猜测" not in prompts[0]
+            assert transcript_lines == ["  transcript: unavailable (Whisper failed)"]
 
     asyncio.run(go())
 
