@@ -36,6 +36,8 @@ def test_runtime_skill_loads_skill_body_for_task() -> None:
     assert "相似主题" in skill
     assert "不能当作视频内容证据" in skill
     assert "只能当背景资料" in skill
+    assert "该视频页面、作者简介等页面文字，均不能当作视频内容证据" in skill
+    assert "该视频页面、该视频字幕/转写、作者简介或用户提供的片段" not in skill
 
 
 def test_runtime_skill_teaches_progress_directives() -> None:
