@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import wave
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,14 @@ def configure_local_media_root(cfg: BridgeConfig, workspace: Path) -> Path:
     root.mkdir()
     cfg.resources.local_media_roots = [str(root)]
     return root
+
+
+def write_tiny_wav(path: Path) -> None:
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8_000)
+        wav.writeframes(b"\x00\x00")
 
 
 def make_ev(resources: tuple[ChatResource, ...], mid: str = "m/1") -> ChatEvent:
@@ -161,7 +170,7 @@ def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcri
     async def go() -> None:
         cfg = make_cfg(tmp_path)
         source = configure_local_media_root(cfg, tmp_path) / "onebot-record.wav"
-        source.write_bytes(b"RIFFlocal-wav")
+        write_tiny_wav(source)
         transcriber = FakeTranscriber(TranscriptionResult("本地语音", "ok", "zh", None))
 
         async def record_url(resource: ChatResource) -> str | None:
@@ -182,11 +191,43 @@ def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcri
         assert len(refs) == 1
         assert refs[0].local_path is not None
         staged = tmp_path / refs[0].local_path
-        assert staged.read_bytes() == b"RIFFlocal-wav"
+        assert staged.read_bytes() == source.read_bytes()
         assert staged.name.endswith(".wav")
         assert refs[0].transcript == "本地语音"
         assert refs[0].transcript_status == "verified"
         assert transcriber.paths == [staged]
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("payload", [b"RIFFlocal-wav", b"plain text"], ids=("fake-header", "text"))
+def test_voice_rejects_invalid_wav_local_record_path(tmp_path: Path, payload: bytes) -> None:
+    async def go() -> None:
+        cfg = make_cfg(tmp_path)
+        source = configure_local_media_root(cfg, tmp_path) / "onebot-record.wav"
+        source.write_bytes(payload)
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+        manager = ResourceManager(
+            cfg,
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-local-invalid-wav"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "QQ voice local file unavailable"
+        assert transcriber.paths == []
 
     asyncio.run(go())
 
@@ -281,17 +322,17 @@ def test_voice_rejects_untrusted_local_record_path(tmp_path: Path, source_kind: 
         source = trusted_root / "onebot-record.wav"
         if source_kind == "empty-roots":
             cfg.resources.local_media_roots = []
-            source.write_bytes(b"RIFFlocal-wav")
+            write_tiny_wav(source)
         elif source_kind == "invalid-root-type":
             cfg.resources.local_media_roots = "/"  # type: ignore[assignment]
             source = tmp_path / "outside.wav"
-            source.write_bytes(b"RIFFlocal-wav")
+            write_tiny_wav(source)
         elif source_kind == "outside-root":
             source = tmp_path / "outside.wav"
-            source.write_bytes(b"RIFFlocal-wav")
+            write_tiny_wav(source)
         elif source_kind == "symlink":
             target = tmp_path / "outside.wav"
-            target.write_bytes(b"RIFFlocal-wav")
+            write_tiny_wav(target)
             source.symlink_to(target)
         elif source_kind == "symlink-loop":
             source.symlink_to(source)
