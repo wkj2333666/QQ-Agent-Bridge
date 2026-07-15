@@ -23,7 +23,7 @@ QQ user/group
 - OneBot v11 reverse WebSocket server.
 - QQ group mention routing and private-chat defaults.
 - Owner/user/group allowlists.
-- Read-only `/ask`, `/plan`, `/search`, `/task`, `/status`, `/help`, `/profile`
+- Read-only `/ask`, `/plan`, `/search`, `/task`, `/status`, `/help`, `/profile`, `/mode`
   command set for ordinary users.
 - Persistent `/schedule`; group mutations are owner-only, while allowed private
   users can manage their own schedules when enabled.
@@ -151,6 +151,9 @@ Common commands:
 - `/profile`: show the current profile.
 - `/profile set <prompt>`: set the current private or group profile.
 - `/profile clear`: clear the current private or group profile.
+- `/mode`: show the default mode for commandless mentions in this group.
+- `/mode set ask|plan|task`: set this group's default mention mode.
+- `/mode clear`: remove the group override and use the global default.
 
 Owner-only commands:
 
@@ -160,8 +163,15 @@ Owner-only commands:
 - `/reset`: clear current conversation memory and group ambient context.
 - `/reload`: reload `config.yaml`.
 
-In groups, only owners can change the group profile. In private chats, an
-allowed user can change their own private profile.
+In groups, only owners can change the group profile or `/mode`; other group
+members can view them. In private chats, an allowed user can change their own
+private profile. `/mode` is group-only.
+
+A commandless mention still goes through the existing chat-versus-question
+decision first. Casual chat remains in the interjection flow; only a message
+classified as needing an answer is routed to the group's `ask`, `plan`, or
+`task` default. Explicit commands are unaffected. Changes are persisted to
+`config.yaml`.
 
 In groups, only owners can create, pause, resume, run, or cancel schedules.
 Allowed private-chat users can manage their own schedules when
@@ -195,6 +205,18 @@ Profile isolation is by current chat scope:
 - group chat uses `profiles.groups[group_id]` or `profiles.default`;
 - private chat uses `profiles.users[user_id]` or `profiles.default`;
 - profiles from other groups/users are not exposed to the agent.
+
+Per-group commandless mention modes can also be configured directly:
+
+```yaml
+mention_modes:
+  default: ask
+  groups:
+    "2000000001": task
+```
+
+Only `ask`, `plan`, and `task` are accepted, and the corresponding command must
+also be enabled. Risky modes such as `code` and `shell` cannot be implicit.
 
 ## Agent Runtime
 

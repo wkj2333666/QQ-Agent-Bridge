@@ -111,6 +111,15 @@ def test_parse_profile_command() -> None:
     assert parsed.args == "set 你是项目管家"
 
 
+def test_parse_mode_command() -> None:
+    cfg = BridgeConfig()
+    pol = Policy(cfg, fake_runner)
+    parsed = pol.parse("@1000000001 /mode set task")
+    assert parsed is not None
+    assert parsed.name == "mode"
+    assert parsed.args == "set task"
+
+
 def test_non_owner_can_only_use_read_only_commands() -> None:
     cfg = BridgeConfig(
         owners=["owner"],
@@ -130,12 +139,13 @@ def test_non_owner_can_only_use_read_only_commands() -> None:
             "stop": True,
             "reload": True,
             "profile": True,
+            "mode": True,
         },
         workspaces={"/tmp": True},
     )
     pol = Policy(cfg, fake_runner)
 
-    for idx, cmd in enumerate(("ask", "plan", "search", "task", "status", "help", "profile")):
+    for idx, cmd in enumerate(("ask", "plan", "search", "task", "status", "help", "profile", "mode")):
         ok, reason = pol.allow(make_ev(f"/{cmd} x", sender="reader", mid=f"ro-{idx}"), cmd)
         assert ok, reason
 
@@ -158,11 +168,12 @@ def test_allowed_group_member_can_use_read_only_without_user_allowlist() -> None
             "status": True,
             "help": True,
             "profile": True,
+            "mode": True,
         },
     )
     pol = Policy(cfg, fake_runner)
 
-    for idx, cmd in enumerate(("ask", "plan", "search", "task", "status", "help", "profile")):
+    for idx, cmd in enumerate(("ask", "plan", "search", "task", "status", "help", "profile", "mode")):
         ev = make_ev(f"/{cmd} hi", sender="group-member", group="123", mid=f"gm-ro-{idx}")
         ok, reason = pol.allow(ev, cmd)
         assert ok, reason

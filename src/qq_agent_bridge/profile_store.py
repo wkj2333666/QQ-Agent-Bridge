@@ -4,47 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import ProfileConfig
+from .config_block_store import write_top_level_block
 
 
 def write_profiles_to_config(path: Path, profiles: ProfileConfig) -> None:
     """Replace or append the top-level profiles block."""
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
     block = _format_profiles_block(profiles)
-    if not text.strip():
-        path.write_text(block + "\n", encoding="utf-8")
-        return
-    updated = _replace_top_level_block(text, "profiles", block)
-    if updated == text:
-        updated = _append_profiles_block(text, block)
-    path.write_text(updated, encoding="utf-8")
-
-
-def _replace_top_level_block(text: str, key: str, block: str) -> str:
-    lines = text.splitlines(keepends=True)
-    start: int | None = None
-    end = len(lines)
-    prefix = f"{key}:"
-    for idx, line in enumerate(lines):
-        if line.startswith(prefix):
-            start = idx
-            break
-    if start is None:
-        return text
-    for idx in range(start + 1, len(lines)):
-        line = lines[idx]
-        if line.strip() and not line.startswith((" ", "\t")) and not line.lstrip().startswith("#"):
-            end = idx
-            break
-    replacement = [item + "\n" for item in block.splitlines()]
-    return "".join(lines[:start] + replacement + lines[end:])
-
-
-def _append_profiles_block(text: str, block: str) -> str:
-    marker = "\n# OneBot"
-    if marker in text:
-        before, after = text.split(marker, 1)
-        return before.rstrip() + "\n\n" + block + "\n" + marker + after
-    return text.rstrip() + "\n\n" + block + "\n"
+    write_top_level_block(path, "profiles", block)
 
 
 def _format_profiles_block(profiles: ProfileConfig) -> str:

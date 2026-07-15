@@ -39,6 +39,7 @@ def make_cfg(memory_enabled: bool = True) -> BridgeConfig:
             "search": True,
             "status": True,
             "help": True,
+            "mode": True,
             "reset": True,
             "code": True,
             "approve": True,
@@ -126,6 +127,16 @@ def test_usage_reply_reflects_group_and_private_context() -> None:
     assert group_reply is not None and "群里 @我" in group_reply
     assert "先发图片/文件" in group_reply
     assert private_reply is not None and "私聊直接问" in private_reply
+
+
+def test_help_only_advertises_mode_in_group_chat() -> None:
+    cfg = make_cfg()
+
+    group_help = build_help_reply(cfg, make_ev(is_group=True))
+    private_help = build_help_reply(cfg, make_ev(is_group=False))
+
+    assert "/mode" in group_help
+    assert "/mode" not in private_help
 
 
 def test_memory_reply_reflects_config() -> None:

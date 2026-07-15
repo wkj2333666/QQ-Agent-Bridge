@@ -8,6 +8,10 @@ from typing import Any
 import yaml
 
 
+MENTION_MODE_OPTIONS: tuple[str, ...] = ("ask", "plan", "task")
+MENTION_MODES = frozenset(MENTION_MODE_OPTIONS)
+
+
 @dataclass
 class OneBotConfig:
     host: str = "127.0.0.1"
@@ -141,6 +145,12 @@ class ProfileConfig:
 
 
 @dataclass
+class MentionModeConfig:
+    default: str = "ask"
+    groups: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class BridgeConfig:
     owners: list[str] = field(default_factory=list)
     allowed_users: list[str] = field(default_factory=list)
@@ -162,6 +172,7 @@ class BridgeConfig:
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     profiles: ProfileConfig = field(default_factory=ProfileConfig)
+    mention_modes: MentionModeConfig = field(default_factory=MentionModeConfig)
     log_level: str = "INFO"
 
     @classmethod
@@ -180,6 +191,7 @@ class BridgeConfig:
         proactive = ProactiveConfig(**raw.get("proactive", {}))
         scheduler = SchedulerConfig(**raw.get("scheduler", {}))
         profiles = _load_profiles(raw.get("profiles", {}))
+        mention_modes = _load_mention_modes(raw.get("mention_modes", {}))
         return cls(
             owners=raw.get("owners", []),
             allowed_users=raw.get("allowed_users", []),
@@ -201,6 +213,7 @@ class BridgeConfig:
             proactive=proactive,
             scheduler=scheduler,
             profiles=profiles,
+            mention_modes=mention_modes,
             log_level=raw.get("log_level", "INFO"),
         )
 
@@ -231,6 +244,9 @@ class BridgeConfig:
     def is_command_allowed(self, name: str) -> bool:
         return self.commands.get(name, False)
 
+    def mention_mode_for_group(self, gid: str) -> str:
+        return self.mention_modes.groups.get(str(gid), self.mention_modes.default)
+
     def effective_max_runtime(self) -> int:
         return min(self.max_runtime_seconds, self.agent.max_runtime_seconds)
 
@@ -246,6 +262,25 @@ def _load_profiles(raw: Any) -> ProfileConfig:
         groups=_string_map(raw.get("groups", {})),
         users=_string_map(raw.get("users", {})),
     )
+
+
+def _load_mention_modes(raw: Any) -> MentionModeConfig:
+    if not isinstance(raw, dict):
+        return MentionModeConfig()
+    default = _mention_mode(raw.get("default")) or "ask"
+    groups: dict[str, str] = {}
+    raw_groups = raw.get("groups", {})
+    if isinstance(raw_groups, dict):
+        for key, value in raw_groups.items():
+            mode = _mention_mode(value)
+            if mode:
+                groups[str(key)] = mode
+    return MentionModeConfig(default=default, groups=groups)
+
+
+def _mention_mode(value: Any) -> str | None:
+    mode = str(value or "").strip().lower()
+    return mode if mode in MENTION_MODES else None
 
 
 def _string_map(raw: Any) -> dict[str, str]:
