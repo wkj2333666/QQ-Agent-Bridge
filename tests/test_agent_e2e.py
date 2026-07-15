@@ -7,7 +7,9 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qq_agent_bridge.agent_runtime import build_agent_adapter  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
+from qq_agent_bridge.onebot import _normalize_event  # type: ignore
 from qq_agent_bridge.policy import Policy  # type: ignore
 from qq_agent_bridge.prompting import build_agent_prompt  # type: ignore
 from qq_agent_bridge.schedule_parser import NaturalLanguageScheduleParser  # type: ignore
@@ -81,12 +84,20 @@ def _make_ev(text: str, chat_id: str = "e2e-user") -> ChatEvent:
 
 
 class _CaptureAdapter:
-    def __init__(self) -> None:
+    def __init__(self, get_record_response: dict[str, str] | None = None) -> None:
         self.events: list[tuple[str, Any]] = []
         self.sent: list[tuple[str, bool, str, str | None]] = []
         self.sent_images: list[tuple[str, bool, Path, str | None]] = []
         self.sent_files: list[tuple[str, bool, Path, str | None]] = []
         self.sent_voices: list[tuple[str, bool, Path, str | None]] = []
+        self.get_record_response = get_record_response or {}
+        self.get_record_calls: list[dict[str, str | None]] = []
+
+    async def resolve_record_url(self, resource: Any) -> str | None:
+        self.get_record_calls.append(
+            {"file": resource.file_id or resource.url, "out_format": "wav"}
+        )
+        return self.get_record_response.get("url")
 
     async def send(
         self,
@@ -139,6 +150,33 @@ async def _wait_for(condition: Any, timeout: float = 180.0) -> None:
     raise AssertionError("timed out waiting for E2E condition")
 
 
+def _write_fake_whisper(
+    tmp_path: Path, *, transcript: str = "", exit_code: int = 0
+) -> tuple[Path, Path]:
+    binary = tmp_path / "fake-whisper.py"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            f"""
+            import pathlib
+            import sys
+
+            args = sys.argv[1:]
+            if {exit_code} == 0:
+                pathlib.Path(args[args.index("-of") + 1]).with_suffix(".txt").write_text(
+                    {transcript!r}, encoding="utf-8"
+                )
+            raise SystemExit({exit_code})
+            """
+        ),
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"fake whisper model")
+    return binary, model
+
+
 def test_cursor_e2e_uses_bwrap_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_RUNTIME", raising=False)
     monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_BWRAP", raising=False)
@@ -171,6 +209,92 @@ def test_cursor_e2e_can_disable_bwrap_explicitly(
     cfg = _make_cfg(tmp_path, "ask")
 
     assert not cfg.agent.use_bwrap
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "transcript"),
+    [(0, "我是测试语音"), (2, "")],
+    ids=("success", "whisper-failure"),
+)
+def test_voice_transcription_e2e_injects_only_verified_transcript(
+    tmp_path: Path, exit_code: int, transcript: str
+) -> None:
+    async def go() -> None:
+        binary, model = _write_fake_whisper(
+            tmp_path, transcript=transcript, exit_code=exit_code
+        )
+        cfg = _make_cfg(tmp_path, "task")
+        cfg.allowed_users = ["10001"]
+        cfg.whisper.enabled = True
+        cfg.whisper.binary = str(binary)
+        cfg.whisper.model = str(model)
+        cfg.whisper.cache_enabled = False
+        cfg.whisper.cache_root = str(tmp_path / "whisper-cache")
+        adapter = _CaptureAdapter({"url": "https://onebot.invalid/voice.wav"})
+        prompts: list[str] = []
+        modes: list[str] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.resources = app._build_resource_manager(cfg)
+
+        async def fake_fetch(url: str, _limit: int) -> tuple[bytes, str]:
+            assert url == "https://onebot.invalid/voice.wav"
+            return b"RIFFfake-wav", "audio/wav"
+
+        app.resources.fetch = fake_fetch
+
+        async def fake_agent(
+            prompt: str,
+            _workspace: str,
+            mode: str,
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            prompts.append(prompt)
+            modes.append(mode)
+            return "语音任务已处理"
+
+        app.agent.run = fake_agent  # type: ignore[method-assign]
+        app.policy = Policy(cfg, app._agent_runner)
+        event = _normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "self_id": "1000000001",
+                "user_id": 10001,
+                "message_id": "voice-transcription-e2e",
+                "time": 1,
+                "message": [
+                    {"type": "text", "data": {"text": "/task 请转写这条语音"}},
+                    {"type": "record", "data": {"file": "voice.silk", "duration": 2}},
+                ],
+            },
+            "1000000001",
+        )
+        assert event is not None
+        assert not event.is_group
+        assert event.mentioned_bot
+        assert event.resources[0].kind == "voice"
+
+        await app._handle(event)
+        await _wait_for(lambda: len(prompts) == 1, timeout=5.0)
+
+        assert adapter.get_record_calls == [{"file": "voice.silk", "out_format": "wav"}]
+        assert len(prompts) == 1
+        assert modes == ["task"]
+        if exit_code == 0:
+            assert (
+                "  transcript (verified by local Whisper, language=zh): 我是测试语音"
+                in prompts[0]
+            )
+            assert prompts[0].count("我是测试语音") == 1
+        else:
+            assert "  transcript: unavailable (Whisper failed)" in prompts[0]
+            assert "我是测试语音" not in prompts[0]
+            assert "猜测" not in prompts[0]
+
+    asyncio.run(go())
 
 
 async def _run_agent(prompt: str, cfg: BridgeConfig, mode: str, model: str | None) -> str:
