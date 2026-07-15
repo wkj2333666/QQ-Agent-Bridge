@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -31,8 +32,20 @@ class WhisperRunner:
     """Run whisper.cpp with a bounded lifetime and a successful-result cache."""
 
     def __init__(self, cfg: WhisperConfig) -> None:
+        timeout_seconds = float(cfg.timeout_seconds)
+        cfg.timeout_seconds = (
+            min(3600.0, max(1.0, timeout_seconds))
+            if math.isfinite(timeout_seconds)
+            else WhisperConfig.timeout_seconds
+        )
+        max_concurrent = float(cfg.max_concurrent)
+        cfg.max_concurrent = (
+            min(4, max(1, int(max_concurrent)))
+            if math.isfinite(max_concurrent)
+            else WhisperConfig.max_concurrent
+        )
         self.cfg = cfg
-        self._semaphore = asyncio.Semaphore(max(1, int(cfg.max_concurrent)))
+        self._semaphore = asyncio.Semaphore(cfg.max_concurrent)
 
     async def transcribe(
         self, path: Path, *, language: str | None = None
