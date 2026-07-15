@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -144,10 +145,16 @@ class ResourceManager:
         if not source_url:
             return self._unavailable_voice(resource, "QQ voice conversion unavailable"), 0
 
-        try:
-            payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
-        except Exception:  # noqa: BLE001 - media staging is an optional enrichment
-            return self._unavailable_voice(resource, "QQ voice download unavailable"), 0
+        if self._is_http_url(source_url):
+            try:
+                payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
+            except Exception:  # noqa: BLE001 - media staging is an optional enrichment
+                return self._unavailable_voice(resource, "QQ voice download unavailable"), 0
+        else:
+            try:
+                payload, content_type = self._read_local_record(source_url, total_bytes, resource)
+            except ValueError as exc:
+                return self._unavailable_voice(resource, str(exc)), 0
         if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
             return self._unavailable_voice(resource, "QQ voice download limit exceeded"), len(payload)
 
@@ -179,6 +186,34 @@ class ResourceManager:
 
     def _voice_needs_conversion(self, resource: ChatResource) -> bool:
         return bool(resource.file_id) or self._is_silk(resource)
+
+    @staticmethod
+    def _is_http_url(value: str) -> bool:
+        return urlsplit(value).scheme.lower() in {"http", "https"}
+
+    def _read_local_record(
+        self, source: str, total_bytes: int, resource: ChatResource
+    ) -> tuple[bytes, str]:
+        path = Path(source).expanduser()
+        remaining = self.cfg.resources.max_total_bytes - total_bytes
+        limit = min(self.cfg.resources.max_bytes, remaining)
+        if limit <= 0:
+            raise ValueError("QQ voice download limit exceeded")
+        try:
+            if not path.is_file():
+                raise ValueError("QQ voice local file unavailable")
+            if path.stat().st_size > limit:
+                raise ValueError("QQ voice download limit exceeded")
+            with path.open("rb") as file:
+                payload = file.read(limit + 1)
+        except OSError as exc:
+            raise ValueError("QQ voice local file unavailable") from exc
+        if len(payload) > limit:
+            raise ValueError("QQ voice download limit exceeded")
+        mime_type = mimetypes.guess_type(path.name)[0] or resource.mime_type or "audio/wav"
+        if not mime_type.startswith("audio/"):
+            mime_type = "audio/wav"
+        return payload, mime_type
 
     @staticmethod
     def _is_silk(resource: ChatResource) -> bool:
