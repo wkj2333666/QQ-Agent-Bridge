@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import stat
 import sys
 import textwrap
@@ -9,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.whisper_runner as whisper_runner  # type: ignore
 from qq_agent_bridge.config import WhisperConfig  # type: ignore
 from qq_agent_bridge.whisper_runner import TranscriptionResult, WhisperRunner  # type: ignore
 
@@ -191,5 +194,92 @@ def test_runner_reuses_successful_cache_entry(tmp_path: Path) -> None:
         second = await runner.transcribe(audio)
 
         assert first == second == TranscriptionResult("cached", "ok", "zh", None)
+
+    asyncio.run(run())
+
+
+def test_runner_creates_private_cache_and_transcript_files(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    async def run() -> None:
+        fake = make_fake_whisper(tmp_path, output="private transcript")
+        audio = tmp_path / "input.wav"
+        audio.write_bytes(b"audio")
+        runner = WhisperRunner(make_cfg(fake))
+        transcript_modes: list[int] = []
+        original_read_text = Path.read_text
+
+        def record_transcript_mode(path: Path, *args: object, **kwargs: object) -> str:
+            if path.name == "transcription.txt":
+                transcript_modes.append(stat.S_IMODE(path.stat().st_mode))
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", record_transcript_mode)
+
+        result = await runner.transcribe(audio)
+
+        cache_root = Path(runner.cfg.cache_root)
+        cache_path = cache_root / f"{runner._cache_key(audio, Path(runner.cfg.model), 'zh')}.json"
+        assert result.status == "ok"
+        assert stat.S_IMODE(cache_root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+        assert transcript_modes == [0o600]
+
+    previous_umask = os.umask(0)
+    try:
+        asyncio.run(run())
+    finally:
+        os.umask(previous_umask)
+
+
+def test_runner_cleans_expired_entries_on_subsequent_cache_activity(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    async def run() -> None:
+        fake = make_fake_whisper(tmp_path, output="cached")
+        audio = tmp_path / "input.wav"
+        audio.write_bytes(b"audio")
+        runner = WhisperRunner(make_cfg(fake, cache_ttl_seconds=10))
+        monkeypatch.setattr(whisper_runner.time, "time", lambda: 100.0)
+
+        assert (await runner.transcribe(audio)).status == "ok"
+        expired_path = Path(runner.cfg.cache_root) / f"{'a' * 64}.json"
+        expired_path.write_text(
+            json.dumps(
+                {
+                    "created_at": 0.0,
+                    "result": {
+                        "text": "expired",
+                        "status": "ok",
+                        "language": "zh",
+                        "error": None,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert (await runner.transcribe(audio)).status == "ok"
+        assert not expired_path.exists()
+
+    asyncio.run(run())
+
+
+def test_runner_preserves_unrelated_json_during_cache_cleanup(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    async def run() -> None:
+        fake = make_fake_whisper(tmp_path)
+        audio = tmp_path / "input.wav"
+        audio.write_bytes(b"audio")
+        runner = WhisperRunner(make_cfg(fake))
+        monkeypatch.setattr(whisper_runner.time, "time", lambda: 100.0)
+        cache_root = Path(runner.cfg.cache_root)
+        cache_root.mkdir()
+        unrelated_path = cache_root / "unrelated.json"
+        unrelated_path.write_text('{"keep": true}', encoding="utf-8")
+
+        assert (await runner.transcribe(audio)).status == "ok"
+        assert unrelated_path.read_text(encoding="utf-8") == '{"keep": true}'
 
     asyncio.run(run())

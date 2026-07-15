@@ -8,6 +8,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import stat
 import tempfile
 import time
 from typing import Literal
@@ -18,6 +20,7 @@ from .config import WhisperConfig
 
 _RUNNER_VERSION = "1"
 _MAX_ERROR_CHARS = 500
+_CACHE_FILENAME = re.compile(r"[0-9a-f]{64}\.json\Z")
 
 
 @dataclass(frozen=True)
@@ -61,12 +64,14 @@ class WhisperRunner:
 
         try:
             cache_root = Path(self.cfg.cache_root)
-            cache_root.mkdir(parents=True, exist_ok=True)
+            cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cache_root.chmod(0o700)
         except OSError as exc:
             return TranscriptionResult(None, "failed", None, f"cache unavailable: {exc}")
 
         cache_key = self._cache_key(audio_path, model, selected_language)
         if self.cfg.cache_enabled:
+            self._trim_cache(cache_root)
             cached = self._load_cache(cache_root, cache_key)
             if cached is not None:
                 return cached
@@ -74,6 +79,7 @@ class WhisperRunner:
         async with self._semaphore:
             # Recheck after waiting so equivalent queued requests share one result.
             if self.cfg.cache_enabled:
+                self._trim_cache(cache_root)
                 cached = self._load_cache(cache_root, cache_key)
                 if cached is not None:
                     return cached
@@ -156,6 +162,7 @@ class WhisperRunner:
                         None, "failed", None, "whisper did not produce a text file"
                     )
                 try:
+                    output_file.chmod(0o600)
                     text = output_file.read_text(encoding="utf-8")
                 except OSError as exc:
                     return TranscriptionResult(None, "failed", None, f"unable to read transcript: {exc}")
@@ -195,6 +202,9 @@ class WhisperRunner:
     def _load_cache(self, cache_root: Path, cache_key: str) -> TranscriptionResult | None:
         cache_path = cache_root / f"{cache_key}.json"
         try:
+            if not stat.S_ISREG(cache_path.lstat().st_mode):
+                return None
+            cache_path.chmod(0o600)
             entry = json.loads(cache_path.read_text(encoding="utf-8"))
             created_at = float(entry["created_at"])
             result = TranscriptionResult(**entry["result"])
@@ -213,7 +223,12 @@ class WhisperRunner:
         temporary_path = cache_root / f".{cache_key}.{uuid4().hex}.tmp"
         entry = {"created_at": time.time(), "result": asdict(result)}
         try:
-            temporary_path.write_text(json.dumps(entry, ensure_ascii=True), encoding="utf-8")
+            fd = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as cache_file:
+                os.fchmod(cache_file.fileno(), 0o600)
+                json.dump(entry, cache_file, ensure_ascii=True)
+                cache_file.flush()
+                os.fsync(cache_file.fileno())
             os.replace(temporary_path, cache_path)
             self._trim_cache(cache_root)
         except OSError:
@@ -221,14 +236,24 @@ class WhisperRunner:
 
     def _trim_cache(self, cache_root: Path) -> None:
         entries: list[tuple[float, Path]] = []
-        for cache_path in cache_root.glob("*.json"):
+        try:
+            cache_paths = tuple(cache_root.iterdir())
+        except OSError:
+            return
+        now = time.time()
+        for cache_path in cache_paths:
+            if not _CACHE_FILENAME.fullmatch(cache_path.name):
+                continue
             try:
+                if not stat.S_ISREG(cache_path.lstat().st_mode):
+                    continue
+                cache_path.chmod(0o600)
                 entry = json.loads(cache_path.read_text(encoding="utf-8"))
                 created_at = float(entry["created_at"])
             except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
                 self._unlink(cache_path)
                 continue
-            if time.time() - created_at > self.cfg.cache_ttl_seconds:
+            if now - created_at > self.cfg.cache_ttl_seconds:
                 self._unlink(cache_path)
             else:
                 entries.append((created_at, cache_path))
