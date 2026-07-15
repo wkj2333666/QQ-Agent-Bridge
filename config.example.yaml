@@ -61,6 +61,19 @@ resources:
   cache_max_items: 4
   allowed_kinds: ["image", "file", "audio", "voice", "video", "url", "forward"]
 
+# Whisper voice transcription; keep disabled until the binary and model are configured.
+whisper:
+  enabled: false
+  binary: ""
+  model: ""
+  language: "zh"
+  timeout_seconds: 90
+  max_concurrent: 1
+  cache_enabled: true
+  cache_root: "data/whisper-cache"
+  cache_ttl_seconds: 86400
+  cache_max_items: 256
+
 progress:
   enabled: true
   first_heartbeat_seconds: 30
