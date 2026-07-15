@@ -409,12 +409,19 @@ def test_task_prompt_requires_video_content_evidence_before_summary() -> None:
 
     assert "视频/音频链接" in prompt
     assert "不能只凭标题" in prompt
+    assert "页面元数据、简介或页面正文只能用于识别资源，不能作为正片内容证据" in prompt
+    assert "实际取得的字幕、转写、音频、抽帧画面、实际媒体或用户提供片段之一" in prompt
+    assert "登录、cookie 缺失、403、429、地域限制、限流或反爬都是阻塞" in prompt
+    assert "不得绕过访问控制或伪造 cookie/会话" in prompt
+    assert "只报告已验证元数据和阻塞点" in prompt
     assert "字幕" in prompt
     assert "实际工具成功" in prompt
     assert "不要编造工作流程" in prompt
     assert "相似主题" in prompt
     assert "不能当作视频内容证据" in prompt
     assert "只能当背景资料" in prompt
+    assert "解析短链" not in prompt
+    assert "媒体补证" not in prompt
 
 
 def test_task_prompt_documents_progress_directive() -> None:
