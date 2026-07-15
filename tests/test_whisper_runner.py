@@ -149,6 +149,25 @@ def test_runner_limits_concurrency_to_one(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_runner_clamps_direct_max_concurrent_config(tmp_path: Path) -> None:
+    fake = make_fake_whisper(tmp_path)
+    cfg = make_cfg(fake, max_concurrent=999999)
+
+    runner = WhisperRunner(cfg)
+
+    assert cfg.max_concurrent == 4
+    assert runner._semaphore._value == 4
+
+
+def test_runner_replaces_non_finite_direct_timeout_config(tmp_path: Path) -> None:
+    fake = make_fake_whisper(tmp_path)
+    cfg = make_cfg(fake, timeout_seconds=float("inf"))
+
+    WhisperRunner(cfg)
+
+    assert cfg.timeout_seconds == WhisperConfig.timeout_seconds
+
+
 def test_runner_reports_unavailable_for_missing_regular_input(tmp_path: Path) -> None:
     async def run() -> None:
         fake = make_fake_whisper(tmp_path)
