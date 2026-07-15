@@ -433,6 +433,8 @@ def test_task_prompt_requires_video_content_evidence_before_summary() -> None:
     assert "相似主题" in prompt
     assert "不能当作视频内容证据" in prompt
     assert "只能当背景资料" in prompt
+    assert "该视频页面、作者简介等页面文字，均不能当作视频内容证据" in prompt
+    assert "该视频页面、字幕、转写、作者简介或用户提供片段" not in prompt
     assert "解析短链" not in prompt
     assert "媒体补证" not in prompt
 
