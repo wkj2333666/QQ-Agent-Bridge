@@ -5,9 +5,11 @@ import asyncio
 import hashlib
 import mimetypes
 import re
+import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -221,6 +223,11 @@ class ResourceManager:
             raise ValueError("QQ voice local file unavailable") from exc
         if len(payload) > limit:
             raise ValueError("QQ voice download limit exceeded")
+        try:
+            with wave.open(BytesIO(payload), "rb"):
+                pass
+        except (EOFError, wave.Error) as exc:
+            raise ValueError("QQ voice local file unavailable") from exc
         return payload, mime_type
 
     def _is_trusted_local_media_path(self, path: Path) -> bool:
