@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ CASE_FIELDS = frozenset(
         "blockers",
         "evidence_state",
         "answer_mode",
+        "direct_evidence",
         "policy",
         "budget",
         "cleanup_expected",
@@ -27,6 +29,20 @@ CASE_FIELDS = frozenset(
 )
 SOURCE_FIELDS = frozenset({"kind", "platform", "input"})
 BUDGET_FIELDS = frozenset({"timestamp_windows", "max_frames", "max_tokens"})
+DIRECT_EVIDENCE_FIELDS = frozenset({"kind", "excerpts"})
+DIRECT_EVIDENCE_EXCERPT_FIELDS = frozenset({"start", "end", "text"})
+DIRECT_EVIDENCE_KINDS = frozenset({"captions", "transcript", "audio", "frames"})
+DIRECT_EVIDENCE_POLICIES = {
+    "captions": "caption_evidence",
+    "transcript": "caption_evidence",
+    "audio": "audio_or_frame_evidence",
+    "frames": "audio_or_frame_evidence",
+}
+LONG_VIDEO_BUDGET = {
+    "timestamp_windows": ["00:00-00:45", "12:00-12:45", "24:00-24:45"],
+    "max_frames": 9,
+    "max_tokens": 1800,
+}
 
 POLICY_MARKERS = {
     "short_link_resolution": (("b23.tv",), ("解析短链", "展开重定向")),
@@ -58,6 +74,16 @@ def _load_cases() -> list[dict[str, Any]]:
         _validate_case(case)
         cases.append(case)
     return cases
+
+
+def _is_timestamp(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return False
+    minutes, seconds = (int(part) for part in parts)
+    return minutes >= 0 and 0 <= seconds < 60
 
 
 def _validate_case(case: Any) -> None:
@@ -98,13 +124,44 @@ def _validate_case(case: Any) -> None:
     if expected_state == "blocked":
         assert not direct_evidence, "blocked access cannot be treated as direct evidence"
 
+    direct_payload = case["direct_evidence"]
+    if expected_state == "direct":
+        assert isinstance(direct_payload, dict)
+        assert set(direct_payload) == DIRECT_EVIDENCE_FIELDS
+        assert direct_payload["kind"] in DIRECT_EVIDENCE_KINDS
+        assert evidence[direct_payload["kind"]]
+        assert isinstance(direct_payload["excerpts"], list) and direct_payload["excerpts"]
+        for excerpt in direct_payload["excerpts"]:
+            assert isinstance(excerpt, dict)
+            assert set(excerpt) == DIRECT_EVIDENCE_EXCERPT_FIELDS
+            assert all(
+                isinstance(excerpt[field], str) and excerpt[field]
+                for field in DIRECT_EVIDENCE_EXCERPT_FIELDS
+            )
+            assert _is_timestamp(excerpt["start"])
+            assert _is_timestamp(excerpt["end"])
+            assert excerpt["text"].startswith("Synthetic ")
+        assert DIRECT_EVIDENCE_POLICIES[direct_payload["kind"]] in case["policy"]
+    else:
+        assert direct_payload is None
+
+    if expected_state == "metadata-only":
+        assert "metadata_is_not_content" in case["policy"]
+        assert "blocked_response" in case["policy"]
+    if case["access"] == "blocked":
+        assert "access_controls" in case["policy"]
+        assert "blocked_response" in case["policy"]
+
     budget = case["budget"]
     if case["id"] == "bounded_long_video":
         assert isinstance(budget, dict) and set(budget) == BUDGET_FIELDS
         assert isinstance(budget["timestamp_windows"], list) and budget["timestamp_windows"]
         assert all(isinstance(window, str) and window for window in budget["timestamp_windows"])
-        assert all(isinstance(budget[field], int) and budget[field] > 0 for field in ("max_frames", "max_tokens"))
+        assert all(type(budget[field]) is int and budget[field] > 0 for field in ("max_frames", "max_tokens"))
+        assert budget == LONG_VIDEO_BUDGET
         assert case["cleanup_expected"]
+        assert "bounded_sampling" in case["policy"]
+        assert "temporary_cleanup" in case["policy"]
     else:
         assert budget is None
         assert not case["cleanup_expected"]
@@ -120,15 +177,105 @@ def _assert_reference_policy(policy: str, reference: str) -> None:
 def test_video_media_fixture_cases_validate_evidence_states_and_reference_policy() -> None:
     cases = _load_cases()
 
-    assert {case["id"] for case in cases} == {
+    cases_by_id = {case["id"]: case for case in cases}
+    assert set(cases_by_id) == {
         "captioned_bilibili_short_link",
         "local_attachment_with_audio_and_frames",
         "metadata_only_short_link",
         "access_control_failure",
         "bounded_long_video",
     }
+    assert len(cases_by_id) == len(cases)
+
+    expected_cases = {
+        "captioned_bilibili_short_link": {
+            "source": ("short_link", "bilibili"),
+            "evidence": {"metadata": True, "captions": True, "transcript": False, "audio": False, "frames": False},
+            "access": "available",
+            "evidence_state": "direct",
+            "answer_mode": "content-summary",
+            "cleanup_expected": False,
+        },
+        "local_attachment_with_audio_and_frames": {
+            "source": ("local_attachment", "local"),
+            "evidence": {"metadata": True, "captions": False, "transcript": False, "audio": True, "frames": True},
+            "access": "available",
+            "evidence_state": "direct",
+            "answer_mode": "content-summary",
+            "cleanup_expected": False,
+        },
+        "metadata_only_short_link": {
+            "source": ("short_link", "bilibili"),
+            "evidence": {"metadata": True, "captions": False, "transcript": False, "audio": False, "frames": False},
+            "access": "available",
+            "evidence_state": "metadata-only",
+            "answer_mode": "metadata-and-blocker",
+            "cleanup_expected": False,
+        },
+        "access_control_failure": {
+            "source": ("video_page", "bilibili"),
+            "evidence": {"metadata": True, "captions": False, "transcript": False, "audio": False, "frames": False},
+            "access": "blocked",
+            "evidence_state": "blocked",
+            "answer_mode": "metadata-and-blocker",
+            "cleanup_expected": False,
+        },
+        "bounded_long_video": {
+            "source": ("video_page", "bilibili"),
+            "evidence": {"metadata": True, "captions": True, "transcript": False, "audio": False, "frames": True},
+            "access": "available",
+            "evidence_state": "direct",
+            "answer_mode": "content-summary",
+            "cleanup_expected": True,
+        },
+    }
+    for case_id, expected in expected_cases.items():
+        case = cases_by_id[case_id]
+        assert (case["source"]["kind"], case["source"]["platform"]) == expected["source"]
+        assert case["evidence"] == expected["evidence"]
+        assert case["access"] == expected["access"]
+        assert case["evidence_state"] == expected["evidence_state"]
+        assert case["answer_mode"] == expected["answer_mode"]
+        assert case["cleanup_expected"] is expected["cleanup_expected"]
+    assert cases_by_id["bounded_long_video"]["budget"] == LONG_VIDEO_BUDGET
 
     reference = REFERENCE.read_text(encoding="utf-8")
     for case in cases:
         for policy in case["policy"]:
             _assert_reference_policy(policy, reference)
+
+
+def test_video_media_fixture_semantics_cannot_be_weakened_by_policy_lists() -> None:
+    cases = {case["id"]: case for case in _load_cases()}
+    invalid_cases = []
+
+    metadata_only = deepcopy(cases["metadata_only_short_link"])
+    metadata_only["policy"].remove("metadata_is_not_content")
+    invalid_cases.append(metadata_only)
+
+    blocked = deepcopy(cases["access_control_failure"])
+    blocked["policy"].remove("access_controls")
+    invalid_cases.append(blocked)
+
+    direct = deepcopy(cases["captioned_bilibili_short_link"])
+    direct["policy"].remove("caption_evidence")
+    invalid_cases.append(direct)
+
+    long_video = deepcopy(cases["bounded_long_video"])
+    long_video["policy"].remove("temporary_cleanup")
+    invalid_cases.append(long_video)
+
+    boolean_budget = deepcopy(cases["bounded_long_video"])
+    boolean_budget["budget"]["max_frames"] = True
+    invalid_cases.append(boolean_budget)
+
+    missing_payload = deepcopy(cases["captioned_bilibili_short_link"])
+    missing_payload["direct_evidence"] = None
+    invalid_cases.append(missing_payload)
+
+    for case in invalid_cases:
+        try:
+            _validate_case(case)
+        except AssertionError:
+            continue
+        raise AssertionError(f"invalid fixture case was accepted: {case['id']}")
