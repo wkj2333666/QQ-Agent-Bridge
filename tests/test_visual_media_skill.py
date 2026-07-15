@@ -61,28 +61,64 @@ def test_visual_media_reference_defines_an_evidence_driven_video_workflow() -> N
     )
     _require_related_phrases(
         text,
-        ("字幕", "转写", "音频", "画面", "抽帧", "实际媒体", "内容证据"),
+        ("字幕", "转写", "音频", "画面", "抽帧", "实际媒体"),
         ("后", "之后", "再", "才", "仅基于", "基于"),
         ("总结", "概括", "回答", "回复"),
         "direct video-content evidence and the ensuing answer",
     )
 
 
-def test_visual_media_reference_names_bilibili_short_urls_and_a_platform_agnostic_workflow() -> None:
+def test_visual_media_reference_names_bilibili_short_urls_and_a_cross_platform_workflow() -> None:
     text = _reference_text()
 
     _require_any(text, ("Bilibili", "哔哩哔哩", "B站"), "Bilibili")
     assert "b23.tv" in text
-    _require_any(
-        text,
+    instruction_pattern = re.compile(r"[^。！？；\n]+")
+    platform_workflow_instruction = next(
         (
-            "网页视频理解",
-            "网页视频",
-            "视频平台链接",
-            "跨平台视频",
-            "通用视频链接",
+            instruction
+            for instruction in instruction_pattern.findall(text)
+            if any(
+                platform in instruction
+                for platform in (
+                    "抖音",
+                    "快手",
+                    "小红书",
+                    "腾讯视频",
+                    "优酷",
+                    "爱奇艺",
+                    "中文视频平台",
+                    "国内视频平台",
+                    "跨平台",
+                    "其他视频平台",
+                )
+            )
+            and any(
+                step in instruction
+                for step in (
+                    "解析短链",
+                    "展开短链",
+                    "短链解析",
+                    "短链接重定向",
+                    "读取元数据",
+                    "检查元数据",
+                    "页面元数据",
+                    "获取字幕",
+                    "音频转写",
+                    "获取音频",
+                    "下载音频",
+                    "提取音频",
+                    "抽帧",
+                    "采样帧",
+                    "视频帧",
+                )
+            )
         ),
-        "a platform-agnostic video workflow",
+        None,
+    )
+    assert platform_workflow_instruction, (
+        "visual-media reference must connect a Chinese non-Bilibili platform or "
+        "cross-platform scope to an operational video workflow in one instruction"
     )
 
 
