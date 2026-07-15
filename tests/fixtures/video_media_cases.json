@@ -29,6 +29,7 @@
           }
         ]
       },
+      "media_lifecycle": null,
       "policy": [
         "short_link_resolution",
         "caption_evidence"
@@ -64,12 +65,31 @@
           }
         ]
       },
+      "media_lifecycle": {
+        "original_user_attachment": {
+          "path": "synthetic-attachment.mp4",
+          "cleanup_after_processing": false
+        },
+        "temporary_derivatives": [
+          {
+            "kind": "audio",
+            "path": "temporary/synthetic-attachment-audio.wav",
+            "cleanup_after_processing": true
+          },
+          {
+            "kind": "frames",
+            "path": "temporary/synthetic-attachment-frame-0001.jpg",
+            "cleanup_after_processing": true
+          }
+        ]
+      },
       "policy": [
         "local_attachment",
-        "audio_or_frame_evidence"
+        "audio_or_frame_evidence",
+        "temporary_cleanup"
       ],
       "budget": null,
-      "cleanup_expected": false
+      "cleanup_expected": true
     },
     {
       "id": "metadata_only_short_link",
@@ -92,6 +112,7 @@
       "evidence_state": "metadata-only",
       "answer_mode": "metadata-and-blocker",
       "direct_evidence": null,
+      "media_lifecycle": null,
       "policy": [
         "short_link_resolution",
         "metadata_is_not_content",
@@ -124,6 +145,7 @@
       "evidence_state": "blocked",
       "answer_mode": "metadata-and-blocker",
       "direct_evidence": null,
+      "media_lifecycle": null,
       "policy": [
         "access_controls",
         "metadata_is_not_content",
@@ -160,6 +182,7 @@
           }
         ]
       },
+      "media_lifecycle": null,
       "policy": [
         "caption_evidence",
         "bounded_sampling",
