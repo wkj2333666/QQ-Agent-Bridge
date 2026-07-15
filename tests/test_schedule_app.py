@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
 from typing import Any
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -150,6 +151,12 @@ async def drain_app(app: App) -> None:
     raise AssertionError("app background tasks did not finish")
 
 
+def future_local_datetime() -> datetime:
+    return (
+        datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(days=2)
+    ).replace(second=0, microsecond=0)
+
+
 def test_schedule_help_contains_natural_and_structured_examples(tmp_path: Path) -> None:
     async def go() -> None:
         app, adapter = make_app(tmp_path)
@@ -168,17 +175,18 @@ def test_schedule_help_contains_natural_and_structured_examples(tmp_path: Path) 
 def test_owner_creates_structured_schedule_and_list_shows_it(tmp_path: Path) -> None:
     async def go() -> None:
         app, adapter = make_app(tmp_path)
+        scheduled_for = future_local_datetime().strftime("%Y-%m-%d %H:%M")
 
         await app._handle(
             make_event(
-                "/schedule once 2026-07-14 08:00 -- send 记得开会",
+                f"/schedule once {scheduled_for} -- send 记得开会",
                 mid="create-1",
             )
         )
         await app._handle(make_event("/schedule list", mid="list-1"))
 
         assert "已经设置好了" in adapter.sent[-2][2]
-        assert "2026-07-14 08:00" in adapter.sent[-2][2]
+        assert scheduled_for in adapter.sent[-2][2]
         assert "记得开会" in adapter.sent[-1][2]
         assert "0." in adapter.sent[-1][2]
 
@@ -284,19 +292,20 @@ def test_private_schedule_mutation_can_be_disabled(tmp_path: Path) -> None:
 
 def test_natural_schedule_replies_immediately_then_sends_canonical_receipt(tmp_path: Path) -> None:
     async def go() -> None:
+        scheduled_for = future_local_datetime().strftime("%Y-%m-%dT%H:%M")
         agent = FakeAgent(
             [
-                """{
+                f"""{{
                   "ambiguous": false,
                   "kind": "rrule",
                   "action": "task",
                   "payload": "告诉我北京市天气",
                   "time_phrase": "每天早上八点",
                   "payload_phrase": "告诉我北京市天气",
-                  "dtstart_local": "2026-07-14T08:00",
+                  "dtstart_local": "{scheduled_for}",
                   "rrule": "FREQ=DAILY",
                   "clarification": ""
-                }"""
+                }}"""
             ]
         )
         app, adapter = make_app(tmp_path, agent)
