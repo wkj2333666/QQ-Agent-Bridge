@@ -13,8 +13,8 @@ case "$ASR_ROOT" in
     ;;
 esac
 
-BINARY="${QAB_WHISPER_BINARY:-$ASR_ROOT/bin/whisper-cli}"
-MODEL="${QAB_WHISPER_MODEL:-$ASR_ROOT/models/ggml-tiny-q8_0.bin}"
+BINARY="${QAB_WHISPER_BINARY:-$ASR_ROOT/current/bin/whisper-cli}"
+MODEL="${QAB_WHISPER_MODEL:-$ASR_ROOT/current/models/ggml-tiny-q8_0.bin}"
 LANGUAGE="${QAB_WHISPER_LANGUAGE:-zh}"
 WAV="${1:-}"
 
