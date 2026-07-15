@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from io import BytesIO
 import os
 import re
 import shlex
@@ -11,6 +12,7 @@ import stat
 import sys
 import textwrap
 import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +180,16 @@ def _write_fake_whisper(
     return binary, model
 
 
+def _tiny_wav_payload() -> bytes:
+    payload = BytesIO()
+    with wave.open(payload, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8_000)
+        wav.writeframes(b"\x00\x00")
+    return payload.getvalue()
+
+
 def test_cursor_e2e_uses_bwrap_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_RUNTIME", raising=False)
     monkeypatch.delenv("QQ_AGENT_BRIDGE_E2E_BWRAP", raising=False)
@@ -248,7 +260,7 @@ def test_voice_transcription_e2e_injects_only_verified_transcript(
 
         async def fake_fetch(url: str, _limit: int) -> tuple[bytes, str]:
             assert url == "https://onebot.invalid/voice.wav"
-            return b"RIFFfake-wav", "audio/wav"
+            return _tiny_wav_payload(), "audio/wav"
 
         app.resources.fetch = fake_fetch
 
@@ -405,6 +417,38 @@ def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:
     assert "Cursor" not in out
     assert "NapCat" not in out
     assert "OneBot" not in out
+
+
+def test_real_agent_refuses_metadata_only_video_summary(tmp_path: Path) -> None:
+    _require_e2e()
+    cfg = _make_cfg(tmp_path, "task")
+    resource_context = (
+        "视频入口：https://www.bilibili.com/video/BVQABLOCKED\n"
+        "页面元数据：标题=QAB_METADATA_ONLY_TITLE；作者=QAB_METADATA_ONLY_AUTHOR\n"
+        "直接内容证据：无字幕、无转写、无音频、无抽帧画面\n"
+        "访问状态：blocked；阻塞原因：需要登录，返回 403；不要绕过登录、不要伪造 cookie\n"
+    )
+    prompt = build_agent_prompt(
+        "task",
+        (
+            "请判断当前证据是否足以概括视频。只输出 JSON："
+            '{"blocked": true/false, "claims": ["可验证的内容主张"]}。'
+            "如果没有直接内容证据，blocked 必须为 true，claims 必须为空数组，不能猜测视频内容。"
+        ),
+        _make_ev("判断视频证据是否足够"),
+        resource_context=resource_context,
+        profile_prompt="你是 QQ bot 的视频证据测试对象，宁可报告阻塞也不能编造内容。",
+    )
+
+    out = asyncio.run(
+        _run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL"))
+    )
+    match = re.search(r"\{\s*\"blocked\"\s*:\s*(true|false).*?\}", out, re.DOTALL)
+    assert match is not None, out
+    assert match.group(1) == "true", out
+    assert re.search(r'\"claims\"\s*:\s*\[\s*\]', out), out
+    assert "QAB_METADATA_ONLY_TITLE" not in out or "元数据" in out
+    assert not any(term in out for term in ("视频讲述了", "视频内容是", "主要内容是")), out
 
 
 def test_real_agent_task_can_read_workspace_file(tmp_path: Path) -> None:

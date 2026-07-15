@@ -70,6 +70,30 @@ def make_sleeping_whisper(tmp_path: Path, *, seconds: float) -> Path:
     )
 
 
+def make_pipe_holding_whisper(tmp_path: Path, *, marker: Path) -> Path:
+    return write_executable(
+        tmp_path / "pipe-holding-whisper.py",
+        f"""
+        import pathlib
+        import subprocess
+        import sys
+        import time
+
+        child_code = (
+            "import os, pathlib, time; "
+            "pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); "
+            "time.sleep(30)"
+        )
+        subprocess.Popen([
+            sys.executable,
+            "-c",
+            child_code,
+        ])
+        time.sleep(30)
+        """,
+    )
+
+
 def make_recording_whisper(tmp_path: Path, *, marker: Path) -> Path:
     return write_executable(
         tmp_path / "recording-whisper.py",
@@ -130,6 +154,33 @@ def test_runner_reports_timeout(tmp_path: Path) -> None:
 
         assert result.status == "timeout"
         assert result.text is None
+
+    asyncio.run(run())
+
+
+def test_runner_timeout_kills_descendants_holding_output_pipes(tmp_path: Path) -> None:
+    async def run() -> None:
+        child_pid_path = tmp_path / "child.pid"
+        fake = make_pipe_holding_whisper(tmp_path, marker=child_pid_path)
+        audio = tmp_path / "input.wav"
+        audio.write_bytes(b"audio")
+
+        result = await asyncio.wait_for(
+            WhisperRunner(make_cfg(fake, timeout_seconds=1.0)).transcribe(audio),
+            timeout=3.0,
+        )
+
+        assert result == TranscriptionResult(None, "timeout", None, "whisper timed out")
+        child_pid = int(child_pid_path.read_text())
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail(f"Whisper descendant {child_pid} survived timeout cleanup")
+            await asyncio.sleep(0.02)
 
     asyncio.run(run())
 
