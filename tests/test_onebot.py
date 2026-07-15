@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.onebot import _extract_text, _is_mentioned, _normalize_event  # type: ignore
 from qq_agent_bridge.onebot import OneBotAdapter  # type: ignore
+from qq_agent_bridge.types import ChatResource
 
 
 def test_extract_array() -> None:
@@ -375,6 +376,102 @@ class FakeConn:
 
     async def send(self, data: str) -> None:
         self.frames.append(data)
+
+
+def test_resolve_record_url_uses_file_id_and_returns_response_file() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        resource = ChatResource(kind="voice", file_id="voice.silk", url="https://qq.example/input.silk")
+
+        task = asyncio.create_task(adapter.resolve_record_url(resource))
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["action"] == "get_record"
+        assert frame["params"] == {"file": "voice.silk", "out_format": "wav"}
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {"file": "https://qq.example/voice.wav"},
+            }
+        )
+
+        assert await task == "https://qq.example/voice.wav"
+
+    asyncio.run(go())
+
+
+def test_resolve_record_url_uses_url_when_file_id_is_missing() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        resource = ChatResource(kind="voice", url="https://qq.example/input.silk")
+
+        task = asyncio.create_task(adapter.resolve_record_url(resource))
+        await asyncio.sleep(0)
+
+        frame = json.loads(conn.frames[0])
+        assert frame["params"] == {"file": "https://qq.example/input.silk", "out_format": "wav"}
+        adapter._complete_action_response(
+            {"echo": frame["echo"], "status": "ok", "retcode": 0, "data": {"url": "out.wav"}}
+        )
+
+        assert await task == "out.wav"
+
+    asyncio.run(go())
+
+
+def test_resolve_record_url_prefers_url_then_file_then_path() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        resource = ChatResource(kind="voice", file_id="voice.silk")
+
+        task = asyncio.create_task(adapter.resolve_record_url(resource))
+        await asyncio.sleep(0)
+        frame = json.loads(conn.frames[0])
+        adapter._complete_action_response(
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {"url": "converted-url", "file": "converted-file", "path": "converted.wav"},
+            }
+        )
+
+        assert await task == "converted-url"
+
+    asyncio.run(go())
+
+
+def test_resolve_record_url_returns_none_without_a_non_empty_string() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        resource = ChatResource(kind="voice", file_id="voice.silk")
+
+        task = asyncio.create_task(adapter.resolve_record_url(resource))
+        await asyncio.sleep(0)
+        frame = json.loads(conn.frames[0])
+        adapter._complete_action_response(
+            {
+                "echo": frame["echo"],
+                "status": "ok",
+                "retcode": 0,
+                "data": {"file": "", "url": None, "path": 456},
+            }
+        )
+
+        assert await task is None
+
+    asyncio.run(go())
 
 
 def test_send_image_uses_onebot_image_segment(tmp_path: Path) -> None:
