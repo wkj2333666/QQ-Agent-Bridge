@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any
 
@@ -206,8 +207,18 @@ class BridgeConfig:
         whisper = (
             WhisperConfig(**whisper_raw) if isinstance(whisper_raw, dict) else WhisperConfig()
         )
-        whisper.timeout_seconds = max(1.0, float(whisper.timeout_seconds))
-        whisper.max_concurrent = max(1, int(whisper.max_concurrent))
+        timeout_seconds = float(whisper.timeout_seconds)
+        whisper.timeout_seconds = (
+            min(3600.0, max(1.0, timeout_seconds))
+            if math.isfinite(timeout_seconds)
+            else WhisperConfig.timeout_seconds
+        )
+        max_concurrent = float(whisper.max_concurrent)
+        whisper.max_concurrent = (
+            min(4, max(1, int(max_concurrent)))
+            if math.isfinite(max_concurrent)
+            else WhisperConfig.max_concurrent
+        )
         whisper.cache_ttl_seconds = max(1, int(whisper.cache_ttl_seconds))
         whisper.cache_max_items = max(1, int(whisper.cache_max_items))
         progress = ProgressConfig(**raw.get("progress", {}))

@@ -215,6 +215,40 @@ whisper:
     assert cfg.whisper.cache_max_items == 12
 
 
+def test_config_clamps_whisper_timeout_and_concurrency_upper_bounds(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+whisper:
+  timeout_seconds: 999999
+  max_concurrent: 999999
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.whisper.timeout_seconds == 3600
+    assert cfg.whisper.max_concurrent == 4
+
+
+def test_config_uses_whisper_defaults_for_non_finite_limits(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+whisper:
+  timeout_seconds: .inf
+  max_concurrent: .nan
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.whisper.timeout_seconds == 90
+    assert cfg.whisper.max_concurrent == 1
+
+
 def test_napcat_compose_mounts_workspace_readonly_for_uploads() -> None:
     compose = yaml.safe_load((ROOT / "runtime" / "napcat" / "compose.yml").read_text())
     volumes = compose["services"]["napcat"]["volumes"]
