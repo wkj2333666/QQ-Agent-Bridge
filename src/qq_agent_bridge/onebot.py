@@ -706,6 +706,20 @@ class OneBotAdapter:
             return None
         return _reply_from_message_data(result, fallback_id=message_id)
 
+    async def resolve_record_url(self, resource: ChatResource) -> str | None:
+        result = await self._call_action(
+            "get_record",
+            {"file": resource.file_id or resource.url, "out_format": "wav"},
+            timeout=5.0,
+        )
+        if not isinstance(result, dict):
+            return None
+        for key in ("url", "file", "path"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
     async def fetch_forward_message(self, forward_id: str) -> list[dict[str, Any]]:
         result = await self._call_action(
             "get_forward_msg",
