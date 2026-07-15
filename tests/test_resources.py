@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import sys
 import wave
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.resources as resources_module  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.resources import ResourceManager, format_resource_context  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatResource  # type: ignore
@@ -36,6 +38,16 @@ def write_tiny_wav(path: Path) -> None:
         wav.setsampwidth(2)
         wav.setframerate(8_000)
         wav.writeframes(b"\x00\x00")
+
+
+def tiny_wav_bytes() -> bytes:
+    payload = BytesIO()
+    with wave.open(payload, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8_000)
+        wav.writeframes(b"\x00\x00")
+    return payload.getvalue()
 
 
 def make_ev(resources: tuple[ChatResource, ...], mid: str = "m/1") -> ChatEvent:
@@ -143,7 +155,7 @@ def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_
         async def fetch(url: str, limit: int) -> tuple[bytes, str]:
             resolved.append(url)
             assert limit == 1024
-            return b"wav", "audio/wav"
+            return tiny_wav_bytes(), "audio/wav"
 
         manager = ResourceManager(
             make_cfg(tmp_path),
@@ -162,6 +174,79 @@ def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_
         assert refs[0].transcript_language == "zh"
         assert transcriber.paths == [tmp_path / refs[0].local_path]
         assert "verified by local Whisper, language=zh" in format_resource_context(refs)
+
+    asyncio.run(go())
+
+
+def test_voice_rejects_invalid_remote_converted_wav(tmp_path: Path) -> None:
+    async def go() -> None:
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return "https://qq.example/voice.wav"
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            return b"not a wav", "audio/wav"
+
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-remote-invalid-wav"))
+
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "QQ voice conversion returned invalid WAV"
+        assert transcriber.paths == []
+
+    asyncio.run(go())
+
+
+def test_voice_does_not_follow_path_swap_after_trust_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def go() -> None:
+        cfg = make_cfg(tmp_path)
+        trusted_root = configure_local_media_root(cfg, tmp_path)
+        source = trusted_root / "onebot-record.wav"
+        outside = tmp_path / "outside.wav"
+        write_tiny_wav(source)
+        write_tiny_wav(outside)
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        original_open = resources_module.os.open
+        swapped = False
+
+        def swap_before_open(path: str | bytes | int, *args: object, **kwargs: object):
+            nonlocal swapped
+            if Path(path) == source and not swapped:
+                source.unlink()
+                source.symlink_to(outside)
+                swapped = True
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(resources_module.os, "open", swap_before_open)
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+        manager = ResourceManager(
+            cfg,
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-path-race"))
+
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "QQ voice local file unavailable"
+        assert transcriber.paths == []
 
     asyncio.run(go())
 

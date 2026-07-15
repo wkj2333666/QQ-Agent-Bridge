@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import mimetypes
+import os
 import re
+import stat
 import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -159,6 +161,8 @@ class ResourceManager:
                 return self._unavailable_voice(resource, str(exc)), 0
         if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
             return self._unavailable_voice(resource, "QQ voice download limit exceeded"), len(payload)
+        if converted and not self._is_valid_wav_payload(payload):
+            return self._unavailable_voice(resource, "QQ voice conversion returned invalid WAV"), len(payload)
 
         event_dir = root / datetime.fromtimestamp(ev.timestamp).strftime("%Y-%m-%d") / self._safe_event_id(ev.id)
         try:
@@ -214,21 +218,41 @@ class ResourceManager:
         limit = min(self.cfg.resources.max_bytes, remaining)
         if limit <= 0:
             raise ValueError("QQ voice download limit exceeded")
+        fd = -1
         try:
-            if path.stat().st_size > limit:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(source_path, flags)
+            descriptor_stat = os.fstat(fd)
+            if not stat.S_ISREG(descriptor_stat.st_mode):
+                raise ValueError("QQ voice local file unavailable")
+            descriptor_path = Path(os.path.realpath(f"/proc/self/fd/{fd}"))
+            if not self._is_trusted_local_media_path(descriptor_path):
+                raise ValueError("QQ voice local file unavailable")
+            if descriptor_stat.st_size > limit:
                 raise ValueError("QQ voice download limit exceeded")
-            with path.open("rb") as file:
+            with os.fdopen(fd, "rb") as file:
+                fd = -1
                 payload = file.read(limit + 1)
+        except ValueError:
+            raise
         except OSError as exc:
             raise ValueError("QQ voice local file unavailable") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
         if len(payload) > limit:
             raise ValueError("QQ voice download limit exceeded")
+        if not self._is_valid_wav_payload(payload):
+            raise ValueError("QQ voice local file unavailable")
+        return payload, mime_type
+
+    @staticmethod
+    def _is_valid_wav_payload(payload: bytes) -> bool:
         try:
             with wave.open(BytesIO(payload), "rb"):
-                pass
-        except (EOFError, wave.Error) as exc:
-            raise ValueError("QQ voice local file unavailable") from exc
-        return payload, mime_type
+                return True
+        except (EOFError, wave.Error):
+            return False
 
     def _is_trusted_local_media_path(self, path: Path) -> bool:
         roots = self.cfg.resources.local_media_roots

@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import tempfile
 import time
@@ -21,6 +22,7 @@ from .config import WhisperConfig
 _RUNNER_VERSION = "1"
 _MAX_ERROR_CHARS = 500
 _CACHE_FILENAME = re.compile(r"[0-9a-f]{64}\.json\Z")
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -127,25 +129,28 @@ class WhisperRunner:
                     "-np",
                 ]
                 try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
+                    kwargs: dict[str, object] = {
+                        "stdout": asyncio.subprocess.PIPE,
+                        "stderr": asyncio.subprocess.PIPE,
+                    }
+                    if os.name == "posix":
+                        kwargs["start_new_session"] = True
+                    proc = await asyncio.create_subprocess_exec(*command, **kwargs)
                 except OSError as exc:
                     return TranscriptionResult(None, "failed", None, f"whisper start failed: {exc}")
 
+                communicate_task = asyncio.create_task(proc.communicate())
                 try:
                     stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=self.cfg.timeout_seconds
+                        asyncio.shield(communicate_task), timeout=self.cfg.timeout_seconds
                     )
-                except TimeoutError:
-                    proc.kill()
-                    await proc.communicate()
+                except asyncio.TimeoutError:
+                    self._terminate_process(proc)
+                    await self._cleanup_process(proc, communicate_task)
                     return TranscriptionResult(None, "timeout", None, "whisper timed out")
                 except asyncio.CancelledError:
-                    proc.kill()
-                    await proc.communicate()
+                    self._terminate_process(proc)
+                    await self._cleanup_process(proc, communicate_task)
                     raise
 
                 if proc.returncode != 0:
@@ -172,6 +177,39 @@ class WhisperRunner:
                 return TranscriptionResult(text, "ok", language, None)
         except OSError as exc:
             return TranscriptionResult(None, "failed", None, f"whisper run failed: {exc}")
+
+    @staticmethod
+    def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                return
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    async def _cleanup_process(
+        proc: asyncio.subprocess.Process, communicate_task: asyncio.Task[tuple[bytes, bytes]]
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(communicate_task), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            communicate_task.cancel()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+        except asyncio.CancelledError:
+            communicate_task.cancel()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+            raise
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pass
 
     @staticmethod
     def _process_error(returncode: int, stderr: bytes, stdout: bytes) -> str:
