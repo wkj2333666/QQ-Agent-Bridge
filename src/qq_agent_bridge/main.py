@@ -38,6 +38,7 @@ from .scheduler import Schedule, ScheduleExecutionResult, ScheduleRun, Scheduler
 from .self_knowledge import build_help_reply, build_prompt_self_knowledge, maybe_self_reply
 from .types import ChatEvent, ParsedCommand
 from .workspace_search import WorkspaceSearch
+from .whisper_runner import WhisperRunner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("qq-bridge")
@@ -64,7 +65,7 @@ class App:
         self.agent = build_agent_adapter(cfg)
         self.cursor = self.agent  # compatibility alias for older tests/extensions
         self.search = WorkspaceSearch(cfg)
-        self.resources = ResourceManager(cfg)
+        self.resources = self._build_resource_manager(cfg)
         self.memory = ConversationMemory(cfg.memory.max_messages, cfg.memory.max_chars)
         self.ambient_memory = GroupAmbientMemory(
             max_messages=cfg.ambient_memory.max_messages,
@@ -537,7 +538,7 @@ class App:
         self.agent = build_agent_adapter(cfg)
         self.cursor = self.agent
         self.search = WorkspaceSearch(cfg)
-        self.resources = ResourceManager(cfg)
+        self.resources = self._build_resource_manager(cfg)
         self.memory.max_messages = cfg.memory.max_messages
         self.memory.max_chars = cfg.memory.max_chars
         self.ambient_memory.configure(
@@ -1148,6 +1149,19 @@ class App:
     def _safe_job_id(self, job_id: str) -> str:
         safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in job_id)
         return safe[:64] or "job"
+
+    def _build_resource_manager(self, cfg: BridgeConfig) -> ResourceManager:
+        self.transcriber = (
+            WhisperRunner(cfg.whisper)
+            if cfg.whisper.enabled and cfg.whisper.binary and cfg.whisper.model
+            else None
+        )
+        record_url = getattr(self.adapter, "resolve_record_url", None)
+        return ResourceManager(
+            cfg,
+            record_url=record_url if callable(record_url) else None,
+            transcriber=self.transcriber,
+        )
 
     async def run(self) -> None:
         logger.info("loading config, echo_only=%s", self.echo_only)

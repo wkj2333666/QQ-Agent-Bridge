@@ -2533,9 +2533,12 @@ def test_quoted_voice_resource_is_passed_to_agent_prompt() -> None:
             return (
                 PreparedResource(
                     kind="voice",
-                    name="voice.silk",
-                    local_path="downloads/quoted-voice.silk",
+                    name="voice.wav",
+                    local_path="downloads/quoted-voice.wav",
                     duration_seconds=5,
+                    transcript="今天天气不错",
+                    transcript_status="verified",
+                    transcript_language="zh",
                 ),
             )
 
@@ -2568,7 +2571,63 @@ def test_quoted_voice_resource_is_passed_to_agent_prompt() -> None:
         assert "被引用的消息：" in prompts[0]
         assert "引用资源1：voice voice.silk https://qq.example/record/voice.silk" in prompts[0]
         assert "用户附带资源：" in prompts[0]
-        assert "voice: downloads/quoted-voice.silk duration=5s" in prompts[0]
+        assert "voice: downloads/quoted-voice.wav duration=5s" in prompts[0]
+        assert "verified by local Whisper, language=zh): 今天天气不错" in prompts[0]
+
+    asyncio.run(go())
+
+
+def test_text_request_still_reaches_agent_when_voice_conversion_fails() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        prompts: list[str] = []
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            prompts.append(prompt)
+            return "我先回答文字问题"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        async def failed_prepare(ev: ChatEvent) -> tuple[PreparedResource, ...]:
+            return (
+                PreparedResource(
+                    kind="voice",
+                    name="voice.silk",
+                    duration_seconds=5,
+                    transcript_status="unavailable",
+                    transcript_error="QQ voice conversion unavailable",
+                ),
+            )
+
+        app.resources.prepare = failed_prepare  # type: ignore[attr-defined, method-assign]
+        await app._handle(
+            make_ev(
+                "/ask 顺便告诉我今天该做什么",
+                mid="voice-conversion-failed",
+                resources=(
+                    ChatResource(
+                        kind="voice",
+                        url="https://qq.example/voice.silk",
+                        name="voice.silk",
+                    ),
+                ),
+            )
+        )
+        await wait_until_sent(adapter, "我先回答文字问题")
+
+        assert len(prompts) == 1
+        assert "用户消息：顺便告诉我今天该做什么" in prompts[0]
+        assert "transcript: unavailable (QQ voice conversion unavailable)" in prompts[0]
 
     asyncio.run(go())
 
