@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.resources import ResourceManager, format_resource_context  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatResource  # type: ignore
+from qq_agent_bridge.whisper_runner import TranscriptionResult  # type: ignore
 
 
 def make_cfg(workspace: Path) -> BridgeConfig:
@@ -30,6 +31,37 @@ def make_ev(resources: tuple[ChatResource, ...], mid: str = "m/1") -> ChatEvent:
         text="/ask 看看附件",
         timestamp=1,
         resources=resources,
+    )
+
+
+class FakeTranscriber:
+    def __init__(self, result: TranscriptionResult) -> None:
+        self.result = result
+        self.paths: list[Path] = []
+
+    async def transcribe(self, path: Path) -> TranscriptionResult:
+        self.paths.append(path)
+        return self.result
+
+
+def silk_voice() -> ChatResource:
+    return ChatResource(
+        kind="voice",
+        url="https://qq.example/voice.silk",
+        file_id="voice.silk",
+        name="voice.silk",
+        mime_type="audio/silk",
+        duration_seconds=12,
+    )
+
+
+def wav_voice() -> ChatResource:
+    return ChatResource(
+        kind="voice",
+        url="https://qq.example/voice.wav",
+        name="voice.wav",
+        mime_type="audio/wav",
+        duration_seconds=12,
     )
 
 
@@ -56,20 +88,14 @@ def test_resource_manager_stages_downloadable_resource_under_workspace(tmp_path:
     assert "qq-agent-bridge" in local.parts
 
 
-def test_resource_manager_stages_qq_voice_with_duration_context(tmp_path: Path) -> None:
+def test_resource_manager_keeps_unconverted_qq_voice_with_duration_context(tmp_path: Path) -> None:
     async def fetch(url: str, limit: int) -> tuple[bytes, str]:
-        assert url == "https://qq.example/voice.silk"
-        return b"voice-bytes", "audio/silk"
+        raise AssertionError(f"raw Silk must not be downloaded: {url}")
 
     manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
     ev = make_ev(
         (
-            ChatResource(
-                kind="voice",
-                url="https://qq.example/voice.silk",
-                name="voice.silk",
-                duration_seconds=12,
-            ),
+            silk_voice(),
         )
     )
 
@@ -78,12 +104,73 @@ def test_resource_manager_stages_qq_voice_with_duration_context(tmp_path: Path) 
     assert len(refs) == 1
     assert refs[0].kind == "voice"
     assert refs[0].duration_seconds == 12
-    assert refs[0].local_path is not None
-    assert (tmp_path / refs[0].local_path).read_bytes() == b"voice-bytes"
+    assert refs[0].local_path is None
+    assert refs[0].transcript_status == "unavailable"
     context = format_resource_context(refs)
     assert "voice:" in context
     assert "duration=12s" in context
     assert "QQ voice limit=60s" in context
+    assert "transcript: unavailable" in context
+
+
+def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_path: Path) -> None:
+    async def go() -> None:
+        resolved: list[str] = []
+        transcriber = FakeTranscriber(TranscriptionResult("你好", "ok", "zh", None))
+
+        async def record_url(resource: ChatResource) -> str | None:
+            assert resource == silk_voice()
+            return "https://qq.example/voice.wav"
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            resolved.append(url)
+            assert limit == 1024
+            return b"wav", "audio/wav"
+
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-verified"))
+
+        assert resolved == ["https://qq.example/voice.wav"]
+        assert len(refs) == 1
+        assert refs[0].local_path is not None
+        assert refs[0].local_path.endswith(".wav")
+        assert refs[0].transcript == "你好"
+        assert refs[0].transcript_status == "verified"
+        assert refs[0].transcript_language == "zh"
+        assert transcriber.paths == [tmp_path / refs[0].local_path]
+        assert "verified by local Whisper, language=zh" in format_resource_context(refs)
+
+    asyncio.run(go())
+
+
+def test_failed_transcription_keeps_audio_and_marks_unavailable(tmp_path: Path) -> None:
+    async def go() -> None:
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            assert url == "https://qq.example/voice.wav"
+            return b"wav", "audio/wav"
+
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            transcriber=FakeTranscriber(
+                TranscriptionResult(None, "unavailable", None, "model missing")
+            ),  # type: ignore[arg-type]
+        )
+        refs = await manager.prepare(make_ev((wav_voice(),), mid="voice-unavailable"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is not None
+        assert refs[0].transcript is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "model missing"
+        assert "model missing" in format_resource_context(refs)
+
+    asyncio.run(go())
 
 
 def test_resource_manager_keeps_plain_url_without_downloading(tmp_path: Path) -> None:

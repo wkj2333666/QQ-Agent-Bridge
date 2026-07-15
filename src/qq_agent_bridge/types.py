@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 
 ResourceKind = Literal["image", "file", "url", "audio", "voice", "video", "forward"]
+TranscriptStatus = Literal["verified", "unavailable"]
 
 
 @dataclass(frozen=True)

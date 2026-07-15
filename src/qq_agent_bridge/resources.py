@@ -6,16 +6,18 @@ import hashlib
 import mimetypes
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 import aiohttp
 
 from .config import BridgeConfig
-from .types import ChatEvent, ChatResource
+from .types import ChatEvent, ChatResource, TranscriptStatus
+from .whisper_runner import TranscriptionResult, WhisperRunner
 
 FetchFunc = Callable[[str, int], Awaitable[tuple[bytes, str]]]
+RecordUrlFunc = Callable[[ChatResource], Awaitable[str | None]]
 
 MAX_FORWARD_TITLE_CHARS = 120
 MAX_FORWARD_ITEM_CHARS = 500
@@ -30,14 +32,26 @@ class PreparedResource:
     url: str | None = None
     duration_seconds: int | None = None
     text: str | None = None
+    transcript: str | None = None
+    transcript_status: TranscriptStatus | None = None
+    transcript_language: str | None = None
+    transcript_error: str | None = None
 
 
 class ResourceManager:
     """Download explicit QQ attachments into a workspace-local staging area."""
 
-    def __init__(self, cfg: BridgeConfig, fetch: FetchFunc | None = None) -> None:
+    def __init__(
+        self,
+        cfg: BridgeConfig,
+        fetch: FetchFunc | None = None,
+        record_url: RecordUrlFunc | None = None,
+        transcriber: WhisperRunner | None = None,
+    ) -> None:
         self.cfg = cfg
         self.fetch = fetch or self._fetch_http
+        self.record_url = record_url
+        self.transcriber = transcriber
 
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
         if not self.cfg.resources.enabled or not ev.resources:
@@ -66,6 +80,15 @@ class ResourceManager:
                         PreparedResource(kind="url", name=resource.name or resource.url, url=resource.url)
                     )
                 continue
+            if resource.kind == "voice":
+                prepared, consumed = await self._prepare_voice(
+                    resource, idx, root, workspace, ev, total_bytes
+                )
+                total_bytes += consumed
+                if total_bytes > self.cfg.resources.max_total_bytes:
+                    break
+                refs.append(prepared)
+                continue
             if not resource.url:
                 continue
             try:
@@ -91,6 +114,123 @@ class ResourceManager:
                 )
             )
         return tuple(refs)
+
+    async def _prepare_voice(
+        self,
+        resource: ChatResource,
+        idx: int,
+        root: Path,
+        workspace: Path,
+        ev: ChatEvent,
+        total_bytes: int,
+    ) -> tuple[PreparedResource, int]:
+        source_url: str | None = None
+        converted = False
+        if self.record_url and self._voice_needs_conversion(resource):
+            try:
+                source_url = await self.record_url(resource)
+            except Exception:  # noqa: BLE001 - one converter failure must not discard the event
+                source_url = None
+            converted = bool(source_url)
+        if source_url is None and resource.url and not self._is_silk(resource):
+            source_url = resource.url
+        if not source_url:
+            return self._unavailable_voice(resource, "QQ voice conversion unavailable"), 0
+
+        try:
+            payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
+        except Exception:  # noqa: BLE001 - media staging is an optional enrichment
+            return self._unavailable_voice(resource, "QQ voice download unavailable"), 0
+        if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
+            return self._unavailable_voice(resource, "QQ voice download limit exceeded"), len(payload)
+
+        event_dir = root / datetime.fromtimestamp(ev.timestamp).strftime("%Y-%m-%d") / self._safe_event_id(ev.id)
+        try:
+            event_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return self._unavailable_voice(resource, "QQ voice staging unavailable"), len(payload)
+        name = self._voice_name(idx, payload, content_type, resource, converted)
+        target = (event_dir / name).resolve(strict=False)
+        if root not in target.parents:
+            return self._unavailable_voice(resource, "QQ voice staging unavailable"), len(payload)
+        try:
+            target.write_bytes(payload)
+        except OSError:
+            return self._unavailable_voice(resource, "QQ voice staging unavailable"), len(payload)
+
+        local_path = target.relative_to(workspace).as_posix()
+        prepared = PreparedResource(
+            kind="voice",
+            name=resource.name,
+            local_path=local_path,
+            duration_seconds=resource.duration_seconds,
+        )
+        if not self.transcriber:
+            return prepared, len(payload)
+        result = await self._transcribe_voice(target)
+        return self._with_transcript(prepared, result), len(payload)
+
+    def _voice_needs_conversion(self, resource: ChatResource) -> bool:
+        return bool(resource.file_id) or self._is_silk(resource)
+
+    @staticmethod
+    def _is_silk(resource: ChatResource) -> bool:
+        values = (resource.url, resource.file_id, resource.name, resource.mime_type)
+        return any(value and "silk" in value.lower() for value in values)
+
+    def _voice_name(
+        self,
+        idx: int,
+        payload: bytes,
+        content_type: str,
+        resource: ChatResource,
+        converted: bool,
+    ) -> str:
+        if converted:
+            digest = hashlib.sha256(payload).hexdigest()[:12]
+            return f"{idx:02d}-{digest}.wav"
+        return self._generated_name(idx, payload, content_type, resource)
+
+    @staticmethod
+    def _unavailable_voice(resource: ChatResource, error: str) -> PreparedResource:
+        return PreparedResource(
+            kind="voice",
+            name=resource.name or resource.file_id,
+            duration_seconds=resource.duration_seconds,
+            transcript_status="unavailable",
+            transcript_error=error,
+        )
+
+    async def _transcribe_voice(self, path: Path) -> TranscriptionResult:
+        assert self.transcriber is not None
+        try:
+            return await self.transcriber.transcribe(path)
+        except Exception:  # noqa: BLE001 - transcription must degrade softly per resource
+            return TranscriptionResult(None, "failed", None, None)
+
+    @staticmethod
+    def _with_transcript(
+        resource: PreparedResource, result: TranscriptionResult
+    ) -> PreparedResource:
+        text = (result.text or "").strip()
+        if result.status == "ok" and text:
+            return replace(
+                resource,
+                transcript=text,
+                transcript_status="verified",
+                transcript_language=result.language,
+            )
+        if result.status == "timeout":
+            error = "Whisper timeout"
+        elif result.status == "failed":
+            error = "Whisper failed"
+        else:
+            error = (result.error or "Whisper unavailable").strip()[:500]
+        return replace(
+            resource,
+            transcript_status="unavailable",
+            transcript_error=error,
+        )
 
     def _resource_root(self, workspace: Path) -> Path:
         root = (workspace / self.cfg.resources.root).resolve(strict=False)
@@ -161,9 +301,25 @@ def format_resource_context(resources: tuple[PreparedResource, ...]) -> str:
             lines.append(res.text)
         elif res.local_path:
             lines.append(f"- {res.kind}: {res.local_path}{details}")
+            _append_transcript_context(lines, res)
+        elif res.kind == "voice":
+            name = res.name or "unavailable voice"
+            lines.append(f"- voice: {name}{details}")
+            _append_transcript_context(lines, res)
         elif res.url:
             lines.append(f"- {res.kind}: {res.url}{details}")
     return "\n".join(lines)
+
+
+def _append_transcript_context(lines: list[str], resource: PreparedResource) -> None:
+    if resource.transcript_status == "verified" and resource.transcript:
+        language = resource.transcript_language or "unknown"
+        lines.append(
+            f"  transcript (verified by local Whisper, language={language}): {resource.transcript}"
+        )
+    elif resource.transcript_status == "unavailable":
+        error = resource.transcript_error or "Whisper unavailable"
+        lines.append(f"  transcript: unavailable ({error})")
 
 
 def _format_forward_resource(resource: ChatResource) -> str:
