@@ -19,6 +19,16 @@
       "blockers": [],
       "evidence_state": "direct",
       "answer_mode": "content-summary",
+      "direct_evidence": {
+        "kind": "captions",
+        "excerpts": [
+          {
+            "start": "00:02",
+            "end": "00:06",
+            "text": "Synthetic caption: the sample topic begins here."
+          }
+        ]
+      },
       "policy": [
         "short_link_resolution",
         "caption_evidence"
@@ -44,6 +54,16 @@
       "blockers": [],
       "evidence_state": "direct",
       "answer_mode": "content-summary",
+      "direct_evidence": {
+        "kind": "audio",
+        "excerpts": [
+          {
+            "start": "00:10",
+            "end": "00:14",
+            "text": "Synthetic transcript: the local sample describes a test step."
+          }
+        ]
+      },
       "policy": [
         "local_attachment",
         "audio_or_frame_evidence"
@@ -71,6 +91,7 @@
       ],
       "evidence_state": "metadata-only",
       "answer_mode": "metadata-and-blocker",
+      "direct_evidence": null,
       "policy": [
         "short_link_resolution",
         "metadata_is_not_content",
@@ -102,6 +123,7 @@
       ],
       "evidence_state": "blocked",
       "answer_mode": "metadata-and-blocker",
+      "direct_evidence": null,
       "policy": [
         "access_controls",
         "metadata_is_not_content",
@@ -128,6 +150,16 @@
       "blockers": [],
       "evidence_state": "direct",
       "answer_mode": "content-summary",
+      "direct_evidence": {
+        "kind": "captions",
+        "excerpts": [
+          {
+            "start": "12:10",
+            "end": "12:16",
+            "text": "Synthetic caption: the middle sample confirms the bounded review."
+          }
+        ]
+      },
       "policy": [
         "caption_evidence",
         "bounded_sampling",
