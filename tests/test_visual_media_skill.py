@@ -41,30 +41,43 @@ def _require_related_phrases(
     )
 
 
+def _require_ordered_stages(
+    text: str, stages: tuple[tuple[str, tuple[str, ...]], ...]
+) -> int:
+    position = 0
+    for requirement, alternatives in stages:
+        matches = [text.find(item, position) for item in alternatives if item in text[position:]]
+        assert matches, (
+            f"visual-media reference must cover {requirement} after the preceding stage; "
+            f"expected one of {alternatives!r}"
+        )
+        position = min(matches)
+    return position
+
+
 def test_visual_media_reference_defines_an_evidence_driven_video_workflow() -> None:
     text = _reference_text()
 
-    _require_any(
+    metadata_position = _require_ordered_stages(
         text,
-        ("视频来源", "识别来源", "视频入口", "来源确认", "入口"),
-        "source identification",
+        (
+            ("source identification", ("视频来源", "识别来源", "视频入口", "来源确认", "入口")),
+            ("short-link resolution", ("解析短链", "展开短链", "短链解析", "短链接重定向")),
+            ("metadata inspection", ("页面元数据", "读取元数据", "检查元数据", "页面信息")),
+        ),
     )
-    _require_any(
-        text,
-        ("解析短链", "展开短链", "短链解析", "短链接重定向"),
-        "short-link resolution",
+    direct_evidence_answer_pattern = re.compile(
+        r"(?:字幕|转写|音频|画面|抽帧|实际媒体)"
+        r"[^。！？；\n]{0,80}(?:后|之后|再|才|仅基于|基于)"
+        r"[^。！？；\n]{0,80}(?:总结|概括|回答|回复)"
     )
-    _require_any(
-        text,
-        ("页面元数据", "读取元数据", "检查元数据", "页面信息"),
-        "metadata inspection",
-    )
-    _require_related_phrases(
-        text,
-        ("字幕", "转写", "音频", "画面", "抽帧", "实际媒体"),
-        ("后", "之后", "再", "才", "仅基于", "基于"),
-        ("总结", "概括", "回答", "回复"),
-        "direct video-content evidence and the ensuing answer",
+    assert any(
+        match.start() >= metadata_position
+        for match in direct_evidence_answer_pattern.finditer(text)
+    ), (
+        "visual-media reference must acquire direct video evidence after metadata "
+        "inspection, then bind the answer to that evidence; expected a related "
+        "字幕/转写/音频/画面/抽帧/实际媒体 and answer instruction"
     )
 
 
