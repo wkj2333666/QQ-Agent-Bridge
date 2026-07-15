@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.runtime_skill as runtime_skill
 from qq_agent_bridge.runtime_skill import (  # type: ignore
     build_runtime_skill,
     build_schedule_interpreter_skill,
@@ -43,6 +44,15 @@ def test_runtime_skill_teaches_progress_directives() -> None:
     assert "QQBOT_PROGRESS:" in skill
     assert "真实完成的阶段" in skill
     assert "不要刷屏" in skill
+
+
+def test_runtime_skill_fallback_requires_direct_media_evidence(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_skill, "_skill_root", lambda: Path("/missing/skill"))
+
+    skill = build_runtime_skill("task")
+
+    assert "字幕、转写、音频、抽帧画面/实际媒体或用户提供片段之一" in skill
+    assert "页面元数据、简介或页面正文不能单独作为正片内容证据" in skill
 
 
 def test_runtime_skill_teaches_voice_duration_and_audio_file_directives() -> None:
