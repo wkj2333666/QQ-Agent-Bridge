@@ -22,6 +22,7 @@ CASE_FIELDS = frozenset(
         "evidence_state",
         "answer_mode",
         "direct_evidence",
+        "media_lifecycle",
         "policy",
         "budget",
         "cleanup_expected",
@@ -32,6 +33,10 @@ BUDGET_FIELDS = frozenset({"timestamp_windows", "max_frames", "max_tokens"})
 DIRECT_EVIDENCE_FIELDS = frozenset({"kind", "excerpts"})
 DIRECT_EVIDENCE_EXCERPT_FIELDS = frozenset({"start", "end", "text"})
 DIRECT_EVIDENCE_KINDS = frozenset({"captions", "transcript", "audio", "frames"})
+MEDIA_LIFECYCLE_FIELDS = frozenset({"original_user_attachment", "temporary_derivatives"})
+ORIGINAL_ATTACHMENT_FIELDS = frozenset({"path", "cleanup_after_processing"})
+TEMPORARY_DERIVATIVE_FIELDS = frozenset({"kind", "path", "cleanup_after_processing"})
+LOCAL_ATTACHMENT_DERIVATIVE_KINDS = frozenset({"audio", "frames"})
 DIRECT_EVIDENCE_POLICIES = {
     "captions": "caption_evidence",
     "transcript": "caption_evidence",
@@ -152,6 +157,35 @@ def _validate_case(case: Any) -> None:
         assert "access_controls" in case["policy"]
         assert "blocked_response" in case["policy"]
 
+    media_lifecycle = case["media_lifecycle"]
+    if source["kind"] == "local_attachment":
+        assert isinstance(media_lifecycle, dict)
+        assert set(media_lifecycle) == MEDIA_LIFECYCLE_FIELDS
+
+        original_attachment = media_lifecycle["original_user_attachment"]
+        assert isinstance(original_attachment, dict)
+        assert set(original_attachment) == ORIGINAL_ATTACHMENT_FIELDS
+        assert original_attachment["path"] == source["input"]
+        assert original_attachment["cleanup_after_processing"] is False
+
+        temporary_derivatives = media_lifecycle["temporary_derivatives"]
+        assert isinstance(temporary_derivatives, list) and temporary_derivatives
+        derivative_kinds = set()
+        for derivative in temporary_derivatives:
+            assert isinstance(derivative, dict)
+            assert set(derivative) == TEMPORARY_DERIVATIVE_FIELDS
+            assert derivative["kind"] in LOCAL_ATTACHMENT_DERIVATIVE_KINDS
+            assert isinstance(derivative["path"], str) and derivative["path"]
+            assert derivative["path"] != original_attachment["path"]
+            assert derivative["cleanup_after_processing"] is True
+            derivative_kinds.add(derivative["kind"])
+        assert derivative_kinds == LOCAL_ATTACHMENT_DERIVATIVE_KINDS
+        assert len(temporary_derivatives) == len(derivative_kinds)
+        assert case["cleanup_expected"] is True
+        assert "temporary_cleanup" in case["policy"]
+    else:
+        assert media_lifecycle is None
+
     budget = case["budget"]
     if case["id"] == "bounded_long_video":
         assert isinstance(budget, dict) and set(budget) == BUDGET_FIELDS
@@ -164,7 +198,8 @@ def _validate_case(case: Any) -> None:
         assert "temporary_cleanup" in case["policy"]
     else:
         assert budget is None
-        assert not case["cleanup_expected"]
+        if source["kind"] != "local_attachment":
+            assert not case["cleanup_expected"]
 
 
 def _assert_reference_policy(policy: str, reference: str) -> None:
@@ -202,7 +237,7 @@ def test_video_media_fixture_cases_validate_evidence_states_and_reference_policy
             "access": "available",
             "evidence_state": "direct",
             "answer_mode": "content-summary",
-            "cleanup_expected": False,
+            "cleanup_expected": True,
         },
         "metadata_only_short_link": {
             "source": ("short_link", "bilibili"),
@@ -238,6 +273,24 @@ def test_video_media_fixture_cases_validate_evidence_states_and_reference_policy
         assert case["answer_mode"] == expected["answer_mode"]
         assert case["cleanup_expected"] is expected["cleanup_expected"]
     assert cases_by_id["bounded_long_video"]["budget"] == LONG_VIDEO_BUDGET
+    assert cases_by_id["local_attachment_with_audio_and_frames"]["media_lifecycle"] == {
+        "original_user_attachment": {
+            "path": "synthetic-attachment.mp4",
+            "cleanup_after_processing": False,
+        },
+        "temporary_derivatives": [
+            {
+                "kind": "audio",
+                "path": "temporary/synthetic-attachment-audio.wav",
+                "cleanup_after_processing": True,
+            },
+            {
+                "kind": "frames",
+                "path": "temporary/synthetic-attachment-frame-0001.jpg",
+                "cleanup_after_processing": True,
+            },
+        ],
+    }
 
     reference = REFERENCE.read_text(encoding="utf-8")
     for case in cases:
@@ -268,6 +321,22 @@ def test_video_media_fixture_semantics_cannot_be_weakened_by_policy_lists() -> N
     long_video = deepcopy(cases["bounded_long_video"])
     long_video["policy"].remove("temporary_cleanup")
     invalid_cases.append(long_video)
+
+    local_attachment = deepcopy(cases["local_attachment_with_audio_and_frames"])
+    local_attachment["media_lifecycle"]["temporary_derivatives"][0]["cleanup_after_processing"] = False
+    invalid_cases.append(local_attachment)
+
+    local_attachment_original = deepcopy(cases["local_attachment_with_audio_and_frames"])
+    local_attachment_original["media_lifecycle"]["original_user_attachment"]["cleanup_after_processing"] = True
+    invalid_cases.append(local_attachment_original)
+
+    local_attachment_without_policy = deepcopy(cases["local_attachment_with_audio_and_frames"])
+    local_attachment_without_policy["policy"].remove("temporary_cleanup")
+    invalid_cases.append(local_attachment_without_policy)
+
+    local_attachment_without_cleanup = deepcopy(cases["local_attachment_with_audio_and_frames"])
+    local_attachment_without_cleanup["cleanup_expected"] = False
+    invalid_cases.append(local_attachment_without_cleanup)
 
     boolean_budget = deepcopy(cases["bounded_long_video"])
     boolean_budget["budget"]["max_frames"] = True
