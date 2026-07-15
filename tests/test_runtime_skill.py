@@ -93,7 +93,7 @@ def test_runtime_skill_is_structured_index_not_monolith() -> None:
     assert "skills/qq-agent-runtime/references/qq-bridge-interface.md" in skill
     assert "skills/qq-agent-runtime/references/scheduling.md" in skill
     assert "大型能力细节放在 references" in skill
-    for media_detail in ("b23.tv", "403", "抽帧"):
+    for media_detail in ("b23.tv", "解析短链", "媒体补证"):
         assert media_detail not in skill
 
 
