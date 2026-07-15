@@ -49,7 +49,7 @@ if [[ "$CHECKED_OUT_COMMIT" != "$WHISPER_CPP_COMMIT" ]]; then
   exit 1
 fi
 
-cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
+cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF
 cmake --build "$BUILD_DIR" --config Release --target whisper-cli -j "${QAB_ASR_BUILD_JOBS:-2}"
 
 mkdir -p "$ASR_ROOT/releases"
@@ -60,6 +60,17 @@ STAGED_MODEL="$STAGED_RELEASE/models/$MODEL_NAME"
 mkdir -p "$STAGED_RELEASE/bin" "$STAGED_RELEASE/models"
 
 install -m 755 "$BUILD_DIR/bin/whisper-cli" "$STAGED_BINARY"
+DEPENDENCY_REPORT=""
+if ! DEPENDENCY_REPORT="$(LC_ALL=C ldd "$STAGED_BINARY" 2>&1)"; then
+  if [[ "$DEPENDENCY_REPORT" != *"not a dynamic executable"* ]]; then
+    printf 'Unable to inspect whisper-cli dependencies:\n%s\n' "$DEPENDENCY_REPORT" >&2
+    exit 1
+  fi
+fi
+if [[ "$DEPENDENCY_REPORT" == *"not found"* ]]; then
+  printf 'Staged whisper-cli has unresolved dynamic libraries:\n%s\n' "$DEPENDENCY_REPORT" >&2
+  exit 1
+fi
 curl --fail --location --retry 3 --output "$STAGED_MODEL" "$MODEL_URL"
 MODEL_ACTUAL_SHA256="$(sha256sum "$STAGED_MODEL" | awk '{print $1}')"
 if [[ "$MODEL_ACTUAL_SHA256" != "$MODEL_SHA256" ]]; then

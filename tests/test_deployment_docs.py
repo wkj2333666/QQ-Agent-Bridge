@@ -114,6 +114,32 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
         fi
         """,
     )
+    write_executable(
+        tools / "ldd",
+        """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        case "${FAKE_LDD_MODE:-ready}" in
+          ready)
+            printf '%s\\n' 'linux-vdso.so.1 (0x00000000)'
+            printf '%s\\n' 'libc.so.6 => /lib/libc.so.6 (0x00000000)'
+            ;;
+          missing-private)
+            printf '%s\\n' 'libwhisper.so.1 => not found'
+            printf '%s\\n' 'libggml.so.0 => not found'
+            printf '%s\\n' 'libc.so.6 => /lib/libc.so.6 (0x00000000)'
+            ;;
+          static)
+            printf '%s\\n' 'not a dynamic executable' >&2
+            exit 1
+            ;;
+          *)
+            printf 'unexpected FAKE_LDD_MODE: %s\\n' "$FAKE_LDD_MODE" >&2
+            exit 2
+            ;;
+        esac
+        """,
+    )
     return tools, command_log
 
 
@@ -174,6 +200,9 @@ def test_installer_pins_source_and_model_integrity() -> None:
     assert "git -C \"$SOURCE_DIR\" rev-parse HEAD" in contents
     assert "mktemp -d" in contents
     assert "CMAKE_BUILD_TYPE=Release" in contents
+    assert "-DBUILD_SHARED_LIBS=OFF" in contents
+    assert "LC_ALL=C ldd \"$STAGED_BINARY\"" in contents
+    assert "unresolved dynamic libraries" in contents
     assert "whisper-cli" in contents
     assert "ggml-tiny-q8_0.bin" in contents
     assert "c2085835d3f50733e2ff6e4b41ae8a2b8d8110461e18821b09a15c40c42d1cca" in contents
@@ -239,6 +268,25 @@ def test_installer_publishes_verified_release_by_switching_current_atomically(tm
     assert f"fetch --depth 1 origin {WHISPER_CPP_COMMIT}" in commands
     assert f"checkout --detach {WHISPER_CPP_COMMIT}" in commands
     assert "rev-parse HEAD" in commands
+
+
+def test_installer_rejects_unresolved_private_libraries_before_publish(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update({"FAKE_MODEL_CONTENT": "good-model", "FAKE_LDD_MODE": "missing-private"})
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "unresolved dynamic libraries" in result.stderr
+    assert "libwhisper.so.1 => not found" in result.stderr
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
 
 
 def test_checker_accepts_stubbed_release_and_rejects_missing_wav(tmp_path: Path) -> None:

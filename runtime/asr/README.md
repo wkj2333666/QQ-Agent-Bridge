@@ -15,9 +15,12 @@ $HOME/.local/share/qq-agent-bridge/asr/
 The installer fetches and checks out the exact `whisper.cpp` benchmark commit
 `080bbbe85230f624f0b52127f1ae1218247989f9`, then verifies `git rev-parse HEAD`
 before its CPU Release build. It stages `ggml-tiny-q8_0.bin` alongside the
-binary, verifies its SHA-256, publishes the complete release, and atomically
-replaces `current`. A failed or interrupted install leaves the preceding
-`current` target intact.
+binary, requests a static `whisper-cli` build, and verifies its SHA-256. Before
+publication, the staged binary is inspected with `ldd`: a genuinely static
+binary is accepted, while any unresolved library (including an unresolved
+system library) rejects the release. It then publishes the complete release and
+atomically replaces `current`. A failed or interrupted install leaves the
+preceding `current` target intact.
 
 The Tiny Q8 model SHA-256 is:
 
