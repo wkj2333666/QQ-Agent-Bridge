@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import textwrap
+import wave
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,6 +199,26 @@ def test_installer_checksum_mismatch_preserves_current_release(tmp_path: Path) -
     assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
 
 
+def test_installer_checkout_mismatch_preserves_current_release(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env["FAKE_GIT_HEAD"] = "deadbeef"
+    env["FAKE_MODEL_CONTENT"] = "good-model"
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "whisper.cpp checkout mismatch" in result.stderr
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert (asr_root / "current" / "bin" / "whisper-cli").read_text(encoding="utf-8") == "old binary"
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
+
+
 def test_installer_publishes_verified_release_by_switching_current_atomically(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -254,6 +275,53 @@ def test_checker_accepts_stubbed_release_and_rejects_missing_wav(tmp_path: Path)
     assert "No WAV supplied" in ready.stdout
     assert missing.returncode == 1
     assert "WAV input is missing" in missing.stderr
+
+
+def test_checker_transcribes_valid_wav_and_writes_transcript(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    release = asr_root / "releases" / "ready"
+    (release / "bin").mkdir(parents=True)
+    (release / "models").mkdir()
+    cli_args = tmp_path / "cli-args.log"
+    write_executable(
+        release / "bin" / "whisper-cli",
+        """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\n' "$*" >> "$FAKE_CLI_ARGS"
+        if [[ "${1:-}" == "--help" ]]; then exit 0; fi
+        while [[ $# -gt 0 ]]; do
+          if [[ "$1" == "-of" ]]; then
+            printf 'transcribed test audio\\n' > "$2.txt"
+            exit 0
+          fi
+          shift
+        done
+        exit 1
+        """,
+    )
+    (release / "models" / "ggml-tiny-q8_0.bin").write_text("stub model", encoding="utf-8")
+    (asr_root / "current").symlink_to("releases/ready")
+    wav_path = tmp_path / "valid.wav"
+    with wave.open(str(wav_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(b"\0\0" * 160)
+    env = os.environ.copy()
+    env.update({"HOME": str(home), "QAB_ASR_ROOT": str(asr_root), "FAKE_CLI_ARGS": str(cli_args)})
+
+    result = run_script(CHECKER, env, wav_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "WAV smoke check: exit=0" in result.stdout
+    assert "Transcript:" in result.stdout
+    assert "transcribed test audio" in result.stdout
+    calls = cli_args.read_text(encoding="utf-8").splitlines()
+    assert any("-f " + str(wav_path) in call for call in calls)
+    assert any("-of " in call for call in calls)
 
 
 def test_checker_validates_runtime_and_optional_wav_without_project_writes() -> None:

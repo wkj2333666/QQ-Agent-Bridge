@@ -10,7 +10,8 @@ system package locations.
 ## Files Changed
 
 - `runtime/asr/README.md`
-  - Documents the default runtime layout, the pinned `v1.8.6` source release,
+  - Documents the default runtime layout, the pinned source commit
+    `080bbbe85230f624f0b52127f1ae1218247989f9`,
     and the Tiny Q8 model SHA-256.
   - Supplies an exact `whisper:` YAML example with absolute paths and smoke-check
     commands.
@@ -71,18 +72,19 @@ These commands are rerun after this report is added and before the commit.
 - Per task instruction, no real clone, model download, CMake build, dependency
   installation, or audio transcription was run. The installer must be reviewed
   and invoked explicitly later against the intended home-local destination.
-- The source pin is the immutable upstream release tag `v1.8.6`; the Tiny Q8
-  model is additionally protected by its full SHA-256.
+- The source pin is the exact commit
+  `080bbbe85230f624f0b52127f1ae1218247989f9`; the Tiny Q8 model is additionally
+  protected by its full SHA-256.
 - The scripts require standard local tools already appropriate for this manual
   deployment: `git`, `cmake`, a C/C++ compiler, `curl`, `sha256sum`, and
   `realpath`.
 
 ## Task 5 Review Fix
 
-The deployment review identified two release-integrity gaps: `v1.8.6` was a
-mutable reference rather than an exact source object, and the installer wrote
-the live binary and model paths independently. This fix replaces the tag with
-the benchmark commit `080bbbe85230f624f0b52127f1ae1218247989f9`. The installer
+The deployment review identified two release-integrity gaps: the source
+reference was mutable rather than an exact source object, and the installer
+wrote the live binary and model paths independently. This fix pins the source
+to the exact commit `080bbbe85230f624f0b52127f1ae1218247989f9`. The installer
 fetches that object, checks it out detached, and compares `git rev-parse HEAD`
 to the expected SHA before CMake runs.
 
@@ -109,6 +111,25 @@ bash -n scripts/install_whisper_cpp.sh scripts/check_whisper_cpp.sh
 /home/wkj/projects/qq-bot/.venv/bin/pytest -q
 ```
 
+Results: focused deployment suite `9 passed`; shell syntax check passed; full
+suite `419 passed, 11 skipped`.
+
 Results before commit: focused deployment suite `7 passed`; full suite
 `417 passed, 11 skipped`. No network fetch, CMake build, system package action,
 or mamba write was performed during this review fix.
+
+## Task 5 Review Fix Follow-up
+
+Added regression coverage for a mismatched fake git `HEAD`, asserting that the
+installer exits nonzero and preserves the existing `current` release. Added a
+successful checker smoke test using a valid WAV and a fake CLI, asserting that
+the checker passes `-f` and `-of` and prints the generated transcript. The
+existing missing-WAV failure assertion remains in place.
+
+Follow-up verification:
+
+```bash
+/home/wkj/projects/qq-bot/.venv/bin/pytest -q tests/test_deployment_docs.py
+bash -n scripts/install_whisper_cpp.sh scripts/check_whisper_cpp.sh
+/home/wkj/projects/qq-bot/.venv/bin/pytest -q
+```
