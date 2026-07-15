@@ -83,6 +83,8 @@ def test_runtime_skill_is_structured_index_not_monolith() -> None:
     assert "skills/qq-agent-runtime/references/qq-bridge-interface.md" in skill
     assert "skills/qq-agent-runtime/references/scheduling.md" in skill
     assert "大型能力细节放在 references" in skill
+    for media_detail in ("b23.tv", "403", "抽帧"):
+        assert media_detail not in skill
 
 
 def test_runtime_skill_can_point_to_workspace_local_reference_bundle(tmp_path: Path) -> None:
@@ -98,6 +100,15 @@ def test_runtime_skill_can_point_to_workspace_local_reference_bundle(tmp_path: P
     copied = workspace / reference_base / "web-search.md"
     assert copied.is_file()
     assert "联网搜索" in copied.read_text(encoding="utf-8")
+    copied_visual_media = workspace / reference_base / "visual-media.md"
+    source_visual_media = (
+        ROOT / "skills" / "qq-agent-runtime" / "references" / "visual-media.md"
+    )
+    assert copied_visual_media.is_file()
+    assert copied_visual_media.read_text(encoding="utf-8") == source_visual_media.read_text(
+        encoding="utf-8"
+    )
+    assert "视频" in copied_visual_media.read_text(encoding="utf-8")
 
 
 def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
