@@ -163,8 +163,26 @@ def test_example_config_enables_resource_passthrough() -> None:
     assert cfg.resources.cache_enabled
     assert cfg.resources.cache_ttl_seconds == 600
     assert cfg.resources.cache_max_items == 4
+    assert cfg.resources.local_media_roots == []
     assert "voice" in cfg.resources.allowed_kinds
     assert "forward" in cfg.resources.allowed_kinds
+
+
+def test_config_loads_local_media_roots(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+resources:
+  local_media_roots:
+    - /var/lib/onebot/media
+    - /srv/qq-records
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.resources.local_media_roots == ["/var/lib/onebot/media", "/srv/qq-records"]
 
 
 def test_example_config_keeps_whisper_disabled_with_safe_defaults() -> None:
