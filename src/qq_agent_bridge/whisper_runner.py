@@ -201,16 +201,18 @@ class WhisperRunner:
 
     def _load_cache(self, cache_root: Path, cache_key: str) -> TranscriptionResult | None:
         cache_path = cache_root / f"{cache_key}.json"
+        now = time.time()
         try:
             if not stat.S_ISREG(cache_path.lstat().st_mode):
                 return None
             cache_path.chmod(0o600)
             entry = json.loads(cache_path.read_text(encoding="utf-8"))
-            created_at = float(entry["created_at"])
+            created_at = self._cache_created_at(entry["created_at"], now)
             result = TranscriptionResult(**entry["result"])
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            self._unlink(cache_path)
             return None
-        if time.time() - created_at > self.cfg.cache_ttl_seconds:
+        if now - created_at > self.cfg.cache_ttl_seconds:
             self._unlink(cache_path)
             return None
         if result.status != "ok" or not result.text or not result.text.strip():
@@ -249,7 +251,7 @@ class WhisperRunner:
                     continue
                 cache_path.chmod(0o600)
                 entry = json.loads(cache_path.read_text(encoding="utf-8"))
-                created_at = float(entry["created_at"])
+                created_at = self._cache_created_at(entry["created_at"], now)
             except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
                 self._unlink(cache_path)
                 continue
@@ -259,6 +261,15 @@ class WhisperRunner:
                 entries.append((created_at, cache_path))
         for _, cache_path in sorted(entries)[: -self.cfg.cache_max_items]:
             self._unlink(cache_path)
+
+    @staticmethod
+    def _cache_created_at(value: object, now: float) -> float:
+        if isinstance(value, bool):
+            raise ValueError("invalid cache timestamp")
+        created_at = float(value)
+        if not math.isfinite(created_at) or created_at > now:
+            raise ValueError("invalid cache timestamp")
+        return created_at
 
     @staticmethod
     def _unlink(path: Path) -> None:

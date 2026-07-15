@@ -9,6 +9,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import qq_agent_bridge.whisper_runner as whisper_runner  # type: ignore
@@ -263,6 +265,73 @@ def test_runner_cleans_expired_entries_on_subsequent_cache_activity(
         assert not expired_path.exists()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [float("nan"), float("inf"), "not-a-timestamp", True, 101.0],
+    ids=["nan", "infinity", "non-numeric", "boolean", "future"],
+)
+def test_runner_removes_invalid_cache_timestamp_when_loading(
+    tmp_path: Path, monkeypatch: object, created_at: object
+) -> None:
+    fake = make_fake_whisper(tmp_path)
+    runner = WhisperRunner(make_cfg(fake, cache_ttl_seconds=100))
+    cache_root = Path(runner.cfg.cache_root)
+    cache_root.mkdir()
+    cache_key = "a" * 64
+    cache_path = cache_root / f"{cache_key}.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "created_at": created_at,
+                "result": {
+                    "text": "private transcript",
+                    "status": "ok",
+                    "language": "zh",
+                    "error": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(whisper_runner.time, "time", lambda: 100.0)
+
+    assert runner._load_cache(cache_root, cache_key) is None
+    assert not cache_path.exists()
+
+
+def test_runner_removes_invalid_cache_timestamps_when_trimming(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    fake = make_fake_whisper(tmp_path)
+    runner = WhisperRunner(make_cfg(fake, cache_ttl_seconds=100))
+    cache_root = Path(runner.cfg.cache_root)
+    cache_root.mkdir()
+    timestamps = [float("nan"), float("inf"), "not-a-timestamp", True, 101.0]
+    cache_paths = []
+    for index, created_at in enumerate(timestamps):
+        cache_path = cache_root / f"{index:064x}.json"
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "created_at": created_at,
+                    "result": {
+                        "text": "private transcript",
+                        "status": "ok",
+                        "language": "zh",
+                        "error": None,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        cache_paths.append(cache_path)
+    monkeypatch.setattr(whisper_runner.time, "time", lambda: 100.0)
+
+    runner._trim_cache(cache_root)
+
+    assert all(not cache_path.exists() for cache_path in cache_paths)
 
 
 def test_runner_preserves_unrelated_json_during_cache_cleanup(
