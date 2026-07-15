@@ -72,6 +72,7 @@ class AmbientMemoryConfig:
 class ResourcesConfig:
     enabled: bool = True
     root: str = "downloads/qq-agent-bridge"
+    local_media_roots: list[str] = field(default_factory=list)
     max_items: int = 4
     max_bytes: int = 8 * 1024 * 1024
     max_total_bytes: int = 20 * 1024 * 1024

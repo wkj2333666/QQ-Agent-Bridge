@@ -194,14 +194,25 @@ class ResourceManager:
     def _read_local_record(
         self, source: str, total_bytes: int, resource: ChatResource
     ) -> tuple[bytes, str]:
-        path = Path(source).expanduser()
+        source_path = Path(source).expanduser()
+        try:
+            path = source_path.resolve(strict=False)
+        except OSError as exc:
+            raise ValueError("QQ voice local file unavailable") from exc
+        if (
+            source_path.is_symlink()
+            or not path.is_file()
+            or not self._is_trusted_local_media_path(path)
+        ):
+            raise ValueError("QQ voice local file unavailable")
+        mime_type = mimetypes.guess_type(path.name)[0]
+        if not mime_type or not mime_type.startswith("audio/"):
+            raise ValueError("QQ voice local file unavailable")
         remaining = self.cfg.resources.max_total_bytes - total_bytes
         limit = min(self.cfg.resources.max_bytes, remaining)
         if limit <= 0:
             raise ValueError("QQ voice download limit exceeded")
         try:
-            if not path.is_file():
-                raise ValueError("QQ voice local file unavailable")
             if path.stat().st_size > limit:
                 raise ValueError("QQ voice download limit exceeded")
             with path.open("rb") as file:
@@ -210,10 +221,21 @@ class ResourceManager:
             raise ValueError("QQ voice local file unavailable") from exc
         if len(payload) > limit:
             raise ValueError("QQ voice download limit exceeded")
-        mime_type = mimetypes.guess_type(path.name)[0] or resource.mime_type or "audio/wav"
-        if not mime_type.startswith("audio/"):
-            mime_type = "audio/wav"
         return payload, mime_type
+
+    def _is_trusted_local_media_path(self, path: Path) -> bool:
+        roots = self.cfg.resources.local_media_roots
+        if not isinstance(roots, list):
+            return False
+        for root in roots:
+            if not isinstance(root, str) or not root.strip():
+                continue
+            try:
+                path.relative_to(Path(root).expanduser().resolve(strict=False))
+            except (OSError, ValueError):
+                continue
+            return True
+        return False
 
     @staticmethod
     def _is_silk(resource: ChatResource) -> bool:

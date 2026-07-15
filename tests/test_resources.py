@@ -22,6 +22,13 @@ def make_cfg(workspace: Path) -> BridgeConfig:
     return cfg
 
 
+def configure_local_media_root(cfg: BridgeConfig, workspace: Path) -> Path:
+    root = workspace / "onebot-media"
+    root.mkdir()
+    cfg.resources.local_media_roots = [str(root)]
+    return root
+
+
 def make_ev(resources: tuple[ChatResource, ...], mid: str = "m/1") -> ChatEvent:
     return ChatEvent(
         id=mid,
@@ -152,7 +159,8 @@ def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_
 
 def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcript(tmp_path: Path) -> None:
     async def go() -> None:
-        source = tmp_path / "onebot-record.wav"
+        cfg = make_cfg(tmp_path)
+        source = configure_local_media_root(cfg, tmp_path) / "onebot-record.wav"
         source.write_bytes(b"RIFFlocal-wav")
         transcriber = FakeTranscriber(TranscriptionResult("本地语音", "ok", "zh", None))
 
@@ -164,7 +172,7 @@ def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcri
             raise AssertionError(f"local OneBot record path must not be fetched: {url}")
 
         manager = ResourceManager(
-            make_cfg(tmp_path),
+            cfg,
             fetch=fetch,
             record_url=record_url,
             transcriber=transcriber,  # type: ignore[arg-type]
@@ -186,7 +194,8 @@ def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcri
 @pytest.mark.parametrize("source_kind", ["missing", "directory"])
 def test_voice_rejects_unavailable_local_record_path_safely(tmp_path: Path, source_kind: str) -> None:
     async def go() -> None:
-        source = tmp_path / "onebot-record.wav"
+        cfg = make_cfg(tmp_path)
+        source = configure_local_media_root(cfg, tmp_path) / "onebot-record.wav"
         if source_kind == "directory":
             source.mkdir()
 
@@ -198,7 +207,7 @@ def test_voice_rejects_unavailable_local_record_path_safely(tmp_path: Path, sour
 
         transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
         manager = ResourceManager(
-            make_cfg(tmp_path),
+            cfg,
             fetch=fetch,
             record_url=record_url,
             transcriber=transcriber,  # type: ignore[arg-type]
@@ -223,7 +232,8 @@ def test_voice_rejects_oversized_local_record_path_safely(
     tmp_path: Path, file_size: int, max_total_bytes: int
 ) -> None:
     async def go() -> None:
-        source = tmp_path / "onebot-record.wav"
+        cfg = make_cfg(tmp_path)
+        source = configure_local_media_root(cfg, tmp_path) / "onebot-record.wav"
         source.write_bytes(b"x" * file_size)
 
         async def record_url(resource: ChatResource) -> str | None:
@@ -233,7 +243,6 @@ def test_voice_rejects_oversized_local_record_path_safely(
             raise AssertionError(f"local OneBot record path must not be fetched: {url}")
 
         transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
-        cfg = make_cfg(tmp_path)
         cfg.resources.max_total_bytes = max_total_bytes
         manager = ResourceManager(
             cfg,
@@ -248,6 +257,71 @@ def test_voice_rejects_oversized_local_record_path_safely(
         assert refs[0].local_path is None
         assert refs[0].transcript_status == "unavailable"
         assert refs[0].transcript_error == "QQ voice download limit exceeded"
+        assert transcriber.paths == []
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        "empty-roots",
+        "invalid-root-type",
+        "outside-root",
+        "symlink",
+        "symlink-loop",
+        "unknown-extension",
+        "non-audio",
+    ],
+)
+def test_voice_rejects_untrusted_local_record_path(tmp_path: Path, source_kind: str) -> None:
+    async def go() -> None:
+        cfg = make_cfg(tmp_path)
+        trusted_root = configure_local_media_root(cfg, tmp_path)
+        source = trusted_root / "onebot-record.wav"
+        if source_kind == "empty-roots":
+            cfg.resources.local_media_roots = []
+            source.write_bytes(b"RIFFlocal-wav")
+        elif source_kind == "invalid-root-type":
+            cfg.resources.local_media_roots = "/"  # type: ignore[assignment]
+            source = tmp_path / "outside.wav"
+            source.write_bytes(b"RIFFlocal-wav")
+        elif source_kind == "outside-root":
+            source = tmp_path / "outside.wav"
+            source.write_bytes(b"RIFFlocal-wav")
+        elif source_kind == "symlink":
+            target = tmp_path / "outside.wav"
+            target.write_bytes(b"RIFFlocal-wav")
+            source.symlink_to(target)
+        elif source_kind == "symlink-loop":
+            source.symlink_to(source)
+        elif source_kind == "unknown-extension":
+            source = trusted_root / "onebot-record.unknown"
+            source.write_bytes(b"not audio")
+        else:
+            source = trusted_root / "onebot-record.txt"
+            source.write_bytes(b"not audio")
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+        manager = ResourceManager(
+            cfg,
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+
+        refs = await manager.prepare(make_ev((silk_voice(),), mid=f"voice-local-{source_kind}"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "QQ voice local file unavailable"
         assert transcriber.paths == []
 
     asyncio.run(go())

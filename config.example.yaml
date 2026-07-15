@@ -53,6 +53,7 @@ ambient_memory:
 resources:
   enabled: true
   root: "downloads/qq-agent-bridge"
+  local_media_roots: [] # trusted OneBot directories allowed to supply local audio records
   max_items: 4
   max_bytes: 8388608
   max_total_bytes: 20971520
