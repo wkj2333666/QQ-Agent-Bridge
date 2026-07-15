@@ -5,6 +5,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
@@ -144,6 +146,109 @@ def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_
         assert refs[0].transcript_language == "zh"
         assert transcriber.paths == [tmp_path / refs[0].local_path]
         assert "verified by local Whisper, language=zh" in format_resource_context(refs)
+
+    asyncio.run(go())
+
+
+def test_voice_stages_local_record_path_without_fetch_and_adds_verified_transcript(tmp_path: Path) -> None:
+    async def go() -> None:
+        source = tmp_path / "onebot-record.wav"
+        source.write_bytes(b"RIFFlocal-wav")
+        transcriber = FakeTranscriber(TranscriptionResult("本地语音", "ok", "zh", None))
+
+        async def record_url(resource: ChatResource) -> str | None:
+            assert resource == silk_voice()
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-local-record"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is not None
+        staged = tmp_path / refs[0].local_path
+        assert staged.read_bytes() == b"RIFFlocal-wav"
+        assert staged.name.endswith(".wav")
+        assert refs[0].transcript == "本地语音"
+        assert refs[0].transcript_status == "verified"
+        assert transcriber.paths == [staged]
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("source_kind", ["missing", "directory"])
+def test_voice_rejects_unavailable_local_record_path_safely(tmp_path: Path, source_kind: str) -> None:
+    async def go() -> None:
+        source = tmp_path / "onebot-record.wav"
+        if source_kind == "directory":
+            source.mkdir()
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+
+        refs = await manager.prepare(make_ev((silk_voice(),), mid=f"voice-local-{source_kind}"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert transcriber.paths == []
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    ("file_size", "max_total_bytes"),
+    [(1025, 20 * 1024 * 1024), (9, 8)],
+    ids=("max-bytes", "max-total-bytes"),
+)
+def test_voice_rejects_oversized_local_record_path_safely(
+    tmp_path: Path, file_size: int, max_total_bytes: int
+) -> None:
+    async def go() -> None:
+        source = tmp_path / "onebot-record.wav"
+        source.write_bytes(b"x" * file_size)
+
+        async def record_url(resource: ChatResource) -> str | None:
+            return str(source)
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            raise AssertionError(f"local OneBot record path must not be fetched: {url}")
+
+        transcriber = FakeTranscriber(TranscriptionResult("unexpected", "ok", "zh", None))
+        cfg = make_cfg(tmp_path)
+        cfg.resources.max_total_bytes = max_total_bytes
+        manager = ResourceManager(
+            cfg,
+            fetch=fetch,
+            record_url=record_url,
+            transcriber=transcriber,  # type: ignore[arg-type]
+        )
+
+        refs = await manager.prepare(make_ev((silk_voice(),), mid="voice-local-oversized"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+        assert refs[0].transcript_error == "QQ voice download limit exceeded"
+        assert transcriber.paths == []
 
     asyncio.run(go())
 
