@@ -148,6 +148,44 @@ def test_voice_uses_napcat_wav_before_download_and_adds_verified_transcript(tmp_
     asyncio.run(go())
 
 
+def test_file_id_voice_does_not_fetch_original_url_after_resolver_failure(tmp_path: Path) -> None:
+    async def go() -> None:
+        resolver_calls: list[str | None] = []
+        fetch_calls: list[str] = []
+
+        async def record_url(resource: ChatResource) -> str | None:
+            resolver_calls.append(resource.file_id)
+            return None
+
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            fetch_calls.append(url)
+            return b"decoded-looking-bytes", "audio/wav"
+
+        resource = ChatResource(
+            kind="voice",
+            file_id="voice-token",
+            url="https://qq.example/voice-token",
+            name="voice",
+            duration_seconds=12,
+        )
+        manager = ResourceManager(
+            make_cfg(tmp_path),
+            fetch=fetch,
+            record_url=record_url,
+        )
+
+        refs = await manager.prepare(make_ev((resource,), mid="voice-resolver-failed"))
+
+        assert resolver_calls == ["voice-token"]
+        assert fetch_calls == []
+        assert len(refs) == 1
+        assert refs[0].kind == "voice"
+        assert refs[0].local_path is None
+        assert refs[0].transcript_status == "unavailable"
+
+    asyncio.run(go())
+
+
 def test_failed_transcription_keeps_audio_and_marks_unavailable(tmp_path: Path) -> None:
     async def go() -> None:
         async def fetch(url: str, limit: int) -> tuple[bytes, str]:
