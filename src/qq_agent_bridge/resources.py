@@ -126,13 +126,20 @@ class ResourceManager:
     ) -> tuple[PreparedResource, int]:
         source_url: str | None = None
         converted = False
+        conversion_attempted = False
         if self.record_url and self._voice_needs_conversion(resource):
+            conversion_attempted = True
             try:
                 source_url = await self.record_url(resource)
             except Exception:  # noqa: BLE001 - one converter failure must not discard the event
                 source_url = None
             converted = bool(source_url)
-        if source_url is None and resource.url and not self._is_silk(resource):
+        if (
+            source_url is None
+            and resource.url
+            and not conversion_attempted
+            and not self._is_silk(resource)
+        ):
             source_url = resource.url
         if not source_url:
             return self._unavailable_voice(resource, "QQ voice conversion unavailable"), 0
