@@ -133,3 +133,40 @@ Follow-up verification:
 bash -n scripts/install_whisper_cpp.sh scripts/check_whisper_cpp.sh
 /home/wkj/projects/qq-bot/.venv/bin/pytest -q
 ```
+
+## Deployment Smoke Failure Fix
+
+The published `whisper-cli` could be dynamically linked to private
+`libwhisper.so.1` and `libggml.so.0` files that were left in the temporary CMake
+build tree. Because the installer copied only the CLI into the release, the
+published runtime failed its `--help` smoke check when the loader could not find
+those libraries.
+
+The installer now configures CMake with `-DBUILD_SHARED_LIBS=OFF` and inspects
+the staged artifact with `ldd` before downloading the model or moving
+`current`. A genuinely static executable is accepted. Any `not found`
+dependency, including a system dependency, aborts publication and preserves the
+previous release. No `LD_LIBRARY_PATH` workaround or runner environment change
+was added.
+
+`tests/test_deployment_docs.py` now supplies a realistic fake `ldd` report with
+`libwhisper.so.1 => not found` and `libggml.so.0 => not found`. The regression
+test was observed failing before the installer change because the old installer
+published that artifact, then passes by asserting rejection and retention of
+the preceding `current` release.
+
+Verification:
+
+```text
+/home/wkj/projects/qq-bot/.venv/bin/python -m pytest -q tests/test_deployment_docs.py
+10 passed in 0.48s
+
+bash -n scripts/install_whisper_cpp.sh scripts/check_whisper_cpp.sh
+exit 0
+
+/home/wkj/projects/qq-bot/.venv/bin/python -m pytest -q
+422 passed, 11 skipped in 9.34s
+```
+
+No real clone, model download, or CMake build was run. The deployment contract
+uses only fake local tools and artifacts.
