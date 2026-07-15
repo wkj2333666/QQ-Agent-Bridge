@@ -239,6 +239,19 @@ def test_prompt_includes_resource_context_for_cursor() -> None:
     assert "请直接使用这些本地路径或链接处理用户请求" in prompt
 
 
+def test_resource_context_requires_direct_media_evidence_for_content_claims() -> None:
+    prompt = build_agent_prompt(
+        "task",
+        "概括这个视频",
+        make_ev(),
+        resource_context="- url: https://example.com/video",
+    )
+
+    assert "页面内容和元数据只能用于识别资源" in prompt
+    assert "字幕、转写、音频、抽帧画面、实际媒体或用户提供片段" in prompt
+    assert "才能对视频/音频内容作出概括或其他内容主张" in prompt
+
+
 def test_prompt_includes_outgoing_resource_context_when_enabled() -> None:
     prompt = build_agent_prompt(
         "task",

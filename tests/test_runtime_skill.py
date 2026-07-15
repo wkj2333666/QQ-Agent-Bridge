@@ -55,6 +55,16 @@ def test_runtime_skill_fallback_requires_direct_media_evidence(monkeypatch) -> N
     assert "页面元数据、简介或页面正文不能单独作为正片内容证据" in skill
 
 
+def test_runtime_skill_fallback_reports_access_blockers_without_bypass(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_skill, "_skill_root", lambda: Path("/missing/skill"))
+
+    skill = build_runtime_skill("task")
+
+    assert "登录、cookie、403、429、地区限制、限流或反爬" in skill
+    assert "不得绕过，也不得伪造 cookie、会话或其他访问凭据" in skill
+    assert "只能报告已验证的元数据和阻塞原因" in skill
+
+
 def test_runtime_skill_teaches_voice_duration_and_audio_file_directives() -> None:
     skill = build_runtime_skill("task")
 
