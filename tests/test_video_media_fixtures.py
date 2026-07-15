@@ -145,7 +145,7 @@ def _validate_case(case: Any) -> None:
     else:
         assert direct_payload is None
 
-    if expected_state == "metadata-only":
+    if expected_state != "direct":
         assert "metadata_is_not_content" in case["policy"]
         assert "blocked_response" in case["policy"]
     if case["access"] == "blocked":
@@ -256,6 +256,10 @@ def test_video_media_fixture_semantics_cannot_be_weakened_by_policy_lists() -> N
     blocked = deepcopy(cases["access_control_failure"])
     blocked["policy"].remove("access_controls")
     invalid_cases.append(blocked)
+
+    blocked_without_metadata_guard = deepcopy(cases["access_control_failure"])
+    blocked_without_metadata_guard["policy"].remove("metadata_is_not_content")
+    invalid_cases.append(blocked_without_metadata_guard)
 
     direct = deepcopy(cases["captioned_bilibili_short_link"])
     direct["policy"].remove("caption_evidence")
