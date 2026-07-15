@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "captioned_bilibili_short_link",
+      "source": {
+        "kind": "short_link",
+        "platform": "bilibili",
+        "input": "b23.tv/SYNTHCAP -> BV1SYNTHCAP"
+      },
+      "evidence": {
+        "metadata": true,
+        "captions": true,
+        "transcript": false,
+        "audio": false,
+        "frames": false
+      },
+      "access": "available",
+      "blockers": [],
+      "evidence_state": "direct",
+      "answer_mode": "content-summary",
+      "policy": [
+        "short_link_resolution",
+        "caption_evidence"
+      ],
+      "budget": null,
+      "cleanup_expected": false
+    },
+    {
+      "id": "local_attachment_with_audio_and_frames",
+      "source": {
+        "kind": "local_attachment",
+        "platform": "local",
+        "input": "synthetic-attachment.mp4"
+      },
+      "evidence": {
+        "metadata": true,
+        "captions": false,
+        "transcript": false,
+        "audio": true,
+        "frames": true
+      },
+      "access": "available",
+      "blockers": [],
+      "evidence_state": "direct",
+      "answer_mode": "content-summary",
+      "policy": [
+        "local_attachment",
+        "audio_or_frame_evidence"
+      ],
+      "budget": null,
+      "cleanup_expected": false
+    },
+    {
+      "id": "metadata_only_short_link",
+      "source": {
+        "kind": "short_link",
+        "platform": "bilibili",
+        "input": "b23.tv/SYNTHMETA -> page-metadata-only"
+      },
+      "evidence": {
+        "metadata": true,
+        "captions": false,
+        "transcript": false,
+        "audio": false,
+        "frames": false
+      },
+      "access": "available",
+      "blockers": [
+        "direct_media_unavailable"
+      ],
+      "evidence_state": "metadata-only",
+      "answer_mode": "metadata-and-blocker",
+      "policy": [
+        "short_link_resolution",
+        "metadata_is_not_content",
+        "blocked_response"
+      ],
+      "budget": null,
+      "cleanup_expected": false
+    },
+    {
+      "id": "access_control_failure",
+      "source": {
+        "kind": "video_page",
+        "platform": "bilibili",
+        "input": "BV1SYNTHBLOCKED"
+      },
+      "evidence": {
+        "metadata": true,
+        "captions": false,
+        "transcript": false,
+        "audio": false,
+        "frames": false
+      },
+      "access": "blocked",
+      "blockers": [
+        "login_required",
+        "cookie_missing",
+        "http_403",
+        "http_429"
+      ],
+      "evidence_state": "blocked",
+      "answer_mode": "metadata-and-blocker",
+      "policy": [
+        "access_controls",
+        "metadata_is_not_content",
+        "blocked_response"
+      ],
+      "budget": null,
+      "cleanup_expected": false
+    },
+    {
+      "id": "bounded_long_video",
+      "source": {
+        "kind": "video_page",
+        "platform": "bilibili",
+        "input": "BV1SYNTHLONG"
+      },
+      "evidence": {
+        "metadata": true,
+        "captions": true,
+        "transcript": false,
+        "audio": false,
+        "frames": true
+      },
+      "access": "available",
+      "blockers": [],
+      "evidence_state": "direct",
+      "answer_mode": "content-summary",
+      "policy": [
+        "caption_evidence",
+        "bounded_sampling",
+        "temporary_cleanup"
+      ],
+      "budget": {
+        "timestamp_windows": [
+          "00:00-00:45",
+          "12:00-12:45",
+          "24:00-24:45"
+        ],
+        "max_frames": 9,
+        "max_tokens": 1800
+      },
+      "cleanup_expected": true
+    }
+  ]
+}
