@@ -167,6 +167,54 @@ def test_example_config_enables_resource_passthrough() -> None:
     assert "forward" in cfg.resources.allowed_kinds
 
 
+def test_example_config_keeps_whisper_disabled_with_safe_defaults() -> None:
+    cfg = BridgeConfig.load(ROOT / "config.example.yaml")
+
+    assert not cfg.whisper.enabled
+    assert cfg.whisper.binary == ""
+    assert cfg.whisper.model == ""
+    assert cfg.whisper.language == "zh"
+    assert cfg.whisper.timeout_seconds == 90
+    assert cfg.whisper.max_concurrent == 1
+    assert cfg.whisper.cache_enabled
+    assert cfg.whisper.cache_root == "data/whisper-cache"
+    assert cfg.whisper.cache_ttl_seconds == 86400
+    assert cfg.whisper.cache_max_items == 256
+
+
+def test_config_loads_whisper_fields_and_clamps_concurrency(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+whisper:
+  enabled: true
+  binary: "/usr/local/bin/whisper"
+  model: "/models/zh.bin"
+  language: en
+  timeout_seconds: 12.5
+  max_concurrent: 0
+  cache_enabled: false
+  cache_root: "/var/cache/whisper"
+  cache_ttl_seconds: 300
+  cache_max_items: 12
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.whisper.enabled
+    assert cfg.whisper.binary == "/usr/local/bin/whisper"
+    assert cfg.whisper.model == "/models/zh.bin"
+    assert cfg.whisper.language == "en"
+    assert cfg.whisper.timeout_seconds == 12.5
+    assert cfg.whisper.max_concurrent == 1
+    assert not cfg.whisper.cache_enabled
+    assert cfg.whisper.cache_root == "/var/cache/whisper"
+    assert cfg.whisper.cache_ttl_seconds == 300
+    assert cfg.whisper.cache_max_items == 12
+
+
 def test_napcat_compose_mounts_workspace_readonly_for_uploads() -> None:
     compose = yaml.safe_load((ROOT / "runtime" / "napcat" / "compose.yml").read_text())
     volumes = compose["services"]["napcat"]["volumes"]

@@ -83,6 +83,20 @@ class ResourcesConfig:
 
 
 @dataclass
+class WhisperConfig:
+    enabled: bool = False
+    binary: str = ""
+    model: str = ""
+    language: str = "zh"
+    timeout_seconds: float = 90.0
+    max_concurrent: int = 1
+    cache_enabled: bool = True
+    cache_root: str = "data/whisper-cache"
+    cache_ttl_seconds: int = 86400
+    cache_max_items: int = 256
+
+
+@dataclass
 class ProgressConfig:
     enabled: bool = True
     first_heartbeat_seconds: int = 30
@@ -168,6 +182,7 @@ class BridgeConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     ambient_memory: AmbientMemoryConfig = field(default_factory=AmbientMemoryConfig)
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
+    whisper: WhisperConfig = field(default_factory=WhisperConfig)
     progress: ProgressConfig = field(default_factory=ProgressConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -187,6 +202,14 @@ class BridgeConfig:
         memory = MemoryConfig(**raw.get("memory", {}))
         ambient_memory = AmbientMemoryConfig(**raw.get("ambient_memory", {}))
         resources = ResourcesConfig(**raw.get("resources", {}))
+        whisper_raw = raw.get("whisper", {})
+        whisper = (
+            WhisperConfig(**whisper_raw) if isinstance(whisper_raw, dict) else WhisperConfig()
+        )
+        whisper.timeout_seconds = max(1.0, float(whisper.timeout_seconds))
+        whisper.max_concurrent = max(1, int(whisper.max_concurrent))
+        whisper.cache_ttl_seconds = max(1, int(whisper.cache_ttl_seconds))
+        whisper.cache_max_items = max(1, int(whisper.cache_max_items))
         progress = ProgressConfig(**raw.get("progress", {}))
         proactive = ProactiveConfig(**raw.get("proactive", {}))
         scheduler = SchedulerConfig(**raw.get("scheduler", {}))
@@ -209,6 +232,7 @@ class BridgeConfig:
             memory=memory,
             ambient_memory=ambient_memory,
             resources=resources,
+            whisper=whisper,
             progress=progress,
             proactive=proactive,
             scheduler=scheduler,
