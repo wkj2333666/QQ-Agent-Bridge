@@ -64,6 +64,9 @@ resources:
 # Whisper voice transcription; keep disabled until the binary and model are configured.
 whisper:
   enabled: false
+  # Use absolute paths; the installer publishes these stable current targets.
+  # binary: "/home/alice/.local/share/qq-agent-bridge/asr/current/bin/whisper-cli"
+  # model: "/home/alice/.local/share/qq-agent-bridge/asr/current/models/ggml-tiny-q8_0.bin"
   binary: ""
   model: ""
   language: "zh"

@@ -90,6 +90,14 @@ echo mode. After the OneBot gateway is connected and echo works, run:
 python -m src.qq_agent_bridge.main
 ```
 
+## Optional Local Speech Recognition
+
+The bridge can transcribe QQ voice resources with a local `whisper.cpp` binary.
+The isolated installer publishes the binary and model through stable
+`current/bin` and `current/models` paths; see
+[runtime/asr/README.md](runtime/asr/README.md) for the verified installation
+and configuration steps.
+
 ## OneBot Gateway
 
 This repository includes a NapCatQQ compose template under `runtime/napcat/`.

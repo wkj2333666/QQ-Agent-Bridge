@@ -76,3 +76,39 @@ These commands are rerun after this report is added and before the commit.
 - The scripts require standard local tools already appropriate for this manual
   deployment: `git`, `cmake`, a C/C++ compiler, `curl`, `sha256sum`, and
   `realpath`.
+
+## Task 5 Review Fix
+
+The deployment review identified two release-integrity gaps: `v1.8.6` was a
+mutable reference rather than an exact source object, and the installer wrote
+the live binary and model paths independently. This fix replaces the tag with
+the benchmark commit `080bbbe85230f624f0b52127f1ae1218247989f9`. The installer
+fetches that object, checks it out detached, and compares `git rev-parse HEAD`
+to the expected SHA before CMake runs.
+
+Installation now creates a staging directory below `QAB_ASR_ROOT`, stages both
+the executable and model there, validates the model SHA-256, and atomically
+moves the complete release into `releases/`. It then swaps a temporary relative
+symlink into `current` with `mv -Tf`; failures before that final rename leave
+the prior `current` symlink untouched. The checker and documented YAML paths
+resolve through `current/bin` and `current/models`.
+
+`tests/test_deployment_docs.py` now runs the installer and checker as
+subprocesses under temporary `HOME` and `QAB_ASR_ROOT` values. Fake `git`,
+`cmake`, `curl`, `sha256sum`, and `whisper-cli` commands keep the tests fully
+offline. The suite proves a checksum mismatch retains the prior current release,
+a successful install publishes a complete new current release after SHA checkout
+verification, and the checker accepts a stub deployment while rejecting a
+missing WAV input.
+
+## Review Fix Verification
+
+```bash
+/home/wkj/projects/qq-bot/.venv/bin/pytest -q tests/test_deployment_docs.py
+bash -n scripts/install_whisper_cpp.sh scripts/check_whisper_cpp.sh
+/home/wkj/projects/qq-bot/.venv/bin/pytest -q
+```
+
+Results before commit: focused deployment suite `7 passed`; full suite
+`417 passed, 11 skipped`. No network fetch, CMake build, system package action,
+or mamba write was performed during this review fix.

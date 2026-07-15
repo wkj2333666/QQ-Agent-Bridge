@@ -6,14 +6,20 @@ and defaults to:
 
 ```text
 $HOME/.local/share/qq-agent-bridge/asr/
-  bin/whisper-cli
-  models/ggml-tiny-q8_0.bin
-  cache/
+  current -> releases/whisper-080bbbe85230-<timestamp>-<pid>
+  current/bin/whisper-cli
+  current/models/ggml-tiny-q8_0.bin
+  releases/<complete-release>/
 ```
 
-The installer builds the pinned `whisper.cpp` release `v1.8.6` as a CPU Release
-build. It downloads `ggml-tiny-q8_0.bin` and verifies its SHA-256 before placing
-it in the runtime:
+The installer fetches and checks out the exact `whisper.cpp` benchmark commit
+`080bbbe85230f624f0b52127f1ae1218247989f9`, then verifies `git rev-parse HEAD`
+before its CPU Release build. It stages `ggml-tiny-q8_0.bin` alongside the
+binary, verifies its SHA-256, publishes the complete release, and atomically
+replaces `current`. A failed or interrupted install leaves the preceding
+`current` target intact.
+
+The Tiny Q8 model SHA-256 is:
 
 ```text
 c2085835d3f50733e2ff6e4b41ae8a2b8d8110461e18821b09a15c40c42d1cca
@@ -37,8 +43,8 @@ home directory is `/home/alice`, this is the exact block to add to `config.yaml`
 ```yaml
 whisper:
   enabled: true
-  binary: "/home/alice/.local/share/qq-agent-bridge/asr/bin/whisper-cli"
-  model: "/home/alice/.local/share/qq-agent-bridge/asr/models/ggml-tiny-q8_0.bin"
+  binary: "/home/alice/.local/share/qq-agent-bridge/asr/current/bin/whisper-cli"
+  model: "/home/alice/.local/share/qq-agent-bridge/asr/current/models/ggml-tiny-q8_0.bin"
   language: "zh"
   timeout_seconds: 90
   max_concurrent: 1
