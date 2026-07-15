@@ -67,6 +67,9 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
             shift
           done
           mkdir -p "$build_dir"
+          if [[ -n "${FAKE_BUILD_DIR_RECORD:-}" ]]; then
+            printf '%s\\n' "$build_dir" > "$FAKE_BUILD_DIR_RECORD"
+          fi
           exit 0
         fi
         if [[ "$1" == "--build" ]]; then
@@ -75,7 +78,13 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
           cat > "$build_dir/bin/whisper-cli" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
-        if [[ "${1:-}" == "--help" ]]; then exit 0; fi
+        if [[ "${1:-}" == "--help" ]]; then
+          if [[ "${FAKE_WHISPER_HELP_MODE:-ready}" != "ready" ]]; then
+            printf '%s\\n' 'fake whisper help failure' >&2
+            exit 1
+          fi
+          exit 0
+        fi
         while [[ $# -gt 0 ]]; do
           if [[ "$1" == "-of" ]]; then
             printf 'fake transcript\\n' > "$2.txt"
@@ -115,6 +124,21 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
         """,
     )
     write_executable(
+        tools / "file",
+        """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        case "${FAKE_FILE_MODE:-elf}" in
+          elf) printf '%s\\n' 'ELF 64-bit LSB pie executable, x86-64' ;;
+          non-elf) printf '%s\\n' 'ASCII text executable' ;;
+          *)
+            printf 'unexpected FAKE_FILE_MODE: %s\\n' "$FAKE_FILE_MODE" >&2
+            exit 2
+            ;;
+        esac
+        """,
+    )
+    write_executable(
         tools / "ldd",
         """
         #!/usr/bin/env bash
@@ -132,6 +156,14 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
           static)
             printf '%s\\n' 'not a dynamic executable' >&2
             exit 1
+            ;;
+          build-tree-dependency)
+            build_dir="$(cat "$FAKE_BUILD_DIR_RECORD")"
+            if [[ -d "$build_dir" ]]; then
+              printf 'libwhisper.so.1 => %s/libwhisper.so.1 (0x00000000)\\n' "$build_dir"
+            else
+              printf '%s\\n' 'libwhisper.so.1 => not found'
+            fi
             ;;
           *)
             printf 'unexpected FAKE_LDD_MODE: %s\\n' "$FAKE_LDD_MODE" >&2
@@ -201,7 +233,9 @@ def test_installer_pins_source_and_model_integrity() -> None:
     assert "mktemp -d" in contents
     assert "CMAKE_BUILD_TYPE=Release" in contents
     assert "-DBUILD_SHARED_LIBS=OFF" in contents
+    assert "file -b \"$STAGED_BINARY\"" in contents
     assert "LC_ALL=C ldd \"$STAGED_BINARY\"" in contents
+    assert '"$STAGED_BINARY" --help' in contents
     assert "unresolved dynamic libraries" in contents
     assert "whisper-cli" in contents
     assert "ggml-tiny-q8_0.bin" in contents
@@ -284,6 +318,74 @@ def test_installer_rejects_unresolved_private_libraries_before_publish(tmp_path:
     assert result.returncode != 0
     assert "unresolved dynamic libraries" in result.stderr
     assert "libwhisper.so.1 => not found" in result.stderr
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
+
+
+def test_installer_rejects_dependency_that_disappears_with_build_tree(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    build_dir_record = tmp_path / "build-dir.txt"
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update(
+        {
+            "FAKE_MODEL_CONTENT": "good-model",
+            "FAKE_LDD_MODE": "build-tree-dependency",
+            "FAKE_BUILD_DIR_RECORD": str(build_dir_record),
+        }
+    )
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "unresolved dynamic libraries" in result.stderr
+    assert not Path(build_dir_record.read_text(encoding="utf-8").strip()).exists()
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
+
+
+def test_installer_rejects_non_elf_staged_binary(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update(
+        {
+            "FAKE_MODEL_CONTENT": "good-model",
+            "FAKE_FILE_MODE": "non-elf",
+            "FAKE_LDD_MODE": "static",
+        }
+    )
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "not an ELF executable" in result.stderr
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
+
+
+def test_installer_rejects_staged_binary_that_cannot_run_help(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update({"FAKE_MODEL_CONTENT": "good-model", "FAKE_WHISPER_HELP_MODE": "broken"})
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "failed --help validation" in result.stderr
     assert os.readlink(asr_root / "current") == "releases/old"
     assert (asr_root / "current").resolve() == old_release
     assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]

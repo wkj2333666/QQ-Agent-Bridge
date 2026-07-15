@@ -28,7 +28,9 @@ STAGING_DIR=""
 CURRENT_NEXT="$ASR_ROOT/.current-${RELEASE_NAME}"
 
 cleanup() {
-  rm -rf -- "$TEMP_DIR"
+  if [[ -n "$TEMP_DIR" ]]; then
+    rm -rf -- "$TEMP_DIR"
+  fi
   if [[ -n "$STAGING_DIR" ]]; then
     rm -rf -- "$STAGING_DIR"
   fi
@@ -60,6 +62,34 @@ STAGED_MODEL="$STAGED_RELEASE/models/$MODEL_NAME"
 mkdir -p "$STAGED_RELEASE/bin" "$STAGED_RELEASE/models"
 
 install -m 755 "$BUILD_DIR/bin/whisper-cli" "$STAGED_BINARY"
+
+# Validate the staged artifact only after every build-time library path is gone.
+rm -rf -- "$TEMP_DIR"
+TEMP_DIR=""
+
+if ! command -v file >/dev/null 2>&1; then
+  printf 'Unable to validate whisper-cli: file is required\n' >&2
+  exit 1
+fi
+if ! FILE_REPORT="$(LC_ALL=C file -b "$STAGED_BINARY" 2>&1)"; then
+  printf 'Unable to inspect staged whisper-cli format:\n%s\n' "$FILE_REPORT" >&2
+  exit 1
+fi
+if [[ "$FILE_REPORT" != ELF*"executable"* ]]; then
+  printf 'Staged whisper-cli is not an ELF executable:\n%s\n' "$FILE_REPORT" >&2
+  exit 1
+fi
+
+HELP_REPORT=""
+if ! HELP_REPORT="$("$STAGED_BINARY" --help 2>&1)"; then
+  printf 'Staged whisper-cli failed --help validation:\n%s\n' "$HELP_REPORT" >&2
+  exit 1
+fi
+
+if ! command -v ldd >/dev/null 2>&1; then
+  printf 'Unable to validate whisper-cli dependencies: ldd is required\n' >&2
+  exit 1
+fi
 DEPENDENCY_REPORT=""
 if ! DEPENDENCY_REPORT="$(LC_ALL=C ldd "$STAGED_BINARY" 2>&1)"; then
   if [[ "$DEPENDENCY_REPORT" != *"not a dynamic executable"* ]]; then
