@@ -77,6 +77,7 @@ CommandName = Literal[
     "shell",
     "help",
     "profile",
+    "mode",
     "reset",
     "reload",
     "schedule",

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_example_config_enables_read_only_commands() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 
-    for command in ("ask", "plan", "search", "task", "status", "help", "profile"):
+    for command in ("ask", "plan", "search", "task", "status", "help", "profile", "mode"):
         assert cfg.is_command_allowed(command), command
 
 
@@ -118,6 +118,39 @@ def test_example_config_documents_empty_profile_maps() -> None:
     assert cfg.profiles.default == ""
     assert cfg.profiles.groups == {}
     assert cfg.profiles.users == {}
+
+
+def test_example_config_defaults_group_mentions_to_ask() -> None:
+    cfg = BridgeConfig.load(ROOT / "config.example.yaml")
+
+    assert cfg.mention_modes.default == "ask"
+    assert cfg.mention_modes.groups == {}
+    assert cfg.mention_mode_for_group("any-group") == "ask"
+
+
+def test_config_loads_isolated_group_mention_modes_and_drops_unsafe_values(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+mention_modes:
+  default: task
+  groups:
+    1001: plan
+    "1002": ask
+    "1003": code
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.mention_modes.default == "task"
+    assert cfg.mention_modes.groups == {"1001": "plan", "1002": "ask"}
+    assert cfg.mention_mode_for_group("1001") == "plan"
+    assert cfg.mention_mode_for_group("1002") == "ask"
+    assert cfg.mention_mode_for_group("other") == "task"
 
 
 def test_example_config_enables_resource_passthrough() -> None:

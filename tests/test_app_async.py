@@ -125,6 +125,7 @@ def make_cfg() -> BridgeConfig:
             "status": True,
             "help": True,
             "profile": True,
+            "mode": True,
             "reset": True,
             "code": True,
             "approve": True,
@@ -277,6 +278,86 @@ def test_bare_group_mention_can_be_promoted_to_ask_by_chat_decision() -> None:
         assert len(calls) == 2
         assert "无命令 @bot 消息" in calls[0]
         assert "回答模式" in calls[1]
+
+    asyncio.run(go())
+
+
+def test_group_mention_mode_task_promotes_answer_decision_to_task() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.mention_modes.groups["group"] = "task"
+        calls: list[tuple[str, str | None, str]] = []
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            calls.append((mode, model, prompt))
+            if "无命令 @bot 消息" in prompt:
+                return '{"action": "ask"}'
+            return "TASK_MODE_DONE"
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@123456 帮我完整处理这个任务", group="group", mid="mode-task"))
+        await wait_until_sent(adapter, "TASK_MODE_DONE")
+
+        task_calls = [call for call in calls if call[0] == "task"]
+        assert len(task_calls) == 1
+        assert task_calls[0][1] == "composer"
+        assert any(item[2] == "收到，我处理一下。" for item in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_group_mention_mode_task_keeps_casual_chat_in_interjection_flow() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.mention_modes.groups["group"] = "task"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+
+        async def fake_cursor(*args: Any, **kwargs: Any) -> str:
+            return '{"action": "chat", "messages": [{"text": "确实牛"}]}'
+
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(make_ev("@123456 原神牛逼", group="group", mid="mode-task-chat"))
+
+        assert app.policy.jobs == {}  # type: ignore[union-attr]
+        assert adapter.sent == [("group", True, "确实牛", "mention-mode-task-chat")]
+
+    asyncio.run(go())
+
+
+def test_explicit_ask_ignores_group_mention_mode() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.mention_modes.groups["group"] = "task"
+        calls: list[str] = []
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            calls.append(cmd)
+            return "EXPLICIT_ASK_DONE"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(make_ev("@123456 /ask 仍然快速回答", group="group", mid="mode-explicit-ask"))
+        await wait_until_sent(adapter, "EXPLICIT_ASK_DONE")
+
+        assert calls == ["ask"]
 
     asyncio.run(go())
 
@@ -1301,6 +1382,181 @@ def test_profile_view_and_clear_current_scope(tmp_path: Path) -> None:
         assert "reader" not in loaded.profiles.users
         assert "当前 profile：\n你是私聊学习搭子" in adapter.sent[0][2]
         assert adapter.sent[1] == ("reader", False, "已清除你的私聊 profile，将使用默认 profile", "profile-clear")
+
+    asyncio.run(go())
+
+
+def test_group_mode_show_reports_effective_default() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(make_ev("/mode", sender="reader", group="group", mid="mode-show"))
+
+        assert adapter.sent == [
+            (
+                "group",
+                True,
+                "本群无命令 @ 的默认模式：ask（全局默认）。显式命令不受影响。",
+                "mode-show",
+            )
+        ]
+
+    asyncio.run(go())
+
+
+def test_group_owner_can_set_mode_and_persist_without_rewriting_other_config(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "# keep this comment\n"
+            "commands:\n  ask: true\n  task: true\n  mode: true\n"
+            "profiles:\n  default: old\n  groups: {}\n  users: {}\n"
+            "# OneBot\nonebot:\n  port: 8765\n",
+            encoding="utf-8",
+        )
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+        app.config_path = config_path
+
+        await app._handle(
+            make_ev("/mode set task", sender="owner", group="group", mid="mode-group-set")
+        )
+
+        loaded = BridgeConfig.load(config_path)
+        persisted = config_path.read_text(encoding="utf-8")
+        assert app.cfg.mention_modes.groups == {"group": "task"}
+        assert loaded.mention_modes.groups == {"group": "task"}
+        assert "# keep this comment" in persisted
+        assert "profiles:\n  default: old" in persisted
+        assert "# OneBot" in persisted
+        assert adapter.sent == [
+            (
+                "group",
+                True,
+                "已将本群无命令 @ 的默认模式设为 task。闲聊判定仍然有效。",
+                "mode-group-set",
+            )
+        ]
+
+    asyncio.run(go())
+
+
+def test_group_non_owner_can_view_but_cannot_change_mode(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "mention_modes:\n  default: ask\n  groups: {}\n",
+            encoding="utf-8",
+        )
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+        app.config_path = config_path
+
+        await app._handle(
+            make_ev("/mode set task", sender="reader", group="group", mid="mode-group-denied")
+        )
+
+        assert BridgeConfig.load(config_path).mention_modes.groups == {}
+        assert adapter.sent == [
+            ("group", True, "[denied] owner-only", "mode-group-denied")
+        ]
+
+    asyncio.run(go())
+
+
+def test_group_mode_clear_restores_global_default(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.mention_modes.default = "plan"
+        cfg.mention_modes.groups["group"] = "task"
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "mention_modes:\n  default: plan\n  groups:\n    \"group\": task\n",
+            encoding="utf-8",
+        )
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+        app.config_path = config_path
+
+        await app._handle(
+            make_ev("/mode clear", sender="owner", group="group", mid="mode-group-clear")
+        )
+
+        assert app.cfg.mention_mode_for_group("group") == "plan"
+        assert BridgeConfig.load(config_path).mention_modes.groups == {}
+        assert adapter.sent == [
+            (
+                "group",
+                True,
+                "已清除本群单独设置，默认模式恢复为 plan。",
+                "mode-group-clear",
+            )
+        ]
+
+    asyncio.run(go())
+
+
+def test_group_mode_rejects_unsafe_or_disabled_targets() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.commands["task"] = False
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(
+            make_ev("/mode set code", sender="owner", group="group", mid="mode-unsafe")
+        )
+        await app._handle(
+            make_ev("/mode set task", sender="owner", group="group", mid="mode-disabled")
+        )
+
+        assert adapter.sent == [
+            ("group", True, "可选模式：ask、plan、task。", "mode-unsafe"),
+            ("group", True, "设置失败：/task 当前未启用。", "mode-disabled"),
+        ]
+
+    asyncio.run(go())
+
+
+def test_mode_is_group_only() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(make_ev("/mode", sender="reader", mid="mode-private"))
+
+        assert adapter.sent == [("reader", False, "/mode 仅用于群聊。", "mode-private")]
 
     asyncio.run(go())
 

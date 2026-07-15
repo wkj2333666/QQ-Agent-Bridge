@@ -26,7 +26,7 @@ QQ 用户/群聊
 - OneBot v11 反向 WebSocket 服务。
 - QQ 群聊 @ 路由，私聊默认触发。
 - owner、私聊用户、群聊 allowlist。
-- 普通用户可用只读命令：`/ask`、`/plan`、`/search`、`/task`、`/status`、`/help`、`/profile`。
+- 普通用户可用只读命令：`/ask`、`/plan`、`/search`、`/task`、`/status`、`/help`、`/profile`、`/mode`。
 - 持久化 `/schedule`；群内修改操作仅限 owner，允许的私聊用户可按配置管理自己的定时任务。
 - owner 专用命令：`/code`、`/approve`、`/stop`、`/reset`、`/reload`。
 - 任务队列和全局 agent 并发限制。
@@ -127,6 +127,9 @@ ws://127.0.0.1:8765/onebot
 - `/profile`：查看当前 profile。
 - `/profile set <提示词>`：设置当前群或当前私聊的 profile。
 - `/profile clear`：清空当前群或当前私聊的 profile。
+- `/mode`：查看本群无命令 @ 消息的默认模式。
+- `/mode set ask|plan|task`：设置本群默认模式。
+- `/mode clear`：清除本群覆盖，恢复全局默认模式。
 
 owner 专用命令：
 
@@ -136,7 +139,9 @@ owner 专用命令：
 - `/reset`：清空当前会话记忆和群聊背景。
 - `/reload`：热重载 `config.yaml`。
 
-群聊里只有 owner 能修改群 profile；私聊里允许用户可以修改自己的私聊 profile。
+群聊里只有 owner 能修改群 profile 和 `/mode`；其他群成员可以查看。私聊里允许用户可以修改自己的私聊 profile，`/mode` 仅用于群聊。
+
+无显式命令的 @ 消息仍会先经过闲聊/问答判断：闲聊继续走插话流程；只有判定为需要回答时，才使用本群的 `ask`、`plan` 或 `task` 默认模式。显式 `/ask`、`/task` 等命令不受 `/mode` 影响。修改会写回 `config.yaml`，重启后保留。
 
 群聊里只有 owner 能创建、暂停、恢复、立即执行或取消定时任务；开启
 `scheduler.allow_private_users` 后，允许的私聊用户可以管理自己的定时任务。
@@ -178,6 +183,17 @@ profiles:
 - 群聊使用 `profiles.groups[group_id]`，没有则使用 `profiles.default`。
 - 私聊使用 `profiles.users[user_id]`，没有则使用 `profiles.default`。
 - 其他群/用户的 profile 不会暴露给当前 agent。
+
+群聊默认模式也可以直接写在配置里：
+
+```yaml
+mention_modes:
+  default: ask
+  groups:
+    "2000000001": task
+```
+
+只支持 `ask`、`plan`、`task`；对应命令必须同时在 `commands` 中启用。`code` 和 `shell` 不能设为隐式默认模式。
 
 ## Agent Runtime
 

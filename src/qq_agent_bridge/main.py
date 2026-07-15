@@ -13,8 +13,9 @@ from zoneinfo import ZoneInfo
 
 from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter
-from .config import BridgeConfig
+from .config import MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .memory import ConversationMemory, GroupAmbientMemory
+from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
 from .outgoing_resources import collect_outgoing_resources
@@ -131,23 +132,27 @@ class App:
 
         parsed = self.policy.parse(ev.text)
         has_content = bool(ev.text.strip() or ev.resources)
+        group_default_command = self.cfg.mention_mode_for_group(ev.chat_id) if ev.is_group else None
         default_command = "ask" if has_content and not ev.is_group else None
         preauthorized_command: str | None = None
         if not parsed and ev.is_group and ev.mentioned_bot and has_content:
             if ev.resources:
-                default_command = "ask"
+                default_command = group_default_command
             else:
-                ok, reason = self.policy.allow(ev, "ask")
+                assert group_default_command is not None
+                ok, reason = self.policy.allow(ev, group_default_command)
                 if not ok:
                     if reason not in {"duplicate", "no-mention"}:
                         await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                     return
                 decision = await self.proactive.decide_mention(ev)
                 if decision.action == "ask":
-                    parsed = self.policy.parse(ev.text, default_command="ask") or self.policy.parse(
-                        "", default_command="ask"
+                    parsed = self.policy.parse(
+                        ev.text, default_command=group_default_command
+                    ) or self.policy.parse(
+                        "", default_command=group_default_command
                     )
-                    preauthorized_command = "ask"
+                    preauthorized_command = group_default_command
                 elif decision.action == "chat":
                     if self.proactive.can_send_chat_interjection(ev.chat_id):
                         await self._send_mention_decision(ev, decision)
@@ -214,6 +219,12 @@ class App:
                 and not txt.startswith("[error]")
             ):
                 self.proactive.reset_chat(ev.chat_id)
+            await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
+            await self._cleanup_policy()
+            return
+
+        if parsed.name == "mode":
+            txt = self._handle_mode_command(ev, parsed.args)
             await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
             await self._cleanup_policy()
             return
@@ -1050,6 +1061,67 @@ class App:
         if self.cfg.profiles.default.strip():
             return f"当前没有单独 profile，正在使用默认 profile：\n{self.cfg.profiles.default.strip()}"
         return "当前没有单独 profile，正在使用内置默认 profile。"
+
+    def _handle_mode_command(self, ev: ChatEvent, args: str) -> str:
+        if not ev.is_group:
+            return "/mode 仅用于群聊。"
+        action, mode = self._parse_mode_args(args)
+        if action == "show":
+            return self._mode_view_reply(ev.chat_id)
+        if action == "invalid":
+            return "用法：/mode、/mode set ask|plan|task、/mode clear。"
+        if not self.cfg.is_owner(ev.sender_id):
+            return "[denied] owner-only"
+        if action == "set":
+            if mode not in MENTION_MODES:
+                return f"可选模式：{'、'.join(MENTION_MODE_OPTIONS)}。"
+            if not self.cfg.is_command_allowed(mode):
+                return f"设置失败：/{mode} 当前未启用。"
+            return self._set_group_mode(ev.chat_id, mode)
+        return self._clear_group_mode(ev.chat_id)
+
+    def _parse_mode_args(self, args: str) -> tuple[str, str]:
+        parts = args.strip().lower().split()
+        if not parts or parts == ["show"]:
+            return "show", ""
+        if len(parts) == 2 and parts[0] == "set":
+            return "set", parts[1]
+        if parts == ["clear"]:
+            return "clear", ""
+        return "invalid", ""
+
+    def _set_group_mode(self, group_id: str, mode: str) -> str:
+        had_previous = group_id in self.cfg.mention_modes.groups
+        previous = self.cfg.mention_modes.groups.get(group_id)
+        self.cfg.mention_modes.groups[group_id] = mode
+        try:
+            write_mention_modes_to_config(self.config_path, self.cfg.mention_modes)
+        except OSError:
+            if had_previous and previous is not None:
+                self.cfg.mention_modes.groups[group_id] = previous
+            else:
+                self.cfg.mention_modes.groups.pop(group_id, None)
+            logger.exception("mention mode persistence failed")
+            return "[error] mode 写入失败"
+        return f"已将本群无命令 @ 的默认模式设为 {mode}。闲聊判定仍然有效。"
+
+    def _clear_group_mode(self, group_id: str) -> str:
+        had_previous = group_id in self.cfg.mention_modes.groups
+        previous = self.cfg.mention_modes.groups.pop(group_id, None)
+        try:
+            write_mention_modes_to_config(self.config_path, self.cfg.mention_modes)
+        except OSError:
+            if had_previous and previous is not None:
+                self.cfg.mention_modes.groups[group_id] = previous
+            logger.exception("mention mode persistence failed")
+            return "[error] mode 写入失败"
+        default = self.cfg.mention_modes.default
+        return f"已清除本群单独设置，默认模式恢复为 {default}。"
+
+    def _mode_view_reply(self, group_id: str) -> str:
+        mode = self.cfg.mention_mode_for_group(group_id)
+        source = "本群单独设置" if group_id in self.cfg.mention_modes.groups else "全局默认"
+        return f"本群无命令 @ 的默认模式：{mode}（{source}）。显式命令不受影响。"
 
     def _configure_outgoing_resources(self, job: Job) -> None:
         if job.cmd not in {"task", "code"} or not self.cfg.resources.enabled:

@@ -27,6 +27,7 @@ COMMANDS: set[str] = {
     "shell",
     "help",
     "profile",
+    "mode",
     "reset",
     "reload",
     "schedule",
@@ -39,6 +40,7 @@ READ_ONLY_COMMANDS: set[str] = {
     "status",
     "help",
     "profile",
+    "mode",
     "schedule",
 }
 OWNER_ONLY_COMMANDS: set[str] = COMMANDS - READ_ONLY_COMMANDS

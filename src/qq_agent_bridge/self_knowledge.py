@@ -14,6 +14,7 @@ READABLE_COMMANDS: tuple[tuple[str, str], ...] = (
     ("status", "看状态"),
     ("help", "看帮助"),
     ("profile", "人设"),
+    ("mode", "默认模式"),
 )
 
 OWNER_COMMANDS: tuple[tuple[str, str], ...] = (
@@ -30,7 +31,11 @@ def build_help_reply(cfg: BridgeConfig, ev: ChatEvent) -> str:
     usage = "群里 @我 后直接说，私聊直接问也行。" if ev.is_group else "私聊直接问就行。"
     if ev.is_group and cfg.resources.enabled and cfg.resources.cache_enabled:
         usage += " 手机端也可以先发图片/文件，再 @我 说要处理。"
-    commands = _command_labels(cfg, include_owner=cfg.is_owner(ev.sender_id))
+    commands = _command_labels(
+        cfg,
+        include_owner=cfg.is_owner(ev.sender_id),
+        is_group=ev.is_group,
+    )
     memory = _memory_capability(cfg, ev)
     proactive = _proactive_capability(cfg, ev)
     if commands:
@@ -40,7 +45,11 @@ def build_help_reply(cfg: BridgeConfig, ev: ChatEvent) -> str:
 
 def build_prompt_self_knowledge(cfg: BridgeConfig, ev: ChatEvent) -> str:
     """Return the public facts the agent may use when asked about itself."""
-    commands = _command_labels(cfg, include_owner=cfg.is_owner(ev.sender_id))
+    commands = _command_labels(
+        cfg,
+        include_owner=cfg.is_owner(ev.sender_id),
+        is_group=ev.is_group,
+    )
     memory = _prompt_memory_capability(cfg, ev)
     profile_prompt = select_profile_prompt(cfg, ev)
     if commands:
@@ -79,7 +88,11 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
     if _contains_any(t, ("怎么用", "如何使用", "使用方法", "用法")):
         return build_help_reply(cfg, ev)
     if _contains_any(t, ("能干嘛", "会什么", "有什么功能", "能力")):
-        cmds = _command_labels(cfg, include_owner=cfg.is_owner(ev.sender_id))
+        cmds = _command_labels(
+            cfg,
+            include_owner=cfg.is_owner(ev.sender_id),
+            is_group=ev.is_group,
+        )
         suffix = f"常用命令：{'、'.join(cmds)}。" if cmds else "当前没有开启可用命令。"
         return f"我能答问题、拆方案、帮你在允许的项目里检索信息。{suffix}"
     if _contains_any(t, ("记忆", "上下文")):
@@ -98,9 +111,11 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
     return None
 
 
-def _command_labels(cfg: BridgeConfig, include_owner: bool) -> list[str]:
+def _command_labels(cfg: BridgeConfig, include_owner: bool, *, is_group: bool) -> list[str]:
     commands = [
-        f"/{name} {desc}" for name, desc in READABLE_COMMANDS if cfg.is_command_allowed(name)
+        f"/{name} {desc}"
+        for name, desc in READABLE_COMMANDS
+        if cfg.is_command_allowed(name) and (name != "mode" or is_group)
     ]
     if include_owner:
         commands.extend(
