@@ -128,8 +128,16 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
         """
         #!/usr/bin/env bash
         set -euo pipefail
+        case "${@: -1}" in
+          "$QAB_ASR_ROOT"/.staging.*/release/bin/whisper-cli) ;;
+          *)
+            printf 'file expected staged whisper-cli target, got: %s\\n' "${@: -1}" >&2
+            exit 2
+            ;;
+        esac
         case "${FAKE_FILE_MODE:-elf}" in
           elf) printf '%s\\n' 'ELF 64-bit LSB pie executable, x86-64' ;;
+          static) printf '%s\\n' 'ELF 64-bit LSB executable, x86-64, statically linked' ;;
           non-elf) printf '%s\\n' 'ASCII text executable' ;;
           *)
             printf 'unexpected FAKE_FILE_MODE: %s\\n' "$FAKE_FILE_MODE" >&2
@@ -143,6 +151,13 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
         """
         #!/usr/bin/env bash
         set -euo pipefail
+        case "${@: -1}" in
+          "$QAB_ASR_ROOT"/.staging.*/release/bin/whisper-cli) ;;
+          *)
+            printf 'ldd expected staged whisper-cli target, got: %s\\n' "${@: -1}" >&2
+            exit 2
+            ;;
+        esac
         case "${FAKE_LDD_MODE:-ready}" in
           ready)
             printf '%s\\n' 'linux-vdso.so.1 (0x00000000)'
@@ -155,6 +170,14 @@ def make_fake_toolchain(tmp_path: Path) -> tuple[Path, Path]:
             ;;
           static)
             printf '%s\\n' 'not a dynamic executable' >&2
+            exit 1
+            ;;
+          static-musl)
+            printf '%s\\n' 'ldd: static executable' >&2
+            exit 1
+            ;;
+          malformed)
+            printf '%s\\n' 'ldd: unable to inspect executable' >&2
             exit 1
             ;;
           build-tree-dependency)
@@ -302,6 +325,50 @@ def test_installer_publishes_verified_release_by_switching_current_atomically(tm
     assert f"fetch --depth 1 origin {WHISPER_CPP_COMMIT}" in commands
     assert f"checkout --detach {WHISPER_CPP_COMMIT}" in commands
     assert "rev-parse HEAD" in commands
+
+
+def test_installer_publishes_static_elf_when_ldd_uses_musl_style_failure(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update(
+        {
+            "FAKE_MODEL_CONTENT": "good-model",
+            "FAKE_FILE_MODE": "static",
+            "FAKE_LDD_MODE": "static-musl",
+        }
+    )
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode == 0, result.stderr
+    assert (asr_root / "current").is_symlink()
+    assert os.readlink(asr_root / "current") != "releases/old"
+    assert (asr_root / "current").resolve() != old_release
+    assert (asr_root / "current" / "bin" / "whisper-cli").is_file()
+    assert (asr_root / "current" / "models" / "ggml-tiny-q8_0.bin").read_text(encoding="utf-8") == "good-model"
+    assert old_release.is_dir()
+
+
+def test_installer_rejects_malformed_ldd_failure_before_publish(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    asr_root = home / "asr"
+    old_release = create_previous_release(asr_root)
+    tools, command_log = make_fake_toolchain(tmp_path)
+    env = installer_env(home, asr_root, tools, command_log)
+    env.update({"FAKE_MODEL_CONTENT": "good-model", "FAKE_LDD_MODE": "malformed"})
+
+    result = run_script(INSTALLER, env)
+
+    assert result.returncode != 0
+    assert "Unable to inspect whisper-cli dependencies" in result.stderr
+    assert os.readlink(asr_root / "current") == "releases/old"
+    assert (asr_root / "current").resolve() == old_release
+    assert sorted(path.name for path in (asr_root / "releases").iterdir()) == ["old"]
 
 
 def test_installer_rejects_unresolved_private_libraries_before_publish(tmp_path: Path) -> None:

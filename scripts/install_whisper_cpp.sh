@@ -91,14 +91,16 @@ if ! command -v ldd >/dev/null 2>&1; then
   exit 1
 fi
 DEPENDENCY_REPORT=""
+LDD_FAILED=0
 if ! DEPENDENCY_REPORT="$(LC_ALL=C ldd "$STAGED_BINARY" 2>&1)"; then
-  if [[ "$DEPENDENCY_REPORT" != *"not a dynamic executable"* ]]; then
-    printf 'Unable to inspect whisper-cli dependencies:\n%s\n' "$DEPENDENCY_REPORT" >&2
-    exit 1
-  fi
+  LDD_FAILED=1
 fi
 if [[ "$DEPENDENCY_REPORT" == *"not found"* ]]; then
   printf 'Staged whisper-cli has unresolved dynamic libraries:\n%s\n' "$DEPENDENCY_REPORT" >&2
+  exit 1
+fi
+if (( LDD_FAILED )) && [[ "$FILE_REPORT" != *"statically linked"* && "$FILE_REPORT" != *"static-pie linked"* ]]; then
+  printf 'Unable to inspect whisper-cli dependencies:\n%s\n' "$DEPENDENCY_REPORT" >&2
   exit 1
 fi
 curl --fail --location --retry 3 --output "$STAGED_MODEL" "$MODEL_URL"
