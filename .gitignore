@@ -48,6 +48,7 @@ secrets/
 # Cursor / agent
 .cursor/
 .codex/
+.superpowers/
 .worktrees
 agent-cli-state.json
 .qq-agent-sandbox/
