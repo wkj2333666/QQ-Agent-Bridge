@@ -107,3 +107,16 @@ Full suite:
 
 The worktree contained a pre-existing untracked `.superpowers/` directory;
 unrelated files were not reverted.
+
+## Task 2 Review Fix
+
+Updated `tests/test_whisper_runner.py` so the timeout regression uses the
+runner's valid minimum timeout of `1.0` second while the fake subprocess sleeps
+for `2.0` seconds. This makes the test deterministically exercise timeout
+cleanup without changing production behavior or unrelated tests.
+
+Verification:
+
+```text
+`/home/wkj/projects/qq-bot/.venv/bin/pytest -q tests/test_whisper_runner.py`
+```

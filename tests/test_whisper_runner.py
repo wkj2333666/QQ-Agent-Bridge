@@ -117,11 +117,11 @@ def test_runner_reports_nonzero_exit_and_does_not_guess(tmp_path: Path) -> None:
 
 def test_runner_reports_timeout(tmp_path: Path) -> None:
     async def run() -> None:
-        fake = make_sleeping_whisper(tmp_path, seconds=1)
+        fake = make_sleeping_whisper(tmp_path, seconds=2.0)
         audio = tmp_path / "input.wav"
         audio.write_bytes(b"audio")
 
-        result = await WhisperRunner(make_cfg(fake, timeout_seconds=0.05)).transcribe(audio)
+        result = await WhisperRunner(make_cfg(fake, timeout_seconds=1.0)).transcribe(audio)
 
         assert result.status == "timeout"
         assert result.text is None
