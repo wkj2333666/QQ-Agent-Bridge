@@ -141,10 +141,14 @@ class ScheduleStore:
         chat_id: str,
         is_group: bool,
         *,
+        creator_id: str | None = None,
         active_only: bool = True,
     ) -> list[Schedule]:
         query = "SELECT * FROM schedules WHERE chat_id = ? AND is_group = ?"
         params: list[object] = [chat_id, int(is_group)]
+        if creator_id is not None:
+            query += " AND creator_id = ?"
+            params.append(creator_id)
         if active_only:
             query += " AND status IN ('active', 'paused', 'finishing')"
         query += " ORDER BY created_at, rowid"
@@ -160,9 +164,15 @@ class ScheduleStore:
         *,
         default_ref: str = "-1",
         active_only: bool = True,
+        creator_id: str | None = None,
     ) -> Schedule | None:
         raw = (ref or "").strip() or default_ref
-        items = self.list_for_chat(chat_id, is_group, active_only=active_only)
+        items = self.list_for_chat(
+            chat_id,
+            is_group,
+            creator_id=creator_id,
+            active_only=active_only,
+        )
         exact = next((item for item in items if item.id == raw), None)
         if exact:
             return exact

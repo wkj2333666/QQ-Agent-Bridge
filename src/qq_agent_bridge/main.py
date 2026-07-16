@@ -677,7 +677,12 @@ class App:
             )
             return
         if action == "show":
-            schedule = self.schedule_store.resolve_ref(ev.chat_id, ev.is_group, ref)
+            schedule = self.schedule_store.resolve_ref(
+                ev.chat_id,
+                ev.is_group,
+                ref,
+                creator_id=self._schedule_creator_scope(ev),
+            )
             text = self._schedule_detail_text(schedule, ev) if schedule else "没有找到这个定时任务。"
             await self._send_text(ev.chat_id, ev.is_group, text, ev.id)
             return
@@ -754,7 +759,12 @@ class App:
         self._schedule_reply(job)
 
     async def _handle_schedule_management(self, ev: ChatEvent, action: str, ref: str) -> None:
-        schedule = self.schedule_store.resolve_ref(ev.chat_id, ev.is_group, ref)
+        schedule = self.schedule_store.resolve_ref(
+            ev.chat_id,
+            ev.is_group,
+            ref,
+            creator_id=self._schedule_creator_scope(ev),
+        )
         if not schedule:
             await self._send_text(
                 ev.chat_id,
@@ -790,6 +800,10 @@ class App:
         if not self.cfg.is_user_allowed(ev.sender_id):
             return "user-denied"
         return self._schedule_access_denial(ev.sender_id, None)
+
+    def _schedule_creator_scope(self, ev: ChatEvent) -> str | None:
+        """Owners see all schedules in this chat; everyone else sees their own."""
+        return None if self.cfg.is_owner(ev.sender_id) else ev.sender_id
 
     def _schedule_access_denial(self, sender_id: str, group_id: str | None) -> str | None:
         access = self.cfg.command_access("schedule", group_id)
@@ -841,7 +855,11 @@ class App:
         )
 
     def _schedule_list_text(self, ev: ChatEvent) -> str:
-        schedules = self.schedule_store.list_for_chat(ev.chat_id, ev.is_group)
+        schedules = self.schedule_store.list_for_chat(
+            ev.chat_id,
+            ev.is_group,
+            creator_id=self._schedule_creator_scope(ev),
+        )
         if not schedules:
             return "当前没有进行中或暂停的定时任务。"
         lines = ["当前定时任务："]
@@ -864,7 +882,11 @@ class App:
         return f"{index}. [{status}] {description} | {schedule.action}：{payload} | 下次 {next_text}"
 
     def _schedule_detail_text(self, schedule: Schedule, ev: ChatEvent) -> str:
-        items = self.schedule_store.list_for_chat(ev.chat_id, ev.is_group)
+        items = self.schedule_store.list_for_chat(
+            ev.chat_id,
+            ev.is_group,
+            creator_id=self._schedule_creator_scope(ev),
+        )
         try:
             index = items.index(schedule)
         except ValueError:
@@ -880,7 +902,11 @@ class App:
         )
 
     def _schedule_receipt(self, schedule: Schedule, ev: ChatEvent) -> str:
-        schedules = self.schedule_store.list_for_chat(ev.chat_id, ev.is_group)
+        schedules = self.schedule_store.list_for_chat(
+            ev.chat_id,
+            ev.is_group,
+            creator_id=self._schedule_creator_scope(ev),
+        )
         try:
             index = schedules.index(schedule)
         except ValueError:

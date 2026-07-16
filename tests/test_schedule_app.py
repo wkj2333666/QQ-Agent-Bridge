@@ -359,6 +359,61 @@ def test_schedule_management_uses_indices_and_defaults_to_latest(tmp_path: Path)
     asyncio.run(go())
 
 
+def test_schedule_visibility_and_management_are_scoped_to_creator_unless_owner(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        await app._handle(
+            make_event(
+                "/schedule every 1h forever -- send owner-only reminder",
+                sender="owner",
+                mid="owner-schedule",
+            )
+        )
+        await app._handle(
+            make_event(
+                "/schedule every 2h forever -- send reader reminder",
+                sender="reader",
+                mid="reader-schedule",
+            )
+        )
+        owner_schedule, reader_schedule = app.schedule_store.list_for_chat("group", True)
+
+        await app._handle(make_event("/schedule list", sender="reader", mid="reader-list"))
+        reader_list = adapter.sent[-1][2]
+        assert "reader reminder" in reader_list
+        assert "owner-only reminder" not in reader_list
+        assert owner_schedule.id not in reader_list
+
+        await app._handle(
+            make_event(
+                f"/schedule cancel {owner_schedule.id}",
+                sender="reader",
+                mid="reader-cancel-owner",
+            )
+        )
+        assert "没有找到这个定时任务" in adapter.sent[-1][2]
+        assert app.schedule_store.get(owner_schedule.id).status == "active"
+
+        await app._handle(
+            make_event(
+                f"/schedule cancel {reader_schedule.id}",
+                sender="owner",
+                mid="owner-cancel-reader",
+            )
+        )
+        assert "已取消这个定时任务" in adapter.sent[-1][2]
+        assert app.schedule_store.get(reader_schedule.id).status == "cancelled"
+
+        await app._handle(make_event("/schedule list", sender="owner", mid="owner-list"))
+        owner_list = adapter.sent[-1][2]
+        assert "owner-only reminder" in owner_list
+        assert "reader reminder" not in owner_list
+
+    asyncio.run(go())
+
+
 def test_schedule_help_remains_available_when_dispatcher_is_disabled(tmp_path: Path) -> None:
     async def go() -> None:
         app, adapter = make_app(tmp_path)
