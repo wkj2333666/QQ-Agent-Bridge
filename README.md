@@ -76,20 +76,18 @@ cp config.example.yaml config.yaml
 # - onebot.access_token
 # - bot.self_id after QQ gateway login
 
-# This environment is only for the bridge itself and its tests.
+# uv manages the bridge environment and locks it in uv.lock.
 # Agent tasks run separately in micromamba's base environment.
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
+uv sync --locked
 
-python -m src.qq_agent_bridge.main --echo-only
+uv run python -m src.qq_agent_bridge.main --echo-only
 ```
 
 From an allowed private chat, send a message and confirm the bridge replies in
 echo mode. After the OneBot gateway is connected and echo works, run:
 
 ```bash
-python -m src.qq_agent_bridge.main
+uv run python -m src.qq_agent_bridge.main
 ```
 
 ## Agent Trace Logs
@@ -395,9 +393,8 @@ or below 60 seconds. Generic audio and music are sent as files.
 ## Verify
 
 ```bash
-. .venv/bin/activate
-python dry_run.py
-python -m pytest -q
+uv run python dry_run.py
+uv run pytest -q
 git diff --check
 ```
 
@@ -405,7 +402,7 @@ Default tests do not invoke real Cursor, Codex, or Claude CLIs. To smoke-test
 local CLI availability on your own machine:
 
 ```bash
-QQ_AGENT_BRIDGE_CLI_SMOKE=1 python -m pytest tests/test_cli_smoke.py -q
+QQ_AGENT_BRIDGE_CLI_SMOKE=1 uv run pytest tests/test_cli_smoke.py -q
 ```
 
 You can override commands with `QQ_AGENT_BRIDGE_SMOKE_CURSOR_CMD`,
@@ -418,7 +415,7 @@ QQ_AGENT_BRIDGE_AGENT_E2E=1 \
 QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
 QQ_AGENT_BRIDGE_E2E_CHAT_MODEL=auto \
 QQ_AGENT_BRIDGE_E2E_TASK_MODEL=kimi-k2.5 \
-python -m pytest tests/test_agent_e2e.py -q
+uv run pytest tests/test_agent_e2e.py -q
 ```
 
 For `cursor-cli`, these tests use `bwrap` by default so Cursor can trust the
@@ -441,7 +438,7 @@ QQ_AGENT_BRIDGE_CAPABILITY_EVAL=1 \
 QQ_AGENT_BRIDGE_E2E_RUNTIME=cursor-cli \
 QQ_AGENT_BRIDGE_CAPABILITY_CHAT_MODEL=auto \
 QQ_AGENT_BRIDGE_CAPABILITY_TASK_MODEL=kimi-k2.5 \
-python -m pytest tests/test_agent_capability_eval.py -q
+uv run pytest tests/test_agent_capability_eval.py -q
 ```
 
 By default the judge uses the same runtime. Override it with
