@@ -21,6 +21,7 @@ commands:
   code: owner    # owner-only workspace edits, still subject to confirmation
   status: user
   help: user
+  permission: user # view group command overrides; only group owners may change them
   schedule: user # schedule viewing; group mutations remain owner-only
   profile: user  # viewing; group edits remain owner-only
   mode: user     # viewing; only owners may change a group's mode
@@ -29,6 +30,12 @@ commands:
   approve: owner
   reload: owner   # reloads config.yaml without reconnecting OneBot
   shell: disabled # dangerous shell entry; keep disabled unless deliberately enabled
+  groups: {}
+  # Per-group overrides, for example:
+  # groups:
+  #   "123456":
+  #     task: disabled
+  #     search: owner
 
 dangerous_requires_confirm: true
 max_runtime_seconds: 1800

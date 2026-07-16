@@ -142,6 +142,8 @@ ws://127.0.0.1:8765/onebot
 - `/schedule list|show|pause|resume|run|cancel`：用 ID、`0`/`1` 或 `-1`/`-2` 管理任务。
 - `/status`：查看运行中和排队中的任务。
 - `/help`：显示简短帮助。
+- `/help <命令>` 或 `/<命令> help`：查看某个命令的详细用法、权限和示例。
+- `/permission`：查看当前群的命令权限；`/permission set|clear` 仅群 owner 可修改，并会持久化。
 - `/profile`：查看当前 profile。
 - `/profile set <提示词>`：设置当前群或当前私聊的 profile。
 - `/profile clear`：清空当前群或当前私聊的 profile。
@@ -157,11 +159,20 @@ commands:
   task: user
   code: owner
   shell: disabled
+  permission: user
+  groups:
+    "180188783":
+      task: disabled
+      search: owner
 ```
 
 `user` 表示所有已经通过用户/群权限校验的人，`owner` 表示仅 owner，
 `disabled` 表示关闭命令。旧的布尔写法仍兼容：`true` 保留该命令历史上的默认权限，
 `false` 等同于 `disabled`。
+
+`commands.groups` 是群级覆盖，只对对应群生效；没有覆盖的命令继续继承全局设置。
+群 owner 可以用 `/permission set <命令> user|owner|disabled` 修改，用
+`/permission clear [命令]` 恢复全局设置。
 
 owner 专用命令：
 

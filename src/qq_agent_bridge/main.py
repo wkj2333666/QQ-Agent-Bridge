@@ -16,6 +16,7 @@ from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter, run_agent
 from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .command_access_store import write_command_access_to_config
+from .command_help import build_command_help
 from .memory import ConversationMemory, GroupAmbientMemory
 from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
@@ -183,6 +184,12 @@ class App:
                 await self._cleanup_policy()
                 return
 
+        if parsed.name != "help" and self._is_help_subcommand(parsed.args):
+            txt = self._command_help_reply(parsed.name, ev)
+            await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
+            await self._cleanup_policy()
+            return
+
         if parsed.name == "permission":
             txt = self._handle_permission_command(ev, parsed.args)
             await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
@@ -200,7 +207,8 @@ class App:
             return
 
         if parsed.name == "help":
-            txt = build_help_reply(self.cfg, ev)
+            topic = self._help_topic(parsed.args)
+            txt = self._command_help_reply(topic, ev) if topic else build_help_reply(self.cfg, ev)
             await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
             await self._cleanup_policy()
             return
@@ -622,7 +630,7 @@ class App:
             await self._send_text(
                 ev.chat_id,
                 ev.is_group,
-                self._schedule_help_text(),
+                self._schedule_help_text(ev),
                 ev.id,
             )
             return
@@ -769,10 +777,13 @@ class App:
             values.append(qq)
         return tuple(values)
 
-    def _schedule_help_text(self) -> str:
+    def _schedule_help_text(self, ev: ChatEvent | None = None) -> str:
         zone = self.cfg.scheduler.timezone
+        permission = self.cfg.command_access("schedule", ev.chat_id if ev and ev.is_group else None)
         return "\n".join(
             [
+                f"/schedule 权限：{permission}。",
+                "用法：/schedule <自然语言规则>，或 /schedule <结构化规则>。",
                 f"定时任务使用时区：{zone}",
                 "自然语言（推荐）：",
                 "/schedule 明天早上十点提醒我喝水 噔噔噔",
@@ -1109,10 +1120,22 @@ class App:
         if action == "set":
             if mode not in MENTION_MODES:
                 return f"可选模式：{'、'.join(MENTION_MODE_OPTIONS)}。"
-            if not self.cfg.is_command_allowed(mode):
+            if not self.cfg.is_command_allowed(mode, ev.chat_id):
                 return f"设置失败：/{mode} 当前未启用。"
             return self._set_group_mode(ev.chat_id, mode)
         return self._clear_group_mode(ev.chat_id)
+
+    def _is_help_subcommand(self, args: str) -> bool:
+        return args.strip().lower() in {"help", "帮助", "?"}
+
+    def _help_topic(self, args: str) -> str:
+        parts = args.strip().split(maxsplit=1)
+        return parts[0].lower() if parts else ""
+
+    def _command_help_reply(self, command: str, ev: ChatEvent) -> str:
+        if command.strip().lower().lstrip("/") == "schedule":
+            return self._schedule_help_text(ev)
+        return build_command_help(command, self.cfg, ev)
 
     def _handle_permission_command(self, ev: ChatEvent, args: str) -> str:
         action, command, access = self._parse_permission_args(args)

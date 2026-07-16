@@ -174,6 +174,8 @@ Common commands:
   indices such as `0` and `-1`.
 - `/status`: show running and queued jobs.
 - `/help`: show a short QQ-friendly help message.
+- `/help <command>` or `/<command> help`: show detailed usage, permissions, and examples.
+- `/permission`: view per-group command access; only group owners can set/clear overrides.
 - `/profile`: show the current profile.
 - `/profile set <prompt>`: set the current private or group profile.
 - `/profile clear`: clear the current private or group profile.
@@ -189,12 +191,22 @@ commands:
   task: user
   code: owner
   shell: disabled
+  permission: user
+  groups:
+    "180188783":
+      task: disabled
+      search: owner
 ```
 
 Use `user` for every otherwise authorized user, `owner` for owners only, and
 `disabled` to turn a command off. The older boolean form remains accepted:
 `true` preserves the historical default for that command and `false` means
 `disabled`.
+
+`commands.groups` contains per-group overrides; commands not listed for a group
+inherit the global setting. Group owners can change them with
+`/permission set <command> user|owner|disabled` and restore the global setting
+with `/permission clear [command]`.
 
 Owner-only commands:
 
