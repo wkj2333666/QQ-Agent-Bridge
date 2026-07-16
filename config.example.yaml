@@ -168,7 +168,8 @@ agent:
   #   plan: ["your-agent", "--mode", "{mode}", "--model", "{model}", "{prompt}"]
   #   task: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
   #   code: ["your-agent", "--workspace", "{workspace}", "{prompt}"]
-  # If your custom command is not managed by micromamba, set env_runner: "" and require_env: false.
+  # Agent processes must run in the existing micromamba base environment.
+  # Do not disable this guard or create a project-local venv from an Agent task.
   command: {}
   default_workspace: "/opt/qq-agent-bridge/workspace"
   env_runner: "micromamba"

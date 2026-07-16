@@ -48,6 +48,17 @@ def test_runtime_skill_teaches_progress_directives() -> None:
     assert "不要刷屏" in skill
 
 
+def test_runtime_skill_requires_micromamba_base_and_forbids_workspace_envs() -> None:
+    skill = build_runtime_skill("task")
+
+    assert "micromamba run -n base" in skill
+    assert "不得在 workspace、outbox 或其子目录创建、激活" in skill
+    assert "python -m venv" in skill
+    assert "pip install" in skill
+    assert "workspace" in skill
+    assert "环境缺少依赖" in skill
+
+
 def test_runtime_skill_fallback_requires_direct_media_evidence(monkeypatch) -> None:
     monkeypatch.setattr(runtime_skill, "_skill_root", lambda: Path("/missing/skill"))
 
