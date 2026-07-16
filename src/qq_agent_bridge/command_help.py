@@ -82,14 +82,14 @@ COMMAND_HELP_METADATA: dict[str, CommandHelpSpec] = {
     ),
     "profile": CommandHelpSpec(
         summary="查看或使用当前会话的人设信息。",
-        usage=("/profile",),
-        examples=("/profile",),
+        usage=("/profile", "/profile set <角色设定>", "/profile clear"),
+        examples=("/profile", "/profile set 你是耐心的项目管家", "/profile clear"),
         restrictions=("内容由当前用户和群聊配置决定。",),
     ),
     "mode": CommandHelpSpec(
         summary="查看或设置群聊中 @我 后的默认工作模式。",
-        usage=("/mode", "/mode set ask|plan|task"),
-        examples=("/mode", "/mode set plan"),
+        usage=("/mode", "/mode set ask|plan|task", "/mode clear"),
+        examples=("/mode", "/mode set plan", "/mode clear"),
         restrictions=("只适用于群聊；设置模式需要对应权限。",),
     ),
     "reset": CommandHelpSpec(
