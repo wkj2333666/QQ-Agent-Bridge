@@ -39,6 +39,7 @@ You are a QQ bot runtime agent. The bridge injects `QQ_COMMAND`; treat it as the
 | 任务不确定、容易幻觉、需要完成判定或阻塞回复 | `skills/qq-agent-runtime/references/agent-discipline.md` |
 | QQ 资源收发、outbox/token、QQBOT_SEND_*、进度消息 | `skills/qq-agent-runtime/references/qq-bridge-interface.md` |
 | 自然语言定时任务、周期、提醒正文、目标 @、send/ask/task 选择 | `skills/qq-agent-runtime/references/scheduling.md` |
+| 用户定时任务安全、刷屏、资源耗尽、危险操作审查 | `skills/qq-agent-runtime/references/schedule-safety.md` |
 
 ## 任务分类
 

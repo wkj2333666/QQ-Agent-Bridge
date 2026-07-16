@@ -131,6 +131,20 @@ ws://127.0.0.1:8765/onebot
 - `/mode set ask|plan|task`：设置本群默认模式。
 - `/mode clear`：清除本群覆盖，恢复全局默认模式。
 
+每个命令都可以在 `config.yaml` 中单独配置权限级别：
+
+```yaml
+commands:
+  ask: user
+  task: user
+  code: owner
+  shell: disabled
+```
+
+`user` 表示所有已经通过用户/群权限校验的人，`owner` 表示仅 owner，
+`disabled` 表示关闭命令。旧的布尔写法仍兼容：`true` 保留该命令历史上的默认权限，
+`false` 等同于 `disabled`。
+
 owner 专用命令：
 
 - `/code <请求>`：允许修改授权工作区，带确认流程。
@@ -140,6 +154,10 @@ owner 专用命令：
 - `/reload`：热重载 `config.yaml`。
 
 群聊里只有 owner 能修改群 profile 和 `/mode`；其他群成员可以查看。私聊里允许用户可以修改自己的私聊 profile，`/mode` 仅用于群聊。
+
+定时任务方面，群聊只有 owner 可以创建和管理；允许的私聊 user 可以管理自己的任务。
+非 owner 创建定时任务时，时间解析和安全审查合并为一次模型调用；高频刷屏、资源消耗过大、
+递归扩散或危险操作会在写入数据库前被拒绝。owner 创建的任务跳过这层额外安全审查。
 
 无显式命令的 @ 消息仍会先经过闲聊/问答判断：闲聊继续走插话流程；只有判定为需要回答时，才使用本群的 `ask`、`plan` 或 `task` 默认模式。显式 `/ask`、`/task` 等命令不受 `/mode` 影响。修改会写回 `config.yaml`，重启后保留。
 

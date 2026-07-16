@@ -163,6 +163,21 @@ Common commands:
 - `/mode set ask|plan|task`: set this group's default mention mode.
 - `/mode clear`: remove the group override and use the global default.
 
+Command access is configured independently in `config.yaml`:
+
+```yaml
+commands:
+  ask: user
+  task: user
+  code: owner
+  shell: disabled
+```
+
+Use `user` for every otherwise authorized user, `owner` for owners only, and
+`disabled` to turn a command off. The older boolean form remains accepted:
+`true` preserves the historical default for that command and `false` means
+`disabled`.
+
 Owner-only commands:
 
 - `/code <request>`: trusted workspace-editing path, with confirmation flow.
@@ -189,7 +204,11 @@ enabling it. Schedules use durable SQLite storage and resume after a bridge
 restart. Arbitrary recurrence is represented by one RFC 5545 RRULE, so rules
 such as weekdays, every second Tuesday, or the last workday of each month do
 not require hardcoded period types. Scheduler limits can be hot-reloaded;
-changing `scheduler.database_path` requires a bridge restart.
+changing `scheduler.database_path` requires a bridge restart. Non-owner
+schedule creation performs one combined model pass for time interpretation and
+safety review; suspicious high-frequency, resource-heavy, spam-like, recursive,
+or dangerous schedules are rejected before persistence. Owner-created schedules
+skip this extra safety gate.
 
 ## Profiles
 

@@ -163,6 +163,31 @@ def test_help_reply_hides_owner_commands_from_non_owner() -> None:
     assert "/reload" in owner_help
 
 
+def test_help_reply_reflects_explicit_command_access_levels() -> None:
+    cfg = BridgeConfig(
+        owners=["owner"],
+        allowed_users=["reader"],
+        allowed_groups=["group"],
+        commands={
+            "ask": "owner",
+            "plan": "user",
+            "reset": "user",
+            "code": "disabled",
+        },
+    )
+
+    reader_help = build_help_reply(cfg, make_ev(sender="reader"))
+    owner_help = build_help_reply(cfg, make_ev(sender="owner"))
+
+    assert "/ask" not in reader_help
+    assert "/plan" in reader_help
+    assert "/reset" in reader_help
+    assert "/code" not in reader_help
+    assert "/ask" in owner_help
+    assert "/reset" in owner_help
+    assert "/code" not in owner_help
+
+
 def test_help_reply_mentions_proactive_chat_when_enabled() -> None:
     cfg = make_cfg()
     cfg.proactive.enabled = True

@@ -115,13 +115,20 @@ def _command_labels(cfg: BridgeConfig, include_owner: bool, *, is_group: bool) -
     commands = [
         f"/{name} {desc}"
         for name, desc in READABLE_COMMANDS
-        if cfg.is_command_allowed(name) and (name != "mode" or is_group)
+        if _command_visible(cfg, name, include_owner)
+        and (name != "mode" or is_group)
     ]
-    if include_owner:
-        commands.extend(
-            f"/{name} {desc}" for name, desc in OWNER_COMMANDS if cfg.is_command_allowed(name)
-        )
+    commands.extend(
+        f"/{name} {desc}"
+        for name, desc in OWNER_COMMANDS
+        if _command_visible(cfg, name, include_owner)
+    )
     return commands
+
+
+def _command_visible(cfg: BridgeConfig, name: str, include_owner: bool) -> bool:
+    access = cfg.command_access(name)
+    return access == "user" or (access == "owner" and include_owner)
 
 
 def _resource_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:

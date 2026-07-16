@@ -60,6 +60,7 @@ class ScheduleParseError(ValueError):
 class NaturalScheduleOutcome:
     spec: ScheduleSpec | None = None
     clarification: str = ""
+    safety_blocked: bool = False
 
 
 def parse_explicit_schedule(
@@ -226,9 +227,10 @@ class NaturalLanguageScheduleParser:
         *,
         now: datetime | None = None,
         mentions: tuple[str, ...] = (),
+        require_safety_review: bool = False,
     ) -> NaturalScheduleOutcome:
         current = _aware_now(now)
-        prompt = self._prompt(text, current)
+        prompt = self._prompt(text, current, require_safety_review=require_safety_review)
         raw = await self.agent.run(
             prompt,
             self.cfg.agent.default_workspace,
@@ -237,7 +239,13 @@ class NaturalLanguageScheduleParser:
         )
         try:
             data = _extract_json_object(raw)
-            return self._validate_draft(text, data, current, mentions)
+            return self._validate_draft(
+                text,
+                data,
+                current,
+                mentions,
+                require_safety_review=require_safety_review,
+            )
         except (ScheduleParseError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return NaturalScheduleOutcome(
                 clarification=(
@@ -246,7 +254,7 @@ class NaturalLanguageScheduleParser:
                 )
             )
 
-    def _prompt(self, text: str, now: datetime) -> str:
+    def _prompt(self, text: str, now: datetime, *, require_safety_review: bool) -> str:
         zone = _zone(self.cfg.scheduler.timezone)
         local = now.astimezone(zone)
         semantic_skill = build_schedule_interpreter_skill()
@@ -256,6 +264,7 @@ class NaturalLanguageScheduleParser:
 {semantic_skill}
 
 当前本地时间：{local.strftime('%Y-%m-%d %H:%M')} {self.cfg.scheduler.timezone}
+安全审查开启：{"是" if require_safety_review else "否（owner 请求，不需要额外安全拦截）"}
 用户原文：{text}
 
 只输出以下字段，不要 Markdown：
@@ -269,7 +278,8 @@ class NaturalLanguageScheduleParser:
   "payload_phrase": "原文中完整的任务短语",
   "dtstart_local": "YYYY-MM-DDTHH:MM 或 null",
   "rrule": "FREQ=... 或 null",
-  "clarification": "存在歧义时给用户的一句简短追问"
+  "clarification": "存在歧义时给用户的一句简短追问",
+  "safety": {{"safe": true, "risk_level": "low|medium|high", "reason": "安全判断依据"}}
 }}
 
 规则：
@@ -282,6 +292,7 @@ class NaturalLanguageScheduleParser:
 - time_phrase 和 payload_phrase 必须逐字取自用户原文，禁止杜撰。
 - payload 和 send_text 都必须逐字取自用户原文；只做语义分段，不要改写、扩写或补充用户没说的要求。
 - 缺少具体时间、上午下午无法可靠判断或存在冲突时 ambiguous=true，不要猜。
+- safety 必须始终是对象；安全审查开启时，只有明确安全才可 safe=true，无法判断或有高风险时必须 safe=false。
 - 不得输出 code、shell、目标群号、目标用户、文件路径或权限字段。
 """
 
@@ -291,6 +302,8 @@ class NaturalLanguageScheduleParser:
         data: dict[str, Any],
         now: datetime,
         mentions: tuple[str, ...],
+        *,
+        require_safety_review: bool,
     ) -> NaturalScheduleOutcome:
         if bool(data.get("ambiguous")):
             clarification = " ".join(
@@ -300,6 +313,21 @@ class NaturalLanguageScheduleParser:
                 ).split()
             )
             return NaturalScheduleOutcome(clarification=clarification[:240])
+        if require_safety_review:
+            safety = data.get("safety")
+            if not isinstance(safety, dict):
+                return NaturalScheduleOutcome(
+                    clarification="安全审查没有返回可靠结论",
+                    safety_blocked=True,
+                )
+            safe = safety.get("safe") is True
+            risk_level = str(safety.get("risk_level") or "").strip().lower()
+            reason = " ".join(str(safety.get("reason") or "无法确认这个任务安全").split())
+            if not safe or risk_level not in {"low", "medium"}:
+                return NaturalScheduleOutcome(
+                    clarification=f"安全审查未通过：{reason[:180]}",
+                    safety_blocked=True,
+                )
         time_phrase = str(data.get("time_phrase") or "").strip()
         payload_phrase = str(data.get("payload_phrase") or "").strip()
         if not time_phrase or time_phrase not in original:

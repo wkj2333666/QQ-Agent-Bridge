@@ -13,21 +13,22 @@ workspaces:
   "/opt/qq-agent-bridge/workspace": true
 
 commands:
-  ask: true      # read / explain / propose
-  plan: true     # read-only planning, no file edits
-  search: true   # read-only literal search in configured workspace
-  task: true     # general agent task entry, no existing workspace file edits
-  code: false    # allow edits? set true after testing
-  status: true
-  help: true
-  schedule: true # persistent scheduled tasks; group mutations are owner-only
-  profile: true  # view/set current group or private profile; group edits are owner-only
-  mode: true     # view implicit @ mode; only owners may change a group's mode
-  reset: true    # owner-only; clears current conversation memory
-  stop: true     # owner-only
-  approve: true  # owner-only
-  reload: true   # owner-only; reloads config.yaml without reconnecting OneBot
-  shell: false   # disabled; never enable lightly
+  # Each value is: user (all authorized users), owner (owners only), or disabled.
+  ask: user      # read / explain / propose
+  plan: user     # read-only planning, no file edits
+  search: user   # read-only literal search in configured workspace
+  task: user     # general agent task entry, no existing workspace file edits
+  code: owner    # owner-only workspace edits, still subject to confirmation
+  status: user
+  help: user
+  schedule: user # schedule viewing; group mutations remain owner-only
+  profile: user  # viewing; group edits remain owner-only
+  mode: user     # viewing; only owners may change a group's mode
+  reset: owner   # clears current conversation memory
+  stop: owner
+  approve: owner
+  reload: owner   # reloads config.yaml without reconnecting OneBot
+  shell: disabled # dangerous shell entry; keep disabled unless deliberately enabled
 
 dangerous_requires_confirm: true
 max_runtime_seconds: 1800
@@ -91,6 +92,8 @@ scheduler:
   enabled: false                 # set true after checking timezone and permissions
   database_path: "data/schedules.sqlite3" # changing this at runtime requires a bridge restart
   timezone: "Asia/Shanghai"
+  # Non-owner schedule requests get one combined parse + safety review.
+  # Owner requests skip this extra safety gate.
   natural_language_enabled: true
   natural_language_model: "auto" # model interprets time; bridge validates the RRULE
   natural_language_timeout_seconds: 60
