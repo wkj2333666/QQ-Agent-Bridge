@@ -1348,7 +1348,11 @@ class App:
                 self.cfg.mention_modes.groups.pop(group_id, None)
             logger.exception("mention mode persistence failed")
             return "[error] mode 写入失败"
-        return f"已将本群无命令 @ 的默认模式设为 {mode}。闲聊判定仍然有效。"
+        if mode == "chat":
+            detail = "@我时会先经过闲聊判定。"
+        else:
+            detail = f"@我时会直接进入 {mode}，不再经过闲聊判定。"
+        return f"已将本群无命令 @ 的默认模式设为 {mode}。{detail}"
 
     def _clear_group_mode(self, group_id: str) -> str:
         had_previous = group_id in self.cfg.mention_modes.groups

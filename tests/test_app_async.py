@@ -1412,7 +1412,7 @@ def test_group_mode_show_reports_effective_default() -> None:
             (
                 "group",
                 True,
-                "本群无命令 @ 的默认模式：ask（全局默认）。显式命令不受影响。",
+                "本群无命令 @ 的默认模式：chat（全局默认）。显式命令不受影响。",
                 "mode-show",
             )
         ]
@@ -1456,7 +1456,7 @@ def test_group_owner_can_set_mode_and_persist_without_rewriting_other_config(
             (
                 "group",
                 True,
-                "已将本群无命令 @ 的默认模式设为 task。闲聊判定仍然有效。",
+                "已将本群无命令 @ 的默认模式设为 task。@我时会直接进入 task，不再经过闲聊判定。",
                 "mode-group-set",
             )
         ]
@@ -1479,7 +1479,7 @@ def test_group_owner_can_set_chat_mode() -> None:
             (
                 "group",
                 True,
-                "已将本群无命令 @ 的默认模式设为 chat。闲聊判定仍然有效。",
+                "已将本群无命令 @ 的默认模式设为 chat。@我时会先经过闲聊判定。",
                 "mode-chat-set",
             )
         ]
