@@ -57,6 +57,25 @@ def test_runtime_skill_requires_micromamba_base_and_forbids_workspace_envs() -> 
     assert "pip install" in skill
     assert "workspace" in skill
     assert "环境缺少依赖" in skill
+    assert "所有 Python 探测" in skill
+    assert "micromamba run -n base python" in skill
+    assert "不要用裸 `python3`" in skill
+
+
+def test_runtime_skill_exposes_environment_tool_playbook() -> None:
+    skill = build_runtime_skill("task")
+
+    assert "references/environment-tools.md" in skill
+    assert "PDF/Office/媒体工具探测与验证" in skill
+
+
+def test_runtime_skill_fallback_preserves_environment_boundary(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_skill, "_skill_root", lambda: Path("/missing/skill"))
+
+    skill = build_runtime_skill("task")
+
+    assert "micromamba run -n base python" in skill
+    assert "不要用裸 `python3`" in skill
 
 
 def test_runtime_skill_fallback_requires_direct_media_evidence(monkeypatch) -> None:
@@ -116,6 +135,7 @@ def test_runtime_skill_is_structured_index_not_monolith() -> None:
     assert "skills/qq-agent-runtime/references/qq-bridge-interface.md" in skill
     assert "skills/qq-agent-runtime/references/scheduling.md" in skill
     assert "skills/qq-agent-runtime/references/schedule-safety.md" in skill
+    assert "skills/qq-agent-runtime/references/environment-tools.md" in skill
     assert "大型能力细节放在 references" in skill
     for media_detail in ("b23.tv", "解析短链", "媒体补证"):
         assert media_detail not in skill
@@ -152,6 +172,12 @@ def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
         "web-search.md": ("联网搜索", "来源 URL", "无法联网"),
         "weather.md": ("天气", "地点", "时效"),
         "office-documents.md": ("Excel", "Word", "PDF"),
+        "environment-tools.md": (
+            "micromamba run -n base",
+            "PyMuPDF",
+            "Chromium",
+            "不要安装",
+        ),
         "visual-media.md": ("图片生成", "识图", "视频理解"),
         "audio-voice-music.md": (
             "语音识别",

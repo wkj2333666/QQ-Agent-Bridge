@@ -11,7 +11,9 @@
 ## Write
 
 - `/task` 只能在 outbox 新建交付物；`/code` 才能改已有项目文件。
-- Excel 优先 `.xlsx`；缺依赖才降级 `.csv` 并说明。
+- 先读取 `environment-tools.md`，所有 Python 库探测和脚本都使用 `micromamba run -n base python`，不要用裸 `python3` 或安装依赖。
+- PDF 优先使用已验证的 PyMuPDF（`fitz`）生成/读取/校验；HTML/CSS PDF 优先使用已存在的 Chromium。两条路径都必须先探测并在生成后用 PyMuPDF 校验，不能仅凭“命令执行过”声称完成。
+- Excel 优先 `.xlsx`；先探测 `openpyxl`/`pandas`，缺依赖才降级 `.csv` 并说明。
 - Word/PPT/PDF/CSV/Excel 都通过 `QQBOT_SEND_FILE` 发送。
 - 发送前确认文件存在、非空、路径在 outbox。
 
