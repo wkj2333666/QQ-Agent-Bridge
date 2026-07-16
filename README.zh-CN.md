@@ -73,6 +73,24 @@ python -m src.qq_agent_bridge.main --echo-only
 python -m src.qq_agent_bridge.main
 ```
 
+## Agent 执行日志
+
+如果需要排查 Agent 为什么慢、超时、重复调用工具或没有产出，可以在本地
+`config.yaml` 的 `agent` 段开启 trace：
+
+```yaml
+agent:
+  trace_enabled: true
+  trace_root: "runtime/agent-traces"
+  trace_max_bytes: 5242880
+  trace_max_line_chars: 2000
+```
+
+每次 Agent 调用会写一个受限的 JSONL 文件，包含生命周期、工具摘要、标准错误、
+超时和退出状态。日志默认关闭，不记录原始 prompt，也不会通过 QQ 发送；文件目录
+为 `0700`、文件为 `0600`，并会对敏感字段和长度做脱敏/截断。排查结束后请按需清理
+`runtime/agent-traces/` 中的本地日志。
+
 ## OneBot 网关
 
 仓库里带了一个 NapCatQQ 的 compose 模板，位于 `runtime/napcat/`。它只是部署辅助；NapCatQQ 本身是独立项目。

@@ -12,7 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .attachment_cache import AttachmentCache
-from .agent_runtime import build_agent_adapter
+from .agent_runtime import build_agent_adapter, run_agent
 from .config import MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .memory import ConversationMemory, GroupAmbientMemory
 from .mention_mode_store import write_mention_modes_to_config
@@ -1267,8 +1267,15 @@ class App:
         agent_mode = "code" if cmd == "code" else "plan" if cmd == "plan" else "task" if cmd == "task" else "ask"
         model = self._agent_model_for(cmd)
         progress = self._progress_callback_for(job) if cmd in {"task", "code"} else None
-        kwargs = {"progress": progress} if progress else {}
-        return await self.agent.run(prompt, ws, agent_mode, model=model, **kwargs)
+        return await run_agent(
+            self.agent,
+            prompt,
+            ws,
+            agent_mode,
+            model=model,
+            progress=progress,
+            trace_id=job.id,
+        )
 
     def _schedule_prompt_context(self, job: Job) -> str:
         if job.source != "schedule" or job.scheduled_for is None:

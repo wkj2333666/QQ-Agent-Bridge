@@ -83,6 +83,10 @@ def test_agent_config_has_fast_chat_and_task_models() -> None:
     assert cfg.agent.bwrap_binary == "bwrap"
     assert cfg.agent.force_task_tools
     assert cfg.agent.sandbox_home == "/tmp/qq-agent-bridge/agent-home"
+    assert not cfg.agent.trace_enabled
+    assert cfg.agent.trace_root == "runtime/agent-traces"
+    assert cfg.agent.trace_max_bytes == 5242880
+    assert cfg.agent.trace_max_line_chars == 2000
     assert cfg.bot.reply_chunk_delay_seconds == 0.2
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import BridgeConfig
+from .agent_trace import AgentTrace
 from .progress_directives import ProgressLineBuffer, strip_progress_directives
 from .redactor import redact, strip_ansi
 
@@ -352,6 +353,7 @@ class CursorAdapter:
         mode: str = "ask",
         model: str | None = None,
         progress: ProgressCallback | None = None,
+        trace_id: str | None = None,
     ) -> str:
         ws = workspace or self.cfg.agent.default_workspace
         if not self.cfg.is_workspace_allowed(ws):
@@ -370,11 +372,14 @@ class CursorAdapter:
         env = {k: os.environ.get(k, "") for k in self.cfg.agent.env_allowlist if k in os.environ}
         env["PATH"] = os.environ.get("PATH", "")
 
-        cmd = self._build_cmd(prompt, ws, mode, model, stream=progress is not None)
-
-        logger.info("agent invoke: %s ...", " ".join(cmd[:4]))
+        trace = AgentTrace(self.cfg, trace_id, mode, model, ws)
+        if trace.path is not None:
+            logger.info("agent trace: %s", trace.path)
         proc: asyncio.subprocess.Process | None = None
         try:
+            cmd = self._build_cmd(prompt, ws, mode, model, stream=progress is not None)
+
+            logger.info("agent invoke: %s ...", " ".join(cmd[:4]))
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=ws,
@@ -383,9 +388,10 @@ class CursorAdapter:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
+            trace.record("lifecycle", "spawn")
             if progress:
                 out, err = await asyncio.wait_for(
-                    self._communicate_streaming(proc, progress),
+                    self._communicate_streaming(proc, progress, trace=trace),
                     timeout=self.cfg.agent.max_runtime_seconds,
                 )
             else:
@@ -394,6 +400,8 @@ class CursorAdapter:
                 )
                 out = (stdout or b"").decode("utf-8", "replace")
                 err = (stderr or b"").decode("utf-8", "replace")
+                trace.record_stdout_text(out)
+                trace.record_stderr_text(err)
             combined = (out + "\n" + err).strip()
             cleaned = strip_ansi(combined)
             cleaned, extra_progress = strip_progress_directives(cleaned)
@@ -412,21 +420,33 @@ class CursorAdapter:
                 return "[error] 助手执行失败"
             return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"
         except asyncio.TimeoutError:
+            trace.record("lifecycle", "timeout")
             await self._kill_process_group(proc)
             return "[error] 助手响应超时"
         except asyncio.CancelledError:
+            trace.record("lifecycle", "cancelled")
             await self._kill_process_group(proc)
             raise
         except FileNotFoundError:
+            trace.record("lifecycle", "error", summary="process-not-found")
             return "[error] 助手暂时不可用"
         except Exception as e:  # noqa: BLE001
+            trace.record("lifecycle", "error", summary=type(e).__name__)
             logger.exception("agent run error")
             return f"[error] 助手执行失败：{type(e).__name__}"
+        finally:
+            trace.record(
+                "lifecycle",
+                "exit",
+                returncode=proc.returncode if proc is not None else None,
+            )
+            trace.close()
 
     async def _communicate_streaming(
         self,
         proc: asyncio.subprocess.Process,
         progress: ProgressCallback,
+        trace: AgentTrace | None = None,
     ) -> tuple[str, str]:
         assert proc.stdout is not None
         stderr_task = asyncio.create_task(
@@ -460,6 +480,8 @@ class CursorAdapter:
             pending_assistant_message = None
 
         async for line in self._stream_lines(proc.stdout):
+            if trace:
+                trace.record_stdout_line(line)
             kind, text = self._stream_event_from_line(line)
             if kind == "progress":
                 await flush_pending_assistant_message()
@@ -489,6 +511,8 @@ class CursorAdapter:
             await send_progress(item)
         await proc.wait()
         stderr = await stderr_task
+        if trace:
+            trace.record_stderr_text((stderr or b"").decode("utf-8", "replace"))
         delta_output = retain_outgoing_directives("\n".join(output_parts).strip())
         final_parts: list[str] = []
         if pending_assistant_message:

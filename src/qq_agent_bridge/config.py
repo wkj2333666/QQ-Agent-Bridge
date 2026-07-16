@@ -44,6 +44,10 @@ class AgentConfig:
     max_concurrent_jobs: int = 2
     max_runtime_seconds: int = 300
     max_output_chars: int = 4000
+    trace_enabled: bool = False
+    trace_root: str = "runtime/agent-traces"
+    trace_max_bytes: int = 5 * 1024 * 1024
+    trace_max_line_chars: int = 2000
 
 
 @dataclass

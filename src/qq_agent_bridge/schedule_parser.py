@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import json
 import re
+import secrets
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .agent_runtime import run_agent
 from .config import BridgeConfig, SchedulerConfig
 from .redactor import strip_ansi
 from .runtime_skill import build_schedule_interpreter_skill
@@ -231,11 +233,13 @@ class NaturalLanguageScheduleParser:
     ) -> NaturalScheduleOutcome:
         current = _aware_now(now)
         prompt = self._prompt(text, current, require_safety_review=require_safety_review)
-        raw = await self.agent.run(
+        raw = await run_agent(
+            self.agent,
             prompt,
             self.cfg.agent.default_workspace,
             "ask",
             model=self.cfg.scheduler.natural_language_model or self.cfg.agent.chat_model or None,
+            trace_id=f"schedule-parse-{secrets.token_hex(4)}",
         )
         try:
             data = _extract_json_object(raw)

@@ -90,6 +90,24 @@ echo mode. After the OneBot gateway is connected and echo works, run:
 python -m src.qq_agent_bridge.main
 ```
 
+## Agent Trace Logs
+
+To diagnose slow, timed-out, or tool-heavy Agent runs, enable bounded local traces in
+`config.yaml`:
+
+```yaml
+agent:
+  trace_enabled: true
+  trace_root: "runtime/agent-traces"
+  trace_max_bytes: 5242880
+  trace_max_line_chars: 2000
+```
+
+Each invocation writes a private JSONL file with lifecycle, tool summaries, stderr,
+timeout, and exit events. Tracing is disabled by default, omits the original prompt,
+redacts secrets, and never sends logs to QQ. The directory uses `0700` and files use
+`0600`; remove local traces when they are no longer needed.
+
 ## Optional Local Speech Recognition
 
 The bridge can transcribe QQ voice resources with a local `whisper.cpp` binary.

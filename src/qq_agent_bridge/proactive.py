@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .agent_runtime import run_agent
 from .config import BridgeConfig
 from .output_guard import guard_internal_output
 from .redactor import redact, strip_ansi
@@ -143,11 +144,13 @@ class ProactiveSpeaker:
         prompt = self._build_mention_prompt(ev)
         self._debug("mention_decide", chat_id=ev.chat_id, mid=ev.id, model=self.cfg.proactive.model)
         try:
-            raw = await self.agent.run(
+            raw = await run_agent(
+                self.agent,
                 prompt,
                 self.cfg.agent.default_workspace,
                 "ask",
                 model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
+                trace_id=f"proactive-mention-{ev.id}",
             )
         except Exception:  # noqa: BLE001 - mentioned casual routing should fail silent
             logger.exception("mention decision run failed")
@@ -255,11 +258,13 @@ class ProactiveSpeaker:
         prompt = self._build_prompt(batch)
         self._debug("decide", chat_id=chat_id, messages=len(batch), model=self.cfg.proactive.model)
         try:
-            raw = await self.agent.run(
+            raw = await run_agent(
+                self.agent,
                 prompt,
                 self.cfg.agent.default_workspace,
                 "ask",
                 model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
+                trace_id=f"proactive-{batch[-1].id}",
             )
         except Exception:  # noqa: BLE001 - proactive chat should fail silent
             logger.exception("proactive agent run failed")
