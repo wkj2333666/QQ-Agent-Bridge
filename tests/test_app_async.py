@@ -221,6 +221,7 @@ def test_bare_group_mention_casual_text_uses_chat_decision_without_ask_job() -> 
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -252,6 +253,7 @@ def test_bare_group_mention_can_be_promoted_to_ask_by_chat_decision() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
+        cfg.mention_modes.default = "chat"
         calls: list[str] = []
 
         app = App(cfg)
@@ -282,7 +284,7 @@ def test_bare_group_mention_can_be_promoted_to_ask_by_chat_decision() -> None:
     asyncio.run(go())
 
 
-def test_group_mention_mode_task_promotes_answer_decision_to_task() -> None:
+def test_group_mention_mode_task_executes_without_chat_decision() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
@@ -301,8 +303,6 @@ def test_group_mention_mode_task_promotes_answer_decision_to_task() -> None:
             progress: Any = None,
         ) -> str:
             calls.append((mode, model, prompt))
-            if "无命令 @bot 消息" in prompt:
-                return '{"action": "ask"}'
             return "TASK_MODE_DONE"
 
         app.cursor.run = fake_cursor  # type: ignore[method-assign]
@@ -311,6 +311,7 @@ def test_group_mention_mode_task_promotes_answer_decision_to_task() -> None:
         await wait_until_sent(adapter, "TASK_MODE_DONE")
 
         task_calls = [call for call in calls if call[0] == "task"]
+        assert len(calls) == 1
         assert len(task_calls) == 1
         assert task_calls[0][1] == "composer"
         assert any(item[2] == "收到，我处理一下。" for item in adapter.sent)
@@ -318,11 +319,11 @@ def test_group_mention_mode_task_promotes_answer_decision_to_task() -> None:
     asyncio.run(go())
 
 
-def test_group_mention_mode_task_keeps_casual_chat_in_interjection_flow() -> None:
+def test_group_mention_mode_chat_keeps_casual_chat_in_interjection_flow() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
-        cfg.mention_modes.groups["group"] = "task"
+        cfg.mention_modes.groups["group"] = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -477,6 +478,7 @@ def test_bare_group_mention_ask_promotion_ignores_interjection_cooldown() -> Non
         adapter = FakeAdapter()
         cfg = make_cfg()
         cfg.proactive.quiet_after_bot_seconds = 60
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -507,6 +509,7 @@ def test_bare_group_mention_chat_respects_recent_bot_quiet_window() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
         cfg.proactive.quiet_after_bot_seconds = 60
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -534,6 +537,7 @@ def test_bare_group_mention_chat_consumes_interjection_rate_limit() -> None:
         cfg.proactive.quiet_after_bot_seconds = 0
         cfg.proactive.cooldown_seconds = 0
         cfg.proactive.max_per_hour = 1
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -560,6 +564,7 @@ def test_bare_group_mention_chat_respects_interjection_cooldown() -> None:
         cfg.proactive.quiet_after_bot_seconds = 0
         cfg.proactive.cooldown_seconds = 60
         cfg.proactive.max_per_hour = 10
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -583,6 +588,7 @@ def test_bare_group_mention_chat_sends_multiple_messages_and_filters_at() -> Non
         adapter = FakeAdapter()
         cfg = make_cfg()
         cfg.proactive.reply_message_delay_seconds = 0
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -617,6 +623,7 @@ def test_bare_group_mention_chat_rejects_prompt_internal_echo() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -747,6 +754,7 @@ def test_direct_mention_chat_reply_quotes_current_message() -> None:
         cfg = make_cfg()
         cfg.proactive.cooldown_seconds = 0
         cfg.proactive.quiet_after_bot_seconds = 0
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -780,6 +788,7 @@ def test_direct_mention_chat_reply_quotes_only_first_message() -> None:
         cfg.proactive.cooldown_seconds = 0
         cfg.proactive.quiet_after_bot_seconds = 0
         cfg.proactive.reply_message_delay_seconds = 0
+        cfg.mention_modes.default = "chat"
 
         app = App(cfg)
         app.adapter = adapter  # type: ignore[assignment]
@@ -923,6 +932,7 @@ def test_recent_normal_group_reply_suppresses_proactive_reply() -> None:
         cfg.proactive.min_messages = 3
         cfg.proactive.cooldown_seconds = 0
         cfg.proactive.quiet_after_bot_seconds = 60
+        cfg.mention_modes.default = "chat"
         calls: list[str] = []
 
         app = App(cfg)
@@ -1454,6 +1464,29 @@ def test_group_owner_can_set_mode_and_persist_without_rewriting_other_config(
     asyncio.run(go())
 
 
+def test_group_owner_can_set_chat_mode() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        app = make_app(cfg, lambda *_args: "unused", adapter)
+
+        await app._handle(
+            make_ev("/mode set chat", sender="owner", group="group", mid="mode-chat-set")
+        )
+
+        assert cfg.mention_mode_for_group("group") == "chat"
+        assert adapter.sent == [
+            (
+                "group",
+                True,
+                "已将本群无命令 @ 的默认模式设为 chat。闲聊判定仍然有效。",
+                "mode-chat-set",
+            )
+        ]
+
+    asyncio.run(go())
+
+
 def test_group_non_owner_can_view_but_cannot_change_mode(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -1537,7 +1570,7 @@ def test_group_mode_rejects_unsafe_or_disabled_targets() -> None:
         )
 
         assert adapter.sent == [
-            ("group", True, "可选模式：ask、plan、task。", "mode-unsafe"),
+            ("group", True, "可选模式：chat、ask、plan、task。", "mode-unsafe"),
             ("group", True, "设置失败：/task 当前未启用。", "mode-disabled"),
         ]
 
@@ -1991,6 +2024,7 @@ def test_implicit_ask_web_task_stays_ask_with_task_guidance_in_prompt() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
+        cfg.mention_modes.default = "chat"
         calls: list[tuple[str, str | None, str]] = []
 
         async def fake_cursor(
@@ -2175,6 +2209,7 @@ def test_unmentioned_group_text_is_used_as_ambient_context_for_ask() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
         cfg.proactive.enabled = False
+        cfg.mention_modes.default = "chat"
         prompts: list[str] = []
 
         async def fake_cursor(
@@ -2212,6 +2247,7 @@ def test_unmentioned_command_like_text_is_not_ambient_context() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
         cfg.proactive.enabled = False
+        cfg.mention_modes.default = "chat"
         prompts: list[str] = []
 
         async def fake_cursor(
@@ -2844,7 +2880,7 @@ def test_cached_group_attachment_is_consumed_after_use() -> None:
         await wait_until_sent(adapter, "reply 2")
 
         assert "downloads/cached.jpg" in prompts[0]
-        assert "downloads/cached.jpg" not in prompts[2]
+        assert "downloads/cached.jpg" not in prompts[1]
 
     asyncio.run(go())
 

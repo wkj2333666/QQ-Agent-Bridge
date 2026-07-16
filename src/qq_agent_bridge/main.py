@@ -140,26 +140,40 @@ class App:
             parsed = self._parse_permission_command(ev.text)
         has_content = bool(ev.text.strip() or ev.resources)
         group_default_command = self.cfg.mention_mode_for_group(ev.chat_id) if ev.is_group else None
+        mention_command = (
+            "ask" if group_default_command == "chat" else group_default_command
+        )
         default_command = "ask" if has_content and not ev.is_group else None
         preauthorized_command: str | None = None
         if not parsed and ev.is_group and ev.mentioned_bot and has_content:
             if ev.resources:
-                default_command = group_default_command
+                default_command = mention_command
             else:
                 assert group_default_command is not None
-                ok, reason = self.policy.allow(ev, group_default_command)
+                assert mention_command is not None
+                ok, reason = self.policy.allow(ev, mention_command)
                 if not ok:
                     if reason not in {"duplicate", "no-mention"}:
                         await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                     return
-                decision = await self.proactive.decide_mention(ev)
-                if decision.action == "ask":
+                if group_default_command == "chat":
+                    decision = await self.proactive.decide_mention(ev)
+                else:
+                    decision = None
+                if decision is None:
                     parsed = self.policy.parse(
-                        ev.text, default_command=group_default_command
+                        ev.text, default_command=mention_command
                     ) or self.policy.parse(
-                        "", default_command=group_default_command
+                        "", default_command=mention_command
                     )
-                    preauthorized_command = group_default_command
+                    preauthorized_command = mention_command
+                elif decision.action == "ask":
+                    parsed = self.policy.parse(
+                        ev.text, default_command=mention_command
+                    ) or self.policy.parse(
+                        "", default_command=mention_command
+                    )
+                    preauthorized_command = mention_command
                 elif decision.action == "chat":
                     if self.proactive.can_send_chat_interjection(ev.chat_id):
                         await self._send_mention_decision(ev, decision)
@@ -1140,13 +1154,14 @@ class App:
         if action == "show":
             return self._mode_view_reply(ev.chat_id)
         if action == "invalid":
-            return "用法：/mode、/mode set ask|plan|task、/mode clear。"
+            return "用法：/mode、/mode set chat|ask|plan|task、/mode clear。"
         if not self.cfg.is_owner(ev.sender_id):
             return "[denied] owner-only"
         if action == "set":
             if mode not in MENTION_MODES:
                 return f"可选模式：{'、'.join(MENTION_MODE_OPTIONS)}。"
-            if not self.cfg.is_command_allowed(mode, ev.chat_id):
+            permission_command = "ask" if mode == "chat" else mode
+            if not self.cfg.is_command_allowed(permission_command, ev.chat_id):
                 return f"设置失败：/{mode} 当前未启用。"
             return self._set_group_mode(ev.chat_id, mode)
         return self._clear_group_mode(ev.chat_id)

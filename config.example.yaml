@@ -145,9 +145,9 @@ profiles:
     #   你是私聊里的学习搭子。优先解释思路，语气耐心，不替用户做未授权的决定。
 
 mention_modes:
-  default: ask  # safe choices: ask, plan, task
+  default: ask  # safe choices: chat, ask, plan, task
   groups:
-    # "123456": task  # per-group override for commandless @ messages classified as questions
+    # "123456": task  # direct task execution; chat keeps the interjection decision
 
 # OneBot
 onebot:

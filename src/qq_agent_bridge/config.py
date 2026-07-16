@@ -9,7 +9,7 @@ from typing import Any, Literal
 import yaml
 
 
-MENTION_MODE_OPTIONS: tuple[str, ...] = ("ask", "plan", "task")
+MENTION_MODE_OPTIONS: tuple[str, ...] = ("chat", "ask", "plan", "task")
 MENTION_MODES = frozenset(MENTION_MODE_OPTIONS)
 CommandAccess = Literal["disabled", "user", "owner"]
 COMMAND_ACCESS_LEVELS = frozenset({"disabled", "user", "owner"})

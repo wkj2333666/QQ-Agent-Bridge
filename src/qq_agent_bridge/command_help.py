@@ -88,9 +88,9 @@ COMMAND_HELP_METADATA: dict[str, CommandHelpSpec] = {
     ),
     "mode": CommandHelpSpec(
         summary="查看或设置群聊中 @我 后的默认工作模式。",
-        usage=("/mode", "/mode set ask|plan|task", "/mode clear"),
-        examples=("/mode", "/mode set plan", "/mode clear"),
-        restrictions=("只适用于群聊；设置模式需要对应权限。",),
+        usage=("/mode", "/mode set chat|ask|plan|task", "/mode clear"),
+        examples=("/mode", "/mode set chat", "/mode set task", "/mode clear"),
+        restrictions=("只适用于群聊；chat 会先走闲聊判定，其余模式直接执行对应命令。",),
     ),
     "reset": CommandHelpSpec(
         summary="清空当前会话记忆和可用的群聊背景。",
