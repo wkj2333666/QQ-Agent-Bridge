@@ -26,6 +26,7 @@ COMMANDS: set[str] = {
     "approve",
     "shell",
     "help",
+    "permission",
     "profile",
     "mode",
     "reset",
@@ -130,7 +131,12 @@ class Policy:
                 return False, "no-mention"
         elif not self.cfg.is_user_allowed(ev.sender_id):
             return False, "user-denied"
-        access = self.cfg.command_access(cmd)
+        group_id = ev.chat_id if ev.is_group else None
+        access = (
+            self.cfg.command_access(cmd, group_id)
+            if group_id is not None
+            else self.cfg.command_access(cmd)
+        )
         if access == "disabled":
             return False, "cmd-disabled"
         if access == "owner" and not self.cfg.is_owner(ev.sender_id):
