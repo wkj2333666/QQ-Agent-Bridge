@@ -193,9 +193,10 @@ def test_owner_creates_structured_schedule_and_list_shows_it(tmp_path: Path) -> 
     asyncio.run(go())
 
 
-def test_group_non_owner_cannot_create_schedule(tmp_path: Path) -> None:
+def test_group_non_owner_cannot_create_owner_only_schedule(tmp_path: Path) -> None:
     async def go() -> None:
         app, adapter = make_app(tmp_path)
+        app.cfg.commands["schedule"] = "owner"
 
         await app._handle(
             make_event(
@@ -207,6 +208,49 @@ def test_group_non_owner_cannot_create_schedule(tmp_path: Path) -> None:
 
         assert adapter.sent[-1][2] == "[denied] owner-only"
         assert app.schedule_store.list_for_chat("group", True) == []
+
+    asyncio.run(go())
+
+
+def test_group_non_owner_can_create_schedule_when_group_permission_is_user(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        agent = FakeAgent(
+            [
+                """{
+                  "ambiguous": false,
+                  "kind": "rrule",
+                  "action": "send",
+                  "payload": "查询济宁市天气：如果有雨，就在群里提醒；如果没雨就不需要发消息",
+                  "send_text": "查询济宁市天气：如果有雨，就在群里提醒；如果没雨就不需要发消息",
+                  "time_phrase": "每天早上7点",
+                  "payload_phrase": "查询济宁市天气：如果有雨，就在群里提醒；如果没雨就不需要发消息",
+                  "dtstart_local": "2099-01-01T07:00",
+                  "rrule": "FREQ=DAILY",
+                  "clarification": "",
+                  "safety": {"safe": true, "risk_level": "low", "reason": "每日天气提醒频率低"}
+                }"""
+            ]
+        )
+        app, adapter = make_app(tmp_path, agent)
+        app.cfg.commands["schedule"] = "owner"
+        app.cfg.command_groups["group"] = {"schedule": "user"}
+
+        await app._handle(
+            make_event(
+                "/schedule 每天早上7点查询济宁市天气：如果有雨，就在群里提醒；如果没雨就不需要发消息",
+                sender="reader",
+                mid="group-user-schedule",
+            )
+        )
+        await drain_app(app)
+
+        assert any("正在理解你说的时间和任务内容" in item[2] for item in adapter.sent)
+        assert "已经设置好了" in adapter.sent[-1][2]
+        schedules = app.schedule_store.list_for_chat("group", True)
+        assert len(schedules) == 1
+        assert schedules[0].creator_id == "reader"
 
     asyncio.run(go())
 
@@ -510,6 +554,7 @@ def test_scheduled_task_rechecks_permissions_at_execution_time(tmp_path: Path) -
 def test_group_schedule_stops_when_creator_is_no_longer_owner(tmp_path: Path) -> None:
     async def go() -> None:
         app, adapter = make_app(tmp_path)
+        app.cfg.commands["schedule"] = "owner"
         now = int(datetime.now(tz=UTC).timestamp())
         await app._handle(
             make_event("/schedule in 1s -- send 不应该发送", mid="owner-create")
@@ -523,5 +568,31 @@ def test_group_schedule_stops_when_creator_is_no_longer_owner(tmp_path: Path) ->
         assert saved.failure_count == 1
         assert not any(item[2] == "不应该发送" for item in adapter.sent)
         assert any("owner-only" in item[2] for item in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_group_schedule_created_under_user_permission_runs_for_non_owner(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.commands["schedule"] = "owner"
+        app.cfg.command_groups["group"] = {"schedule": "user"}
+        now = int(datetime.now(tz=UTC).timestamp())
+        await app._handle(
+            make_event(
+                "/schedule in 1s -- send 非 owner 定时提醒",
+                sender="reader",
+                mid="reader-create",
+            )
+        )
+
+        await app.scheduler.tick(now=now + 2)
+        await app.scheduler.wait_for_runs()
+
+        saved = app.schedule_store.list_for_chat("group", True, active_only=False)[0]
+        assert saved.failure_count == 0
+        assert any(item[2] == "非 owner 定时提醒" for item in adapter.sent)
 
     asyncio.run(go())

@@ -658,8 +658,9 @@ class App:
             text = self._schedule_detail_text(schedule, ev) if schedule else "没有找到这个定时任务。"
             await self._send_text(ev.chat_id, ev.is_group, text, ev.id)
             return
-        if not self._can_mutate_schedules(ev):
-            reason = "owner-only" if ev.is_group else "private-schedule-disabled"
+        denied = self._schedule_mutation_denial(ev)
+        if denied:
+            reason = denied
             await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
             return
         if action in {"pause", "resume", "cancel", "run"}:
@@ -671,7 +672,7 @@ class App:
         except ScheduleParseError as exc:
             await self._send_text(ev.chat_id, ev.is_group, f"设置失败：{exc}", ev.id)
             return
-        if spec is not None and self.cfg.is_owner(ev.sender_id):
+        if spec is not None:
             try:
                 schedule = self.scheduler.create(spec, ev)
             except ValueError as exc:
@@ -758,10 +759,22 @@ class App:
                 text = "已加入执行队列。" if run else "这个定时任务当前不能立即执行。"
         await self._send_text(ev.chat_id, ev.is_group, text, ev.id)
 
-    def _can_mutate_schedules(self, ev: ChatEvent) -> bool:
+    def _schedule_mutation_denial(self, ev: ChatEvent) -> str | None:
         if ev.is_group:
-            return self.cfg.is_owner(ev.sender_id)
-        return self.cfg.scheduler.allow_private_users and self.cfg.is_user_allowed(ev.sender_id)
+            return self._schedule_access_denial(ev.sender_id, ev.chat_id)
+        if not self.cfg.scheduler.allow_private_users:
+            return "private-schedule-disabled"
+        if not self.cfg.is_user_allowed(ev.sender_id):
+            return "user-denied"
+        return self._schedule_access_denial(ev.sender_id, None)
+
+    def _schedule_access_denial(self, sender_id: str, group_id: str | None) -> str | None:
+        access = self.cfg.command_access("schedule", group_id)
+        if access == "disabled":
+            return "cmd-disabled"
+        if access == "owner" and not self.cfg.is_owner(sender_id):
+            return "owner-only"
+        return None
 
     def _schedule_mentions(self, ev: ChatEvent) -> tuple[str, ...]:
         values: list[str] = []
@@ -904,7 +917,11 @@ class App:
         if (
             self._scheduler_restart_required
             or not self.cfg.scheduler.enabled
-            or not self.cfg.is_command_allowed("schedule")
+            or self.cfg.command_access(
+                "schedule",
+                job.event.chat_id if job.event.is_group else None,
+            )
+            == "disabled"
         ):
             await self._send_text(
                 job.event.chat_id,
@@ -913,11 +930,12 @@ class App:
                 job.event.id,
             )
             return
-        if not self._can_mutate_schedules(job.event):
+        denied = self._schedule_mutation_denial(job.event)
+        if denied:
             await self._send_text(
                 job.event.chat_id,
                 job.event.is_group,
-                "时间规则已经理解，但当前权限已不允许创建定时任务。",
+                f"时间规则已经理解，但当前权限已不允许创建定时任务：{denied}。",
                 job.event.id,
             )
             return
@@ -1013,14 +1031,22 @@ class App:
         if schedule.is_group:
             if not self.cfg.is_group_allowed(schedule.chat_id):
                 return False, "group-denied"
-            if not self.cfg.is_owner(schedule.creator_id):
-                return False, "owner-only"
+            denied = self._schedule_access_denial(schedule.creator_id, schedule.chat_id)
+            if denied:
+                return False, denied
         elif not self.cfg.scheduler.allow_private_users or not self.cfg.is_user_allowed(
             schedule.creator_id
         ):
             return False, "user-denied"
-        if schedule.action in {"ask", "task"} and not self.cfg.is_command_allowed(schedule.action):
-            return False, "cmd-disabled"
+        if schedule.action in {"ask", "task"}:
+            action_access = self.cfg.command_access(
+                schedule.action,
+                schedule.chat_id if schedule.is_group else None,
+            )
+            if action_access == "disabled":
+                return False, "cmd-disabled"
+            if action_access == "owner" and not self.cfg.is_owner(schedule.creator_id):
+                return False, "owner-only"
         return True, "ok"
 
     def _schedule_event(self, schedule: Schedule, run: ScheduleRun) -> ChatEvent:

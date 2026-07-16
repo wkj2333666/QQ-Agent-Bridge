@@ -226,9 +226,11 @@ classified as needing an answer is routed to the group's `ask`, `plan`, or
 `task` default. Explicit commands are unaffected. Changes are persisted to
 `config.yaml`.
 
-In groups, only owners can create, pause, resume, run, or cancel schedules.
-Allowed private-chat users can manage their own schedules when
-`scheduler.allow_private_users` is enabled. The scheduler is disabled by
+In groups, schedule creation and management follow the effective `/schedule`
+command permission for that group: `owner` limits mutations to owners, while
+`user` allows otherwise authorized group members. Allowed private-chat users
+can manage their own schedules when `scheduler.allow_private_users` is enabled.
+The scheduler is disabled by
 default; review the timezone and limits in `config.example.yaml` before
 enabling it. Schedules use durable SQLite storage and resume after a bridge
 restart. Arbitrary recurrence is represented by one RFC 5545 RRULE, so rules
