@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 import logging
@@ -13,13 +14,14 @@ from zoneinfo import ZoneInfo
 
 from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter, run_agent
-from .config import MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
+from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
+from .command_access_store import write_command_access_to_config
 from .memory import ConversationMemory, GroupAmbientMemory
 from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
 from .outgoing_resources import collect_outgoing_resources
-from .policy import Job, Policy
+from .policy import COMMANDS, Job, Policy
 from .prompting import build_agent_prompt, select_profile_prompt
 from .profile_store import write_profiles_to_config
 from .proactive import MentionDecision, ProactiveSpeaker
@@ -133,6 +135,8 @@ class App:
                 ev = replace(ev, resources=cached_resources)
 
         parsed = self.policy.parse(ev.text)
+        if not parsed:
+            parsed = self._parse_permission_command(ev.text)
         has_content = bool(ev.text.strip() or ev.resources)
         group_default_command = self.cfg.mention_mode_for_group(ev.chat_id) if ev.is_group else None
         default_command = "ask" if has_content and not ev.is_group else None
@@ -178,6 +182,12 @@ class App:
                     await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                 await self._cleanup_policy()
                 return
+
+        if parsed.name == "permission":
+            txt = self._handle_permission_command(ev, parsed.args)
+            await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
+            await self._cleanup_policy()
+            return
 
         if self._missing_quoted_voice_resource(ev, parsed.name):
             await self._send_text(
@@ -1103,6 +1113,153 @@ class App:
                 return f"设置失败：/{mode} 当前未启用。"
             return self._set_group_mode(ev.chat_id, mode)
         return self._clear_group_mode(ev.chat_id)
+
+    def _handle_permission_command(self, ev: ChatEvent, args: str) -> str:
+        action, command, access = self._parse_permission_args(args)
+        usage = "用法：/permission、/permission set <命令> user|owner|disabled、/permission clear [命令]"
+        if action == "invalid":
+            return usage
+        if action == "help":
+            return usage
+        if action == "show":
+            return self._permission_view_reply(ev)
+        if not ev.is_group:
+            return "/permission 仅用于群聊。"
+        if not self.cfg.is_owner(ev.sender_id):
+            return "[denied] owner-only"
+
+        known_commands = self._permission_command_names()
+        if action == "set":
+            if command not in known_commands or command == "groups" or access not in COMMAND_ACCESS_LEVELS:
+                return usage
+            return self._update_permission_override(ev.chat_id, command, access, clear=False)
+        if action == "clear":
+            if command and (command not in known_commands or command == "groups"):
+                return usage
+            return self._update_permission_override(ev.chat_id, command, "", clear=True)
+        return usage
+
+    def _parse_permission_args(self, args: str) -> tuple[str, str, str]:
+        parts = args.strip().lower().split()
+        if not parts:
+            return "show", "", ""
+        if parts == ["help"]:
+            return "help", "", ""
+        if parts[0] == "set" and len(parts) == 3:
+            return "set", parts[1], parts[2]
+        if parts[0] == "clear" and len(parts) in {1, 2}:
+            return "clear", parts[1] if len(parts) == 2 else "", ""
+        return "invalid", "", ""
+
+    def _permission_command_names(self) -> set[str]:
+        return set(COMMANDS) | {"permission"}
+
+    def _permission_group_map(self) -> dict[str, dict[str, str]]:
+        groups = getattr(self.cfg, "command_groups", None)
+        if isinstance(groups, dict):
+            return groups
+        groups = {}
+        setattr(self.cfg, "command_groups", groups)
+        return groups
+
+    def _permission_group_id(self, group_id: str) -> str:
+        return str(group_id).strip().lower()
+
+    def _permission_override(self, group_id: str, command: str) -> str | None:
+        group = self._permission_group_map().get(self._permission_group_id(group_id))
+        if not isinstance(group, dict):
+            return None
+        value = group.get(command)
+        if value is None:
+            return None
+        return str(value).strip().lower()
+
+    def _permission_global_access(self, command: str) -> str:
+        return str(self.cfg.command_access(command)).strip().lower()
+
+    def _permission_effective_access(self, group_id: str | None, command: str) -> str:
+        global_access = self._permission_global_access(command)
+        if group_id is None:
+            return global_access
+        override = self._permission_override(group_id, command)
+        if override is not None:
+            return override
+        try:
+            return str(self.cfg.command_access(command, group_id)).strip().lower()
+        except TypeError:
+            return global_access
+
+    def _permission_view_reply(self, ev: ChatEvent) -> str:
+        group_id = self._permission_group_id(ev.chat_id) if ev.is_group else None
+        scope = (
+            f"当前群 {group_id}"
+            if group_id is not None
+            else "私聊；群级覆盖仅适用于群聊"
+        )
+        lines = [f"命令权限（{scope}）："]
+        group_label = "-"
+        for command in sorted(self._permission_command_names()):
+            global_access = self._permission_global_access(command)
+            override = self._permission_override(group_id, command) if group_id else None
+            effective = self._permission_effective_access(group_id, command)
+            shown_override = override or group_label
+            lines.append(
+                f"/{command}：全局 {global_access}，本群 {shown_override}，生效 {effective}"
+            )
+        lines.append("说明：user=已授权用户，owner=群 owner，disabled=禁用。")
+        return "\n".join(lines)
+
+    def _update_permission_override(
+        self,
+        group_id: str,
+        command: str,
+        access: str,
+        *,
+        clear: bool,
+    ) -> str:
+        groups = self._permission_group_map()
+        previous = deepcopy(groups)
+        normalized_group_id = self._permission_group_id(group_id)
+        if clear:
+            if command:
+                group = groups.get(normalized_group_id)
+                if isinstance(group, dict):
+                    group.pop(command, None)
+                    if not group:
+                        groups.pop(normalized_group_id, None)
+            else:
+                groups.pop(normalized_group_id, None)
+        else:
+            groups.setdefault(normalized_group_id, {})[command] = access
+
+        try:
+            write_command_access_to_config(self.config_path, self.cfg.commands, groups)
+        except OSError:
+            groups.clear()
+            groups.update(previous)
+            logger.exception("permission persistence failed")
+            return "[error] permission 写入失败，已恢复之前设置"
+
+        if clear:
+            if command:
+                return f"已清除本群 /{command} 权限覆盖。"
+            return "已清除本群全部命令权限覆盖。"
+        return f"已将本群 /{command} 权限设为 {access}。"
+
+    def _parse_permission_command(self, text: str) -> ParsedCommand | None:
+        t = text.strip()
+        while t.startswith("@"):
+            parts = t.split(maxsplit=1)
+            if len(parts) < 2:
+                return None
+            t = parts[1].strip()
+        if not t.startswith("/"):
+            return None
+        parts = t[1:].split(maxsplit=1)
+        if not parts or parts[0].lower() != "permission":
+            return None
+        args = parts[1] if len(parts) == 2 else ""
+        return ParsedCommand(name="permission", args=args, raw=t)  # type: ignore[arg-type]
 
     def _parse_mode_args(self, args: str) -> tuple[str, str]:
         parts = args.strip().lower().split()
