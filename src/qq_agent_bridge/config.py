@@ -181,6 +181,7 @@ class BridgeConfig:
     allowed_groups: list[str] = field(default_factory=list)
     workspaces: dict[str, bool] = field(default_factory=dict)
     commands: dict[str, bool | CommandAccess] = field(default_factory=dict)
+    command_groups: dict[str, dict[str, CommandAccess]] = field(default_factory=dict)
     dangerous_requires_confirm: bool = True
     max_runtime_seconds: int = 300
     max_output_chars: int = 4000
@@ -235,12 +236,14 @@ class BridgeConfig:
         scheduler = SchedulerConfig(**raw.get("scheduler", {}))
         profiles = _load_profiles(raw.get("profiles", {}))
         mention_modes = _load_mention_modes(raw.get("mention_modes", {}))
+        commands_raw = raw.get("commands", {})
         return cls(
             owners=raw.get("owners", []),
             allowed_users=raw.get("allowed_users", []),
             allowed_groups=raw.get("allowed_groups", []),
             workspaces=raw.get("workspaces", {}),
-            commands=_load_commands(raw.get("commands", {})),
+            commands=_load_commands(commands_raw),
+            command_groups=_load_command_groups(commands_raw),
             dangerous_requires_confirm=raw.get("dangerous_requires_confirm", True),
             max_runtime_seconds=raw.get("max_runtime_seconds", 300),
             max_output_chars=raw.get("max_output_chars", 4000),
@@ -285,19 +288,16 @@ class BridgeConfig:
             return True
         return False
 
-    def is_command_allowed(self, name: str) -> bool:
-        return self.command_access(name) != "disabled"
+    def is_command_allowed(self, name: str, group_id: str | None = None) -> bool:
+        return self.command_access(name, group_id) != "disabled"
 
-    def command_access(self, name: str) -> CommandAccess:
-        value = self.commands.get(name, False)
-        if isinstance(value, bool):
-            if not value:
-                return "disabled"
-            return "owner" if name in LEGACY_OWNER_COMMANDS else "user"
-        normalized = str(value).strip().lower()
-        if normalized in COMMAND_ACCESS_LEVELS:
-            return normalized  # type: ignore[return-value]
-        return "disabled"
+    def command_access(self, name: str, group_id: str | None = None) -> CommandAccess:
+        command = str(name).strip().lower()
+        if group_id is not None:
+            group_commands = self.command_groups.get(_normalize_group_id(group_id))
+            if group_commands and command in group_commands:
+                return group_commands[command]
+        return _resolve_command_access(command, self.commands.get(command, False))
 
     def mention_mode_for_group(self, gid: str) -> str:
         return self.mention_modes.groups.get(str(gid), self.mention_modes.default)
@@ -325,6 +325,8 @@ def _load_commands(raw: Any) -> dict[str, bool | CommandAccess]:
     commands: dict[str, bool | CommandAccess] = {}
     for name, value in raw.items():
         command = str(name).strip().lower()
+        if command == "groups":
+            continue
         if isinstance(value, bool):
             commands[command] = value
             continue
@@ -335,6 +337,59 @@ def _load_commands(raw: Any) -> dict[str, bool | CommandAccess]:
             f"commands.{command} must be true, false, owner, user, or disabled"
         )
     return commands
+
+
+def _load_command_groups(raw: Any) -> dict[str, dict[str, CommandAccess]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    groups_key = next(
+        (key for key in raw if str(key).strip().lower() == "groups"),
+        None,
+    )
+    if groups_key is None:
+        return {}
+
+    raw_groups = raw[groups_key]
+    if not isinstance(raw_groups, dict):
+        raise ValueError("commands.groups must be a mapping")
+
+    groups: dict[str, dict[str, CommandAccess]] = {}
+    for group_id, raw_commands in raw_groups.items():
+        normalized_group_id = _normalize_group_id(group_id)
+        if not isinstance(raw_commands, dict):
+            raise ValueError(f"commands.groups.{normalized_group_id} must be a mapping")
+        group_commands: dict[str, CommandAccess] = {}
+        for name, value in raw_commands.items():
+            command = str(name).strip().lower()
+            group_commands[command] = _parse_group_command_access(
+                value, f"commands.groups.{normalized_group_id}.{command}"
+            )
+        groups[normalized_group_id] = group_commands
+    return groups
+
+
+def _parse_group_command_access(value: Any, location: str) -> CommandAccess:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in COMMAND_ACCESS_LEVELS:
+            return normalized  # type: ignore[return-value]
+    raise ValueError(f"{location} must be user, owner, or disabled")
+
+
+def _normalize_group_id(group_id: Any) -> str:
+    return str(group_id).strip().lower()
+
+
+def _resolve_command_access(name: str, value: bool | CommandAccess) -> CommandAccess:
+    if isinstance(value, bool):
+        if not value:
+            return "disabled"
+        return "owner" if name in LEGACY_OWNER_COMMANDS else "user"
+    normalized = str(value).strip().lower()
+    if normalized in COMMAND_ACCESS_LEVELS:
+        return normalized  # type: ignore[return-value]
+    return "disabled"
 
 
 def _load_mention_modes(raw: Any) -> MentionModeConfig:

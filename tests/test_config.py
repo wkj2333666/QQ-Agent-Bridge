@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -50,6 +51,65 @@ def test_legacy_boolean_command_config_keeps_existing_defaults() -> None:
     assert cfg.command_access("ask") == "user"
     assert cfg.command_access("code") == "owner"
     assert cfg.command_access("shell") == "disabled"
+
+
+def test_group_command_overrides_load_and_apply_only_to_group_lookup(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+commands:
+  ask: user
+  task: user
+  groups:
+    180188783:
+      TASK: disabled
+      Search: owner
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config)
+
+    assert cfg.commands == {"ask": "user", "task": "user"}
+    assert cfg.command_groups == {
+        "180188783": {"task": "disabled", "search": "owner"}
+    }
+    assert cfg.command_access("task", "180188783") == "disabled"
+    assert not cfg.is_command_allowed("task", "180188783")
+    assert cfg.command_access("search", "180188783") == "owner"
+    assert cfg.command_access("ask", "180188783") == "user"
+    assert cfg.command_access("task") == "user"
+    assert cfg.is_command_allowed("task")
+    assert cfg.command_access("search") == "disabled"
+
+
+@pytest.mark.parametrize("value", ["admin", True])
+def test_group_command_values_must_use_named_access_levels(tmp_path: Path, value: object) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"commands": {"groups": {"1": {"task": value}}}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"commands\.groups\.1\.task"):
+        BridgeConfig.load(config)
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [[], {"1": []}],
+)
+def test_group_command_configuration_must_be_nested_mappings(
+    tmp_path: Path, groups: object
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"commands": {"groups": groups}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="commands.groups"):
+        BridgeConfig.load(config)
 
 
 def test_example_config_enables_owner_reset_and_memory() -> None:
