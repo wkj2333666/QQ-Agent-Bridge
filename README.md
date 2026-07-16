@@ -331,6 +331,10 @@ an Agent create `.venv`, `venv`, `env`, or install dependencies inside the
 workspace. If the base environment lacks a dependency, report the missing
 dependency and provision it outside the workspace before retrying.
 
+Bubblewrap networking is opt-in through `agent.share_network`. Keep it `false`
+for offline tasks; set it to `true` only when the Agent needs web search or
+other network access.
+
 Key safety choices:
 
 - `/ask` and `/plan` stay read-only.

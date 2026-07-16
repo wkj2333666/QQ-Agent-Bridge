@@ -412,6 +412,31 @@ class App:
             await self.policy.cleanup()
 
     async def _reply_when_done(self, job: Job) -> None:
+        try:
+            await self._reply_when_done_inner(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - delivery failures must not leak task exceptions
+            logger.exception("job reply delivery failed job=%s", job.id)
+        finally:
+            await self._cleanup_reply_job(job)
+
+    async def _cleanup_reply_job(self, job: Job) -> None:
+        if job.cmd == "schedule":
+            self._stop_schedule_parse_heartbeat(job.id)
+            self._schedule_parse_mentions.pop(job.id, None)
+            self._schedule_parse_safety_required.pop(job.id, None)
+            self._schedule_parse_outcomes.pop(job.id, None)
+        reporter = self._progress_reporters.pop(job.id, None)
+        if reporter:
+            reporter.stop()
+        self._outgoing_jobs.pop(job.event.id, None)
+        try:
+            await self._cleanup_policy()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the original job outcome
+            logger.exception("job cleanup failed job=%s", job.id)
+
+    async def _reply_when_done_inner(self, job: Job) -> None:
         if not job.task:
             return
         try:
@@ -420,20 +445,9 @@ class App:
             current = asyncio.current_task()
             if current and current.cancelling():
                 raise
-            if job.cmd == "schedule":
-                self._stop_schedule_parse_heartbeat(job.id)
-                self._schedule_parse_mentions.pop(job.id, None)
-                self._schedule_parse_safety_required.pop(job.id, None)
-                self._schedule_parse_outcomes.pop(job.id, None)
-            reporter = self._progress_reporters.pop(job.id, None)
-            if reporter:
-                reporter.stop()
-            self._outgoing_jobs.pop(job.event.id, None)
-            await self._cleanup_policy()
             return
         if job.cmd == "schedule":
             await self._finish_schedule_parse_job(job, result)
-            await self._cleanup_policy()
             return
         if job.allow_outgoing_resources and job.outgoing_dir and job.outgoing_token:
             clean_result, outgoing, warnings = collect_outgoing_resources(
@@ -482,11 +496,6 @@ class App:
                 await self.adapter.send_voice(ev.chat_id, ev.is_group, resource.path, echo)
             elif resource.kind == "file":
                 await self.adapter.send_file(ev.chat_id, ev.is_group, resource.path, echo)
-        reporter = self._progress_reporters.pop(job.id, None)
-        if reporter:
-            reporter.stop()
-        self._outgoing_jobs.pop(job.event.id, None)
-        await self._cleanup_policy()
 
     async def _send_text(
         self,
@@ -1099,11 +1108,19 @@ class App:
         if action == "set":
             if not value.strip():
                 return "用法：/profile set <新的角色设定>"
+            previous = deepcopy(self.cfg.profiles)
             self._set_profile(ev, value.strip())
-            return self._persist_profile_reply(ev, updated=True)
+            reply = self._persist_profile_reply(ev, updated=True)
+            if reply.startswith("[error]"):
+                self.cfg.profiles = previous
+            return reply
         if action == "clear":
+            previous = deepcopy(self.cfg.profiles)
             self._clear_profile(ev)
-            return self._persist_profile_reply(ev, updated=False)
+            reply = self._persist_profile_reply(ev, updated=False)
+            if reply.startswith("[error]"):
+                self.cfg.profiles = previous
+            return reply
         return self._profile_view_reply(ev)
 
     def _parse_profile_args(self, args: str) -> tuple[str, str]:

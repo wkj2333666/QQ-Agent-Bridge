@@ -536,6 +536,15 @@ def test_resource_manager_keeps_plain_url_without_downloading(tmp_path: Path) ->
     assert refs[0].local_path is None
 
 
+def test_default_http_fetch_rejects_loopback_targets(tmp_path: Path) -> None:
+    async def go() -> None:
+        manager = ResourceManager(make_cfg(tmp_path))
+        with pytest.raises(ValueError, match="private network"):
+            await manager._fetch_http("http://127.0.0.1:8080/metadata", 1024)
+
+    asyncio.run(go())
+
+
 def test_resource_manager_sanitizes_names_and_limits_count(tmp_path: Path) -> None:
     async def fetch(url: str, limit: int) -> tuple[bytes, str]:
         return b"x", "application/octet-stream"

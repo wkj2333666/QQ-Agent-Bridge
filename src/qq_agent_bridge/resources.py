@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import mimetypes
 import os
 import re
+import socket
 import stat
 import wave
 from collections.abc import Awaitable, Callable
@@ -13,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -369,18 +371,63 @@ class ResourceManager:
         return ".bin"
 
     async def _fetch_http(self, url: str, limit: int) -> tuple[bytes, str]:
+        current_url = url
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                resp.raise_for_status()
-                content_type = resp.headers.get("Content-Type", "")
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.content.iter_chunked(64 * 1024):
-                    total += len(chunk)
-                    if total > limit:
-                        raise ValueError("resource too large")
-                    chunks.append(chunk)
-                return b"".join(chunks), content_type
+            for _ in range(4):
+                await self._validate_http_target(current_url)
+                async with session.get(
+                    current_url,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if 300 <= resp.status < 400:
+                        location = resp.headers.get("Location")
+                        if not location:
+                            raise ValueError("redirect without location")
+                        current_url = urljoin(current_url, location)
+                        continue
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("Content-Type", "")
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > limit:
+                            raise ValueError("resource too large")
+                        chunks.append(chunk)
+                    return b"".join(chunks), content_type
+        raise ValueError("too many redirects")
+
+    async def _validate_http_target(self, url: str) -> None:
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("unsupported resource URL")
+        try:
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        except ValueError as exc:
+            raise ValueError("invalid resource URL") from exc
+        try:
+            infos = await asyncio.get_running_loop().run_in_executor(
+                None,
+                socket.getaddrinfo,
+                parsed.hostname,
+                port,
+                socket.AF_UNSPEC,
+                socket.SOCK_STREAM,
+            )
+            addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
+        except OSError as exc:
+            raise ValueError("resource host unavailable") from exc
+        if not addresses or any(
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+            for address in addresses
+        ):
+            raise ValueError("private network resource target")
 
 
 def format_resource_context(resources: tuple[PreparedResource, ...]) -> str:

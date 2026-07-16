@@ -117,7 +117,7 @@ class CursorAdapter:
                 "/proc",
                 "--dev",
                 "/dev",
-                "--share-net",
+                "--share-net" if self.cfg.agent.share_network else "--unshare-net",
                 "--unshare-user",
                 "--unshare-ipc",
                 "--dir",

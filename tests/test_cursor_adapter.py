@@ -56,6 +56,7 @@ def test_cursor_command_runs_inside_micromamba_base() -> None:
 def test_task_command_can_force_tools_inside_bwrap() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = True
+    cfg.agent.share_network = True
     cfg.agent.force_task_tools = True
     adapter = CursorAdapter(cfg)
 

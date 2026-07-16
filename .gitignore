@@ -37,6 +37,7 @@ data/
 *.log
 config.yaml
 !config.example.yaml
+.*.yaml.lock
 
 # Secrets / auth
 *.token

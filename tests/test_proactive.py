@@ -885,6 +885,7 @@ def test_proactive_debug_logs_collection_decision_and_send(caplog: object) -> No
     assert "proactive.flush" in joined
     assert "proactive.decide" in joined
     assert "proactive.send" in joined
+    assert "接口慢了" not in joined
 
 
 def test_proactive_debug_logs_skip_reasons(caplog: object) -> None:

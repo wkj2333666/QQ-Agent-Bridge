@@ -35,6 +35,7 @@ class AgentConfig:
     env_name: str = "base"
     require_env: bool = True
     use_bwrap: bool = True
+    share_network: bool = False
     bwrap_binary: str = "bwrap"
     force_task_tools: bool = True
     sandbox_home: str = "/tmp/qq-agent-bridge/agent-home"

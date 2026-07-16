@@ -176,6 +176,7 @@ agent:
   env_name: "base"
   require_env: true
   use_bwrap: true
+  share_network: true  # required for web search; keep false for offline tasks
   bwrap_binary: "bwrap"
   force_task_tools: true
   sandbox_home: "/tmp/qq-agent-bridge/agent-home"
