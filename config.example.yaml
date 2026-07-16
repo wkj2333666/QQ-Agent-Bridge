@@ -180,6 +180,12 @@ agent:
     - "USER"
   max_runtime_seconds: 1800
   max_output_chars: 4000
+  # Agent subprocess traces are private local diagnostics and are disabled by default.
+  # They never include the original prompt; enable only on a trusted machine.
+  trace_enabled: false
+  trace_root: "runtime/agent-traces"
+  trace_max_bytes: 5242880
+  trace_max_line_chars: 2000
 
 # Bot self
 bot:

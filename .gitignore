@@ -60,6 +60,7 @@ runtime/*/data/
 runtime/*/config/
 runtime/*/plugins/
 runtime/*/logs/
+runtime/agent-traces/
 
 # Optional local ASR deployment artifacts
 runtime/asr/cache/
