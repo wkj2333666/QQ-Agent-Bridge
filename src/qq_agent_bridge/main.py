@@ -87,6 +87,7 @@ class App:
         self._progress_reporters: dict[str, ProgressReporter] = {}
         self._schedule_parse_outcomes: dict[str, NaturalScheduleOutcome] = {}
         self._schedule_parse_mentions: dict[str, tuple[str, ...]] = {}
+        self._schedule_parse_safety_required: dict[str, bool] = {}
         self._schedule_parse_heartbeats: dict[str, asyncio.Task[None]] = {}
         self.schedule_database_path = self._schedule_database_path(cfg)
         self._scheduler_restart_required = False
@@ -390,6 +391,7 @@ class App:
             if job.cmd == "schedule":
                 self._stop_schedule_parse_heartbeat(job.id)
                 self._schedule_parse_mentions.pop(job.id, None)
+                self._schedule_parse_safety_required.pop(job.id, None)
                 self._schedule_parse_outcomes.pop(job.id, None)
             reporter = self._progress_reporters.pop(job.id, None)
             if reporter:
@@ -651,7 +653,7 @@ class App:
         except ScheduleParseError as exc:
             await self._send_text(ev.chat_id, ev.is_group, f"设置失败：{exc}", ev.id)
             return
-        if spec is not None:
+        if spec is not None and self.cfg.is_owner(ev.sender_id):
             try:
                 schedule = self.scheduler.create(spec, ev)
             except ValueError as exc:
@@ -664,7 +666,7 @@ class App:
                 ev.id,
             )
             return
-        if not self.cfg.scheduler.natural_language_enabled:
+        if spec is None and not self.cfg.scheduler.natural_language_enabled:
             await self._send_text(
                 ev.chat_id,
                 ev.is_group,
@@ -672,6 +674,21 @@ class App:
                 ev.id,
             )
             return
+        await self._start_schedule_parse_job(
+            ev,
+            raw,
+            mentions,
+            require_safety_review=not self.cfg.is_owner(ev.sender_id),
+        )
+
+    async def _start_schedule_parse_job(
+        self,
+        ev: ChatEvent,
+        raw: str,
+        mentions: tuple[str, ...],
+        *,
+        require_safety_review: bool,
+    ) -> None:
         assert self.policy is not None
         command = ParsedCommand(name="schedule", args=raw, raw=f"/schedule {raw}")
         jid, _nonce = self.policy.start_job(ev, command)
@@ -679,10 +696,15 @@ class App:
         job.timeout_seconds = max(1, self.cfg.scheduler.natural_language_timeout_seconds)
         job.source = "schedule-parse"
         self._schedule_parse_mentions[jid] = mentions
+        self._schedule_parse_safety_required[jid] = require_safety_review
         await self._send_text(
             ev.chat_id,
             ev.is_group,
-            "收到，我正在理解你说的时间和任务内容，稍等一下。",
+            (
+                "收到，我正在理解你说的时间和任务内容，并检查这个定时任务是否安全，稍等一下。"
+                if require_safety_review
+                else "收到，我正在理解你说的时间和任务内容，稍等一下。"
+            ),
             f"{ev.id}-schedule-start",
         )
         self.policy.start_job_task(job)
@@ -845,6 +867,7 @@ class App:
     async def _finish_schedule_parse_job(self, job: Job, result: str) -> None:
         self._stop_schedule_parse_heartbeat(job.id)
         mentions = self._schedule_parse_mentions.pop(job.id, ())
+        self._schedule_parse_safety_required.pop(job.id, None)
         outcome = self._schedule_parse_outcomes.pop(job.id, None)
         if outcome is None:
             if result == "[timeout]":
@@ -853,7 +876,7 @@ class App:
                 text = "这次没能理解时间规则，定时任务没有创建。可以发送 /schedule help 查看示例。"
             await self._send_text(job.event.chat_id, job.event.is_group, text, job.event.id)
             return
-        if outcome.spec is None:
+        if outcome.safety_blocked or outcome.spec is None:
             text = f"{outcome.clarification}\n没有创建定时任务。"
             await self._send_text(job.event.chat_id, job.event.is_group, text, job.event.id)
             return
@@ -1205,6 +1228,7 @@ class App:
             outcome = await self.schedule_nl_parser.parse(
                 args,
                 mentions=self._schedule_parse_mentions.get(job.id, ()),
+                require_safety_review=self._schedule_parse_safety_required.get(job.id, False),
             )
             self._schedule_parse_outcomes[job.id] = outcome
             return "parsed"

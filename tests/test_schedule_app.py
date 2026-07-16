@@ -213,7 +213,24 @@ def test_group_non_owner_cannot_create_schedule(tmp_path: Path) -> None:
 
 def test_private_allowed_user_can_create_own_schedule(tmp_path: Path) -> None:
     async def go() -> None:
-        app, adapter = make_app(tmp_path)
+        agent = FakeAgent(
+            [
+                """{
+                  "ambiguous": false,
+                  "kind": "once",
+                  "action": "send",
+                  "payload": "喝水",
+                  "send_text": "喝水",
+                  "time_phrase": "in 10m",
+                  "payload_phrase": "喝水",
+                  "dtstart_local": "2099-01-01T10:00",
+                  "rrule": null,
+                  "clarification": "",
+                  "safety": {"safe": true, "risk_level": "low", "reason": "一次提醒"}
+                }"""
+            ]
+        )
+        app, adapter = make_app(tmp_path, agent)
 
         await app._handle(
             make_event(
@@ -224,10 +241,50 @@ def test_private_allowed_user_can_create_own_schedule(tmp_path: Path) -> None:
             )
         )
 
+        await drain_app(app)
         assert "已经设置好了" in adapter.sent[-1][2]
         saved = app.schedule_store.list_for_chat("reader", False)
         assert len(saved) == 1
         assert saved[0].creator_id == "reader"
+
+    asyncio.run(go())
+
+
+def test_private_user_unsafe_schedule_is_rejected_without_persistence(tmp_path: Path) -> None:
+    async def go() -> None:
+        agent = FakeAgent(
+            [
+                """{
+                  "ambiguous": false,
+                  "kind": "rrule",
+                  "action": "task",
+                  "payload": "不停搜索并发送结果",
+                  "send_text": null,
+                  "time_phrase": "每分钟",
+                  "payload_phrase": "不停搜索并发送结果",
+                  "dtstart_local": "2099-01-01T10:00",
+                  "rrule": "FREQ=MINUTELY",
+                  "clarification": "",
+                  "safety": {"safe": false, "risk_level": "high", "reason": "可能形成持续请求风暴"}
+                }"""
+            ]
+        )
+        app, adapter = make_app(tmp_path, agent)
+
+        await app._handle(
+            make_event(
+                "/schedule 每分钟不停搜索并发送结果",
+                sender="reader",
+                group=None,
+                mid="private-unsafe-1",
+            )
+        )
+        await drain_app(app)
+
+        assert "安全审查未通过" in adapter.sent[-1][2]
+        assert "没有创建定时任务" in adapter.sent[-1][2]
+        assert app.schedule_store.list_for_chat("reader", False) == []
+        assert len(agent.calls) == 1
 
     asyncio.run(go())
 

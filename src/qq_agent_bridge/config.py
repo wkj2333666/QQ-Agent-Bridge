@@ -4,13 +4,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
 
 MENTION_MODE_OPTIONS: tuple[str, ...] = ("ask", "plan", "task")
 MENTION_MODES = frozenset(MENTION_MODE_OPTIONS)
+CommandAccess = Literal["disabled", "user", "owner"]
+COMMAND_ACCESS_LEVELS = frozenset({"disabled", "user", "owner"})
+# Preserve the authorization implied by the historical commands: true/false format.
+LEGACY_OWNER_COMMANDS = frozenset({"code", "shell", "reset", "stop", "approve", "reload"})
 
 
 @dataclass
@@ -172,7 +176,7 @@ class BridgeConfig:
     allowed_users: list[str] = field(default_factory=list)
     allowed_groups: list[str] = field(default_factory=list)
     workspaces: dict[str, bool] = field(default_factory=dict)
-    commands: dict[str, bool] = field(default_factory=dict)
+    commands: dict[str, bool | CommandAccess] = field(default_factory=dict)
     dangerous_requires_confirm: bool = True
     max_runtime_seconds: int = 300
     max_output_chars: int = 4000
@@ -232,7 +236,7 @@ class BridgeConfig:
             allowed_users=raw.get("allowed_users", []),
             allowed_groups=raw.get("allowed_groups", []),
             workspaces=raw.get("workspaces", {}),
-            commands=raw.get("commands", {}),
+            commands=_load_commands(raw.get("commands", {})),
             dangerous_requires_confirm=raw.get("dangerous_requires_confirm", True),
             max_runtime_seconds=raw.get("max_runtime_seconds", 300),
             max_output_chars=raw.get("max_output_chars", 4000),
@@ -278,7 +282,18 @@ class BridgeConfig:
         return False
 
     def is_command_allowed(self, name: str) -> bool:
-        return self.commands.get(name, False)
+        return self.command_access(name) != "disabled"
+
+    def command_access(self, name: str) -> CommandAccess:
+        value = self.commands.get(name, False)
+        if isinstance(value, bool):
+            if not value:
+                return "disabled"
+            return "owner" if name in LEGACY_OWNER_COMMANDS else "user"
+        normalized = str(value).strip().lower()
+        if normalized in COMMAND_ACCESS_LEVELS:
+            return normalized  # type: ignore[return-value]
+        return "disabled"
 
     def mention_mode_for_group(self, gid: str) -> str:
         return self.mention_modes.groups.get(str(gid), self.mention_modes.default)
@@ -298,6 +313,24 @@ def _load_profiles(raw: Any) -> ProfileConfig:
         groups=_string_map(raw.get("groups", {})),
         users=_string_map(raw.get("users", {})),
     )
+
+
+def _load_commands(raw: Any) -> dict[str, bool | CommandAccess]:
+    if not isinstance(raw, dict):
+        return {}
+    commands: dict[str, bool | CommandAccess] = {}
+    for name, value in raw.items():
+        command = str(name).strip().lower()
+        if isinstance(value, bool):
+            commands[command] = value
+            continue
+        if isinstance(value, str) and value.strip().lower() in COMMAND_ACCESS_LEVELS:
+            commands[command] = value.strip().lower()  # type: ignore[assignment]
+            continue
+        raise ValueError(
+            f"commands.{command} must be true, false, owner, user, or disabled"
+        )
+    return commands
 
 
 def _load_mention_modes(raw: Any) -> MentionModeConfig:

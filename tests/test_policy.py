@@ -143,6 +143,7 @@ def test_non_owner_can_only_use_read_only_commands() -> None:
         },
         workspaces={"/tmp": True},
     )
+    cfg.agent.default_workspace = "/tmp"
     pol = Policy(cfg, fake_runner)
 
     for idx, cmd in enumerate(("ask", "plan", "search", "task", "status", "help", "profile", "mode")):
@@ -153,6 +154,51 @@ def test_non_owner_can_only_use_read_only_commands() -> None:
         ok, reason = pol.allow(make_ev(f"/{cmd} x", sender="reader", mid=f"rw-{idx}"), cmd)
         assert not ok
         assert reason == "owner-only"
+
+
+def test_explicit_command_access_levels_control_authorization() -> None:
+    cfg = BridgeConfig(
+        owners=["owner"],
+        allowed_users=["reader"],
+        allowed_groups=["123"],
+        commands={
+            "ask": "owner",
+            "code": "user",
+            "shell": "disabled",
+        },
+        workspaces={"/tmp": True},
+    )
+    cfg.agent.default_workspace = "/tmp"
+    pol = Policy(cfg, fake_runner)
+
+    ok, reason = pol.allow(make_ev("/ask x", sender="reader", mid="explicit-owner"), "ask")
+    assert not ok
+    assert reason == "owner-only"
+
+    ok, reason = pol.allow(make_ev("/code x", sender="reader", mid="explicit-user"), "code")
+    assert ok, reason
+
+    ok, reason = pol.allow(make_ev("/shell x", sender="owner", mid="explicit-disabled"), "shell")
+    assert not ok
+    assert reason == "cmd-disabled"
+
+
+def test_disabled_command_wins_over_owner_requirement() -> None:
+    cfg = BridgeConfig(
+        owners=["owner"],
+        allowed_groups=["123"],
+        commands={"code": False},
+        workspaces={"/tmp": True},
+    )
+    pol = Policy(cfg, fake_runner)
+
+    ok, reason = pol.allow(
+        make_ev("/code x", sender="reader", group="123", mid="disabled-owner"),
+        "code",
+    )
+
+    assert not ok
+    assert reason == "cmd-disabled"
 
 
 def test_allowed_group_member_can_use_read_only_without_user_allowlist() -> None:
@@ -194,6 +240,7 @@ def test_allowed_group_member_cannot_use_owner_only_commands() -> None:
         },
         workspaces={"/tmp": True},
     )
+    cfg.agent.default_workspace = "/tmp"
     pol = Policy(cfg, fake_runner)
 
     for idx, cmd in enumerate(("code", "shell", "approve", "stop", "reset", "reload")):

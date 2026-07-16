@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import BridgeConfig
+from .config import BridgeConfig, LEGACY_OWNER_COMMANDS
 from .redactor import redact
 from .types import ChatEvent, CommandName, ParsedCommand
 
@@ -43,7 +43,8 @@ READ_ONLY_COMMANDS: set[str] = {
     "mode",
     "schedule",
 }
-OWNER_ONLY_COMMANDS: set[str] = COMMANDS - READ_ONLY_COMMANDS
+# Public compatibility alias for callers that imported the old static policy set.
+OWNER_ONLY_COMMANDS: set[str] = set(LEGACY_OWNER_COMMANDS)
 
 
 @dataclass
@@ -129,10 +130,11 @@ class Policy:
                 return False, "no-mention"
         elif not self.cfg.is_user_allowed(ev.sender_id):
             return False, "user-denied"
-        if cmd in OWNER_ONLY_COMMANDS and not self.cfg.is_owner(ev.sender_id):
-            return False, "owner-only"
-        if not self.cfg.is_command_allowed(cmd):
+        access = self.cfg.command_access(cmd)
+        if access == "disabled":
             return False, "cmd-disabled"
+        if access == "owner" and not self.cfg.is_owner(ev.sender_id):
+            return False, "owner-only"
         if cmd in ("code", "shell") and not self.cfg.is_workspace_allowed(self.cfg.agent.default_workspace):
             return False, "ws-denied"
         self.seen[ev.id] = time.time()

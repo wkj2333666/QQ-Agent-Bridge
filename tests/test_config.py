@@ -21,6 +21,37 @@ def test_example_config_enables_read_only_commands() -> None:
         assert cfg.is_command_allowed(command), command
 
 
+def test_command_access_levels_load_from_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """
+owners: [owner]
+commands:
+  ask: user
+  code: owner
+  shell: disabled
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config)
+
+    assert cfg.command_access("ask") == "user"
+    assert cfg.command_access("code") == "owner"
+    assert cfg.command_access("shell") == "disabled"
+    assert cfg.is_command_allowed("ask")
+    assert cfg.is_command_allowed("code")
+    assert not cfg.is_command_allowed("shell")
+
+
+def test_legacy_boolean_command_config_keeps_existing_defaults() -> None:
+    cfg = BridgeConfig(commands={"ask": True, "code": True, "shell": False})
+
+    assert cfg.command_access("ask") == "user"
+    assert cfg.command_access("code") == "owner"
+    assert cfg.command_access("shell") == "disabled"
+
+
 def test_example_config_enables_owner_reset_and_memory() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 

@@ -217,6 +217,105 @@ def test_natural_language_parser_builds_validated_daily_task() -> None:
     asyncio.run(go())
 
 
+def test_user_schedule_safety_review_is_combined_with_interpretation() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "rrule",
+              "action": "send",
+              "payload": "记得喝水",
+              "send_text": "记得喝水",
+              "time_phrase": "每天早上八点",
+              "payload_phrase": "提醒我记得喝水",
+              "dtstart_local": "2026-07-14T08:00",
+              "rrule": "FREQ=DAILY",
+              "clarification": "",
+              "safety": {"safe": true, "risk_level": "low", "reason": "单纯提醒"}
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+
+        outcome = await parser.parse(
+            "每天早上八点提醒我记得喝水",
+            now=NOW,
+            require_safety_review=True,
+        )
+
+        assert outcome.spec is not None
+        assert not outcome.safety_blocked
+        prompt = agent.calls[0][0]
+        assert "安全审查" in prompt
+        assert "拒绝" in prompt
+        assert "占满" in prompt
+
+    asyncio.run(go())
+
+
+def test_user_schedule_safety_review_blocks_resource_exhaustion() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "rrule",
+              "action": "task",
+              "payload": "不停地搜索并发送结果",
+              "send_text": null,
+              "time_phrase": "每分钟",
+              "payload_phrase": "不停地搜索并发送结果",
+              "dtstart_local": "2026-07-13T20:01",
+              "rrule": "FREQ=MINUTELY",
+              "clarification": "",
+              "safety": {"safe": false, "risk_level": "high", "reason": "高频无限任务可能占满资源"}
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+
+        outcome = await parser.parse(
+            "每分钟不停地搜索并发送结果",
+            now=NOW,
+            require_safety_review=True,
+        )
+
+        assert outcome.spec is None
+        assert outcome.safety_blocked
+        assert "占满资源" in outcome.clarification
+
+    asyncio.run(go())
+
+
+def test_owner_schedule_parser_keeps_legacy_draft_without_safety_field() -> None:
+    async def go() -> None:
+        agent = FakeNaturalAgent(
+            """{
+              "ambiguous": false,
+              "kind": "once",
+              "action": "send",
+              "payload": "提醒开会",
+              "send_text": "提醒开会",
+              "time_phrase": "明天十点",
+              "payload_phrase": "提醒开会",
+              "dtstart_local": "2026-07-14T10:00",
+              "rrule": null,
+              "clarification": ""
+            }"""
+        )
+        cfg = BridgeConfig()
+        cfg.scheduler = scheduler_cfg()
+        parser = NaturalLanguageScheduleParser(cfg, agent)
+
+        outcome = await parser.parse("明天十点提醒开会", now=NOW)
+
+        assert outcome.spec is not None
+        assert not outcome.safety_blocked
+
+    asyncio.run(go())
+
+
 def test_natural_language_parser_returns_clarification_without_schedule() -> None:
     async def go() -> None:
         agent = FakeNaturalAgent(
