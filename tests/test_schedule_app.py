@@ -13,13 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Policy  # type: ignore
-from qq_agent_bridge.types import ChatEvent, ChatSegment  # type: ignore
+from qq_agent_bridge.types import ChatEvent, ChatReply, ChatSegment  # type: ignore
 
 
 class FakeAdapter:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool, str, str | None]] = []
-        self.sent_ats: list[tuple[str, tuple[str, ...], str, str | None]] = []
+        self.sent_ats: list[tuple[str, tuple[str, ...], str, str | None, str | None]] = []
 
     def is_connected(self) -> bool:
         return True
@@ -42,7 +42,7 @@ class FakeAdapter:
         echo: str | None = None,
         reply_to: str | None = None,
     ) -> None:
-        self.sent_ats.append((chat_id, qqs, text, echo))
+        self.sent_ats.append((chat_id, qqs, text, echo, reply_to))
 
     async def send_at(
         self,
@@ -114,6 +114,7 @@ def make_event(
     group: str | None = "group",
     mid: str = "m1",
     segments: tuple[ChatSegment, ...] = (),
+    reply: ChatReply | None = None,
 ) -> ChatEvent:
     return ChatEvent(
         id=mid,
@@ -125,6 +126,7 @@ def make_event(
         text=text,
         timestamp=1,
         segments=segments,
+        reply=reply,
     )
 
 
@@ -410,6 +412,33 @@ def test_schedule_visibility_and_management_are_scoped_to_creator_unless_owner(
         owner_list = adapter.sent[-1][2]
         assert "owner-only reminder" in owner_list
         assert "reader reminder" not in owner_list
+
+    asyncio.run(go())
+
+
+def test_schedule_send_preserves_multiple_mentions_and_reply_reference(tmp_path: Path) -> None:
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        event = make_event(
+            "/schedule in 10m -- send 记得集合",
+            mid="send-meta",
+            segments=(
+                ChatSegment(type="mention", qq="12345", text="@12345 "),
+                ChatSegment(type="mention", qq="67890", text="@67890 "),
+            ),
+            reply=ChatReply(message_id="9988", text="原消息"),
+        )
+
+        await app._handle(event)
+        schedule = app.schedule_store.list_for_chat("group", True)[0]
+        assert schedule.mentions == ("12345", "67890")
+        assert schedule.reply_to_message_id == "9988"
+
+        await app._send_schedule_text(schedule, "记得集合", "send-meta-run")
+
+        assert adapter.sent_ats[-1][1] == ("12345", "67890")
+        assert adapter.sent_ats[-1][2] == "记得集合"
+        assert adapter.sent_ats[-1][4] == "9988"
 
     asyncio.run(go())
 

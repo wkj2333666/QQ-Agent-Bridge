@@ -702,7 +702,10 @@ class App:
             return
         if spec is not None:
             try:
-                schedule = self.scheduler.create(spec, ev)
+                schedule = self.scheduler.create(
+                    replace(spec, reply_to_message_id=self._schedule_reply_to(ev)),
+                    ev,
+                )
             except ValueError as exc:
                 await self._send_text(ev.chat_id, ev.is_group, f"设置失败：{exc}", ev.id)
                 return
@@ -826,6 +829,11 @@ class App:
                 continue
             values.append(qq)
         return tuple(values)
+
+    def _schedule_reply_to(self, ev: ChatEvent) -> str | None:
+        if not ev.reply or not ev.reply.message_id:
+            return None
+        return ev.reply.message_id
 
     def _schedule_help_text(self, ev: ChatEvent | None = None) -> str:
         zone = self.cfg.scheduler.timezone
@@ -988,7 +996,11 @@ class App:
                 job.event.id,
             )
             return
-        spec = replace(outcome.spec, mentions=mentions)
+        spec = replace(
+            outcome.spec,
+            mentions=mentions,
+            reply_to_message_id=self._schedule_reply_to(job.event),
+        )
         try:
             schedule = self.scheduler.create(spec, job.event)
         except ValueError as exc:
@@ -1112,10 +1124,22 @@ class App:
 
     async def _send_schedule_text(self, schedule: Schedule, text: str, echo: str) -> None:
         if schedule.is_group and schedule.mentions:
-            await self.adapter.send_ats(schedule.chat_id, schedule.mentions, text, echo)
+            await self.adapter.send_ats(
+                schedule.chat_id,
+                schedule.mentions,
+                text,
+                echo,
+                reply_to=schedule.reply_to_message_id,
+            )
             self.proactive.record_bot_send(schedule.chat_id)
             return
-        await self._send_text(schedule.chat_id, schedule.is_group, text, echo)
+        await self._send_text(
+            schedule.chat_id,
+            schedule.is_group,
+            text,
+            echo,
+            reply_to=schedule.reply_to_message_id,
+        )
 
     def _short_schedule_payload(self, payload: str) -> str:
         text = " ".join(payload.split())

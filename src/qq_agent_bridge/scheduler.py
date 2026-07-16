@@ -51,6 +51,7 @@ class ScheduleSpec:
     rrule: str | None = None
     description: str = ""
     mentions: tuple[str, ...] = ()
+    reply_to_message_id: str | None = None
 
 
 @dataclass
@@ -60,6 +61,7 @@ class Schedule:
     is_group: bool
     creator_id: str
     source_message_id: str
+    reply_to_message_id: str | None
     kind: str
     action: str
     payload: str
@@ -98,6 +100,7 @@ class Schedule:
             is_group=is_group,
             creator_id=creator_id,
             source_message_id=source_message_id,
+            reply_to_message_id=spec.reply_to_message_id,
             kind=spec.kind,
             action=spec.action,
             payload=spec.payload,
