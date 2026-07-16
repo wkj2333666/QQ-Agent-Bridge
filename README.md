@@ -76,6 +76,8 @@ cp config.example.yaml config.yaml
 # - onebot.access_token
 # - bot.self_id after QQ gateway login
 
+# This environment is only for the bridge itself and its tests.
+# Agent tasks run separately in micromamba's base environment.
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -320,8 +322,11 @@ agent:
 Supported template placeholders are `{prompt}`, `{workspace}`, `{mode}`,
 `{model}`, and `{stream}`. Exact Codex or Claude Code flags are not hardcoded
 because their CLIs evolve; keep those details in your config or wrapper script.
-If your custom command is not launched through micromamba, set `env_runner: ""`
-and `require_env: false`.
+Agent processes are intentionally required to run through the existing
+`micromamba run -n base` environment. Do not disable this guard and do not let
+an Agent create `.venv`, `venv`, `env`, or install dependencies inside the
+workspace. If the base environment lacks a dependency, report the missing
+dependency and provision it outside the workspace before retrying.
 
 Key safety choices:
 

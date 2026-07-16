@@ -60,6 +60,7 @@ cp config.example.yaml config.yaml
 # - onebot.access_token
 # - QQ 网关登录后填写 bot.self_id
 
+# 这个环境只用于运行 bridge 和测试；Agent 任务单独使用 micromamba base。
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -281,12 +282,16 @@ agent:
 
 Codex 和 Claude Code 的 CLI 参数不会被写死在项目里，因为这些 CLI 变化较快。建议把具体参数放在 `config.yaml` 或一个 wrapper script 里。
 
-如果你的 custom command 不通过 micromamba 启动，请设置：
+Agent 进程统一要求通过已有的 `micromamba run -n base` 环境启动。不要关闭
+这个保护，也不要让 Agent 在 workspace 中创建 `.venv`、`venv`、`env` 或自行
+安装依赖。如果 base 环境缺少依赖，应先报告缺失项，在 workspace 外准备好
+环境后再重试。
 
 ```yaml
 agent:
-  env_runner: ""
-  require_env: false
+  env_runner: "micromamba"
+  env_name: "base"
+  require_env: true
 ```
 
 关键安全约束：
