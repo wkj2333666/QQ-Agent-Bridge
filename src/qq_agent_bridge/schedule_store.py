@@ -30,6 +30,7 @@ class ScheduleStore:
                     is_group INTEGER NOT NULL,
                     creator_id TEXT NOT NULL,
                     source_message_id TEXT NOT NULL,
+                    reply_to_message_id TEXT,
                     kind TEXT NOT NULL,
                     action TEXT NOT NULL,
                     payload TEXT NOT NULL,
@@ -86,6 +87,8 @@ class ScheduleStore:
             conn.execute("ALTER TABLE schedules ADD COLUMN rrule TEXT")
         if "description" not in columns:
             conn.execute("ALTER TABLE schedules ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        if "reply_to_message_id" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN reply_to_message_id TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
@@ -99,13 +102,13 @@ class ScheduleStore:
             conn.execute(
                 """
                 INSERT INTO schedules (
-                    id, chat_id, is_group, creator_id, source_message_id,
+                    id, chat_id, is_group, creator_id, source_message_id, reply_to_message_id,
                     kind, action, payload, mentions_json, timezone,
                     start_at, next_run_at, rrule, description, status,
                     run_count, success_count, failure_count, missed_count,
                     consecutive_failures, created_at, updated_at, last_run_at, last_error
                 ) VALUES (
-                    :id, :chat_id, :is_group, :creator_id, :source_message_id,
+                    :id, :chat_id, :is_group, :creator_id, :source_message_id, :reply_to_message_id,
                     :kind, :action, :payload, :mentions_json, :timezone,
                     :start_at, :next_run_at, :rrule, :description, :status,
                     :run_count, :success_count, :failure_count, :missed_count,
@@ -467,6 +470,11 @@ class ScheduleStore:
             is_group=bool(row["is_group"]),
             creator_id=str(row["creator_id"]),
             source_message_id=str(row["source_message_id"]),
+            reply_to_message_id=(
+                str(row["reply_to_message_id"])
+                if "reply_to_message_id" in columns and row["reply_to_message_id"]
+                else None
+            ),
             kind=str(row["kind"]),
             action=str(row["action"]),
             payload=str(row["payload"]),
