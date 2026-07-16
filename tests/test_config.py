@@ -18,7 +18,17 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_example_config_enables_read_only_commands() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 
-    for command in ("ask", "plan", "search", "task", "status", "help", "profile", "mode"):
+    for command in (
+        "ask",
+        "plan",
+        "search",
+        "task",
+        "status",
+        "help",
+        "permission",
+        "profile",
+        "mode",
+    ):
         assert cfg.is_command_allowed(command), command
 
 
@@ -124,6 +134,7 @@ def test_example_config_enables_owner_reset_and_memory() -> None:
     assert cfg.ambient_memory.max_messages > 0
     assert cfg.ambient_memory.max_chars > 0
     assert cfg.ambient_memory.max_age_seconds > 0
+    assert cfg.command_groups == {}
 
 
 def test_agent_config_has_fast_chat_and_task_models() -> None:

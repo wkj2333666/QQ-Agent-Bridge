@@ -183,6 +183,28 @@ def test_explicit_command_access_levels_control_authorization() -> None:
     assert reason == "cmd-disabled"
 
 
+def test_group_command_permission_overrides_global_access_for_group_only() -> None:
+    cfg = BridgeConfig(
+        owners=["owner"],
+        allowed_users=["reader"],
+        allowed_groups=["group"],
+        commands={"ask": True, "task": True},
+        workspaces={"/tmp": True},
+    )
+    cfg.command_groups = {"group": {"task": "disabled", "ask": "owner"}}
+    pol = Policy(cfg, fake_runner)
+
+    task_ok, task_reason = pol.allow(make_ev("/task x", sender="reader", group="group", mid="group-task"), "task")
+    ask_ok, ask_reason = pol.allow(make_ev("/ask x", sender="reader", group="group", mid="group-ask"), "ask")
+    owner_ok, owner_reason = pol.allow(make_ev("/ask x", sender="owner", group="group", mid="owner-ask"), "ask")
+    private_ok, private_reason = pol.allow(make_ev("/task x", sender="reader", mid="private-task"), "task")
+
+    assert not task_ok and task_reason == "cmd-disabled"
+    assert not ask_ok and ask_reason == "owner-only"
+    assert owner_ok, owner_reason
+    assert private_ok, private_reason
+
+
 def test_disabled_command_wins_over_owner_requirement() -> None:
     cfg = BridgeConfig(
         owners=["owner"],

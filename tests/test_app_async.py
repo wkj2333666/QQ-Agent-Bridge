@@ -1586,6 +1586,73 @@ def test_help_is_role_aware_and_qq_friendly() -> None:
     asyncio.run(go())
 
 
+def test_command_help_is_handled_without_starting_agent_job() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.commands["permission"] = True
+        cfg.commands["schedule"] = True
+        calls: list[str] = []
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            calls.append(cmd)
+            return "unexpected agent call"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(make_ev("/task help", sender="reader", mid="task-help"))
+        await app._handle(make_ev("/help task", sender="reader", mid="help-task"))
+        await app._handle(make_ev("/schedule help", sender="reader", mid="schedule-help"))
+
+        assert calls == []
+        assert len(adapter.sent) == 3
+        assert all("用法" in item[2] and "权限" in item[2] for item in adapter.sent)
+        assert all("task" in item[2] for item in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_group_permission_command_persists_owner_override_and_rejects_reader(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.commands["permission"] = True
+        app = make_app(cfg, lambda *_args: "unused", adapter)
+        app.config_path = tmp_path / "config.yaml"
+
+        await app._handle(
+            make_ev("/permission set task disabled", sender="reader", group="group", mid="perm-reader")
+        )
+        assert adapter.sent[-1][2] == "[denied] owner-only"
+
+        await app._handle(
+            make_ev("/permission set task disabled", sender="owner", group="group", mid="perm-owner")
+        )
+        assert "已将本群 /task 权限设为 disabled" in adapter.sent[-1][2]
+        loaded = BridgeConfig.load(app.config_path)
+        assert loaded.command_groups["group"]["task"] == "disabled"
+
+        await app._handle(make_ev("/permission clear task", sender="owner", group="group", mid="perm-clear"))
+        assert "已清除本群 /task 权限覆盖" in adapter.sent[-1][2]
+        assert "task" not in BridgeConfig.load(app.config_path).command_groups.get("group", {})
+
+    asyncio.run(go())
+
+
+def test_mode_set_respects_group_command_permission_override() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.command_groups = {"group": {"task": "disabled"}}
+        app = make_app(cfg, lambda *_args: "unused", adapter)
+
+        await app._handle(make_ev("/mode set task", sender="owner", group="group", mid="mode-disabled"))
+
+        assert adapter.sent[-1][2] == "设置失败：/task 当前未启用。"
+
+    asyncio.run(go())
+
+
 def test_self_question_uses_local_reply_without_cursor() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
