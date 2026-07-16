@@ -149,7 +149,7 @@ ws://127.0.0.1:8765/onebot
 - `/profile set <提示词>`：设置当前群或当前私聊的 profile。
 - `/profile clear`：清空当前群或当前私聊的 profile。
 - `/mode`：查看本群无命令 @ 消息的默认模式。
-- `/mode set ask|plan|task`：设置本群默认模式。
+- `/mode set chat|ask|plan|task`：设置本群默认模式；`chat` 先走闲聊判定，其余模式直接执行。
 - `/mode clear`：清除本群覆盖，恢复全局默认模式。
 
 每个命令都可以在 `config.yaml` 中单独配置权限级别：
@@ -189,7 +189,7 @@ owner 专用命令：
 非 owner 创建定时任务时，时间解析和安全审查合并为一次模型调用；高频刷屏、资源消耗过大、
 递归扩散或危险操作会在写入数据库前被拒绝。owner 创建的任务跳过这层额外安全审查。
 
-无显式命令的 @ 消息仍会先经过闲聊/问答判断：闲聊继续走插话流程；只有判定为需要回答时，才使用本群的 `ask`、`plan` 或 `task` 默认模式。显式 `/ask`、`/task` 等命令不受 `/mode` 影响。修改会写回 `config.yaml`，重启后保留。
+无显式命令的 @ 消息如何处理由本群 `mode` 决定：`chat` 会先经过闲聊判定，模型决定需要回答时再进入 `ask`；`ask`、`plan`、`task` 则直接进入对应模式，跳过这次判定。无论 mode 如何设置，不 @ 我的普通群聊仍会进入群聊记忆和主动插话流程。修改会写回 `config.yaml`，重启后保留。
 
 群聊里能否创建、暂停、恢复、立即执行或取消定时任务，由当前群 `/schedule`
 权限决定；开启 `scheduler.allow_private_users` 后，允许的私聊用户可以管理自己的定时任务。
@@ -241,7 +241,11 @@ mention_modes:
     "2000000001": task
 ```
 
-只支持 `ask`、`plan`、`task`；对应命令必须同时在 `commands` 中启用。`code` 和 `shell` 不能设为隐式默认模式。
+设置为 `chat` 时，@我会先判断是不是适合插话；设置为 `ask`、`plan` 或 `task` 时，
+会直接进入对应模式。无论是哪种模式，不 @ 我的普通群聊仍会进入群聊记忆和主动插话流程。
+
+只支持 `chat`、`ask`、`plan`、`task`；`ask`、`plan`、`task` 对应命令必须同时在
+`commands` 中启用，`chat` 使用 `/ask` 的权限进行闲聊判定。`code` 和 `shell` 不能设为隐式默认模式。
 
 ## Agent Runtime
 

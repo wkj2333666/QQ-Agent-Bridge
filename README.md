@@ -182,7 +182,7 @@ Common commands:
 - `/profile set <prompt>`: set the current private or group profile.
 - `/profile clear`: clear the current private or group profile.
 - `/mode`: show the default mode for commandless mentions in this group.
-- `/mode set ask|plan|task`: set this group's default mention mode.
+- `/mode set chat|ask|plan|task`: `chat` runs the interjection decision; the other modes execute directly.
 - `/mode clear`: remove the group override and use the global default.
 
 Command access is configured independently in `config.yaml`:
@@ -276,8 +276,13 @@ mention_modes:
     "2000000001": task
 ```
 
-Only `ask`, `plan`, and `task` are accepted, and the corresponding command must
-also be enabled. Risky modes such as `code` and `shell` cannot be implicit.
+Set a group to `chat` when an @ should first be treated as casual conversation. `ask`,
+`plan`, and `task` skip that decision and directly enter the selected mode. Messages
+without an @ still feed the ambient memory and proactive interjection flow in every mode.
+
+Only `chat`, `ask`, `plan`, and `task` are accepted. For `ask`, `plan`, and `task`,
+the corresponding command must also be enabled; `chat` uses the `/ask` permission
+for its decision step. Risky modes such as `code` and `shell` cannot be implicit.
 
 ## Agent Runtime
 

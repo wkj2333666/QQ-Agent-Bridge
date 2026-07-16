@@ -259,6 +259,19 @@ mention_modes:
     assert cfg.mention_mode_for_group("other") == "task"
 
 
+def test_config_accepts_chat_mention_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "mention_modes:\n  default: chat\n  groups:\n    group: chat\n",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(config_path)
+
+    assert cfg.mention_modes.default == "chat"
+    assert cfg.mention_mode_for_group("group") == "chat"
+
+
 def test_example_config_enables_resource_passthrough() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 
