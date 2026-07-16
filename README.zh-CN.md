@@ -235,7 +235,7 @@ profiles:
 
 ```yaml
 mention_modes:
-  default: ask
+  default: chat
   groups:
     "2000000001": task
 ```

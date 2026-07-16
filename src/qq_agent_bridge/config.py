@@ -170,7 +170,7 @@ class ProfileConfig:
 
 @dataclass
 class MentionModeConfig:
-    default: str = "ask"
+    default: str = "chat"
     groups: dict[str, str] = field(default_factory=dict)
 
 
@@ -395,7 +395,7 @@ def _resolve_command_access(name: str, value: bool | CommandAccess) -> CommandAc
 def _load_mention_modes(raw: Any) -> MentionModeConfig:
     if not isinstance(raw, dict):
         return MentionModeConfig()
-    default = _mention_mode(raw.get("default")) or "ask"
+    default = _mention_mode(raw.get("default")) or "chat"
     groups: dict[str, str] = {}
     raw_groups = raw.get("groups", {})
     if isinstance(raw_groups, dict):

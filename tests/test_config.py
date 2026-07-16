@@ -226,12 +226,12 @@ def test_example_config_documents_empty_profile_maps() -> None:
     assert cfg.profiles.users == {}
 
 
-def test_example_config_defaults_group_mentions_to_ask() -> None:
+def test_example_config_defaults_group_mentions_to_chat() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 
-    assert cfg.mention_modes.default == "ask"
+    assert cfg.mention_modes.default == "chat"
     assert cfg.mention_modes.groups == {}
-    assert cfg.mention_mode_for_group("any-group") == "ask"
+    assert cfg.mention_mode_for_group("any-group") == "chat"
 
 
 def test_config_loads_isolated_group_mention_modes_and_drops_unsafe_values(
