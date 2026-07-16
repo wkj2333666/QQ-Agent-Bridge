@@ -290,6 +290,9 @@ Agent 进程统一要求通过已有的 `micromamba run -n base` 环境启动。
 安装依赖。如果 base 环境缺少依赖，应先报告缺失项，在 workspace 外准备好
 环境后再重试。
 
+Bubblewrap 网络访问通过 `agent.share_network` 显式开启。离线任务保持
+`false`；只有需要联网搜索等能力时才设置为 `true`。
+
 ```yaml
 agent:
   env_runner: "micromamba"

@@ -781,6 +781,9 @@ class ProactiveSpeaker:
         for key, value in fields.items():
             if value is None:
                 continue
+            if key in {"text", "raw", "reply"}:
+                parts.append(f"{key}_chars={len(str(value))}")
+                continue
             text = redact(str(value)).replace("\n", " ").strip()
             if len(text) > 180:
                 text = text[:177] + "..."

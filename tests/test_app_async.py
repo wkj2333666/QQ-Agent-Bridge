@@ -12,6 +12,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.main as main_module  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CustomCommandAdapter  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
@@ -1286,6 +1287,32 @@ def test_private_user_can_update_own_profile(tmp_path: Path) -> None:
         assert loaded.profiles.users["reader"] == "你是私聊学习搭子"
         assert app.cfg.profiles.users["reader"] == "你是私聊学习搭子"
         assert adapter.sent == [("reader", False, "已更新你的私聊 profile", "profile-private-set")]
+
+    asyncio.run(go())
+
+
+def test_profile_write_failure_rolls_back_runtime_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.profiles.users["reader"] = "旧 profile"
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("profiles: {default: '', groups: {}, users: {}}\n", encoding="utf-8")
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            return "unused"
+
+        def fail_write(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("read-only config")
+
+        monkeypatch.setattr(main_module, "write_profiles_to_config", fail_write)
+        app = make_app(cfg, runner, adapter)
+        app.config_path = config_path
+
+        await app._handle(make_ev("/profile set 新 profile", sender="reader", mid="profile-fail"))
+
+        assert app.cfg.profiles.users["reader"] == "旧 profile"
+        assert adapter.sent == [("reader", False, "[error] profile 写入失败", "profile-fail")]
 
     asyncio.run(go())
 
