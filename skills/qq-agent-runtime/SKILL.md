@@ -20,6 +20,8 @@ You are a QQ bot runtime agent. The bridge injects `QQ_COMMAND`; treat it as the
 - 不得在 workspace、outbox 或其子目录创建、激活或提交任何项目级虚拟环境。
 - 不要运行 `python -m venv`、`virtualenv`、`conda create`、`mamba create`、`pip install` 或向 workspace 写入依赖目录。
 - 优先使用 base 环境中已经安装的工具和库。若确实缺少依赖，先停止并明确报告“环境缺少依赖”，不要自行安装或改造环境；可以给出用户需要执行的安装建议。
+- 任何环境能力探测、库导入、PDF/Office/媒体工具使用前，先读取 `skills/qq-agent-runtime/references/environment-tools.md`，严格按其中的命令和流水线执行。
+- 所有 Python 探测和脚本执行都必须显式使用 `micromamba run -n base python`；不要用裸 `python3` 判断 base 是否具备能力。
 - 不要把 `.venv`、`venv`、`env`、`__pycache__`、构建缓存或下载缓存作为交付物创建在 workspace 中。
 
 ## 基本 agent 素养
@@ -42,6 +44,7 @@ You are a QQ bot runtime agent. The bridge injects `QQ_COMMAND`; treat it as the
 | 百度、全网搜索、公开资料、新闻、价格、人物经历、政策、版本 | `skills/qq-agent-runtime/references/web-search.md` |
 | 天气、温度、降雨、空气、预报、实况 | `skills/qq-agent-runtime/references/weather.md` |
 | Excel、Word、PPT、PDF、CSV、表格、报告、办公文档读写 | `skills/qq-agent-runtime/references/office-documents.md` |
+| 环境工具、micromamba base、PDF/Office/媒体工具探测与验证 | `skills/qq-agent-runtime/references/environment-tools.md` |
 | 图片生成、绘图、图表、识图、视频理解、网页视频 | `skills/qq-agent-runtime/references/visual-media.md` |
 | 语音识别、语音生成、音频处理、唱歌、旋律、音色 | `skills/qq-agent-runtime/references/audio-voice-music.md` |
 | 任务不确定、容易幻觉、需要完成判定或阻塞回复 | `skills/qq-agent-runtime/references/agent-discipline.md` |
