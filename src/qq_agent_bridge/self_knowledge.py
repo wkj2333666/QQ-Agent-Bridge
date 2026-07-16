@@ -13,6 +13,7 @@ READABLE_COMMANDS: tuple[tuple[str, str], ...] = (
     ("schedule", "定时任务"),
     ("status", "看状态"),
     ("help", "看帮助"),
+    ("permission", "看权限"),
     ("profile", "人设"),
     ("mode", "默认模式"),
 )
@@ -35,6 +36,7 @@ def build_help_reply(cfg: BridgeConfig, ev: ChatEvent) -> str:
         cfg,
         include_owner=cfg.is_owner(ev.sender_id),
         is_group=ev.is_group,
+        group_id=ev.chat_id if ev.is_group else None,
     )
     memory = _memory_capability(cfg, ev)
     proactive = _proactive_capability(cfg, ev)
@@ -49,6 +51,7 @@ def build_prompt_self_knowledge(cfg: BridgeConfig, ev: ChatEvent) -> str:
         cfg,
         include_owner=cfg.is_owner(ev.sender_id),
         is_group=ev.is_group,
+        group_id=ev.chat_id if ev.is_group else None,
     )
     memory = _prompt_memory_capability(cfg, ev)
     profile_prompt = select_profile_prompt(cfg, ev)
@@ -92,6 +95,7 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
             cfg,
             include_owner=cfg.is_owner(ev.sender_id),
             is_group=ev.is_group,
+            group_id=ev.chat_id if ev.is_group else None,
         )
         suffix = f"常用命令：{'、'.join(cmds)}。" if cmds else "当前没有开启可用命令。"
         return f"我能答问题、拆方案、帮你在允许的项目里检索信息。{suffix}"
@@ -111,23 +115,38 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
     return None
 
 
-def _command_labels(cfg: BridgeConfig, include_owner: bool, *, is_group: bool) -> list[str]:
+def _command_labels(
+    cfg: BridgeConfig,
+    include_owner: bool,
+    *,
+    is_group: bool,
+    group_id: str | None,
+) -> list[str]:
     commands = [
         f"/{name} {desc}"
         for name, desc in READABLE_COMMANDS
-        if _command_visible(cfg, name, include_owner)
+        if _command_visible(cfg, name, include_owner, group_id)
         and (name != "mode" or is_group)
     ]
     commands.extend(
         f"/{name} {desc}"
         for name, desc in OWNER_COMMANDS
-        if _command_visible(cfg, name, include_owner)
+        if _command_visible(cfg, name, include_owner, group_id)
     )
     return commands
 
 
-def _command_visible(cfg: BridgeConfig, name: str, include_owner: bool) -> bool:
-    access = cfg.command_access(name)
+def _command_visible(
+    cfg: BridgeConfig,
+    name: str,
+    include_owner: bool,
+    group_id: str | None,
+) -> bool:
+    access = (
+        cfg.command_access(name, group_id)
+        if group_id is not None
+        else cfg.command_access(name)
+    )
     return access == "user" or (access == "owner" and include_owner)
 
 

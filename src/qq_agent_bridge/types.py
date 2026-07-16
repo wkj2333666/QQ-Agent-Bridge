@@ -77,6 +77,7 @@ CommandName = Literal[
     "approve",
     "shell",
     "help",
+    "permission",
     "profile",
     "mode",
     "reset",
