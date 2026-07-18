@@ -3404,7 +3404,7 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
         cfg.workspaces = {str(tmp_path): True}
         cfg.agent.default_workspace = str(tmp_path)
         cfg.progress.min_progress_interval_seconds = 0
-        cfg.progress.max_progress_messages = 10
+        cfg.progress.max_progress_messages = 24
 
         async def fake_agent(
             prompt: str,
@@ -3418,10 +3418,18 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
             report.write_bytes(b"report")
             assert progress is not None
             await progress("正在下载视频")
+            await progress("正在转写音频")
+            await progress("正在生成 PDF")
             await progress("文件发你了")
             await progress("文件已经发送完毕")
             await progress("报告上传完成")
             await progress("附件已成功交付")
+            await progress("已经发给你了")
+            await progress("发送完毕")
+            await progress("Sent!")
+            await progress("Delivered")
+            await progress("Uploaded")
+            await progress("Attached")
             await progress(
                 f"已发送文件\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
             )
@@ -3439,11 +3447,19 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
 
         pre_ack_text = "\n".join(item[2] for item in adapter.sent)
         assert "正在下载视频" in pre_ack_text
+        assert "正在转写音频" in pre_ack_text
+        assert "正在生成 PDF" in pre_ack_text
         assert "正在验证并发送任务输出。" in pre_ack_text
         assert "文件发你了" not in pre_ack_text
         assert "文件已经发送完毕" not in pre_ack_text
         assert "报告上传完成" not in pre_ack_text
         assert "附件已成功交付" not in pre_ack_text
+        assert "已经发给你了" not in pre_ack_text
+        assert "发送完毕" not in pre_ack_text
+        assert "Sent!" not in pre_ack_text
+        assert "Delivered" not in pre_ack_text
+        assert "Uploaded" not in pre_ack_text
+        assert "Attached" not in pre_ack_text
         assert "已发送文件" not in pre_ack_text
 
         adapter.release_ack.set()

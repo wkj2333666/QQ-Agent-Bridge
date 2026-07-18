@@ -59,13 +59,23 @@ _ARTIFACT_DELIVERY_ACTION_RE = re.compile(
     r"\b(?:send|sent|deliver(?:ed)?|upload(?:ed)?|attach(?:ed)?)\b)",
     re.IGNORECASE,
 )
+_ARTIFACT_COMPLETED_ACTION_ONLY_RE = re.compile(
+    r"^\s*(?:(?:(?:已经|已)\s*)?(?:发给你|发你)(?:了|啦)|"
+    r"(?:(?:已经|已)\s*)?(?:发送|上传|交付|附加)(?:完成|完毕|成功|好了)|"
+    r"(?:已经|已)\s*(?:发送|上传|交付|附加)|"
+    r"(?:successfully\s+)?(?:sent|delivered|uploaded|attached)[.!！。]?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _PRE_ACK_DELIVERY_PROGRESS = "正在验证并发送任务输出。"
 
 
 def _claims_artifact_delivery(text: str) -> bool:
     return bool(
-        _ARTIFACT_PROGRESS_NOUN_RE.search(text)
-        and _ARTIFACT_DELIVERY_ACTION_RE.search(text)
+        (
+            _ARTIFACT_PROGRESS_NOUN_RE.search(text)
+            and _ARTIFACT_DELIVERY_ACTION_RE.search(text)
+        )
+        or _ARTIFACT_COMPLETED_ACTION_ONLY_RE.search(text)
     )
 
 

@@ -1,6 +1,7 @@
 """Outgoing resource directive parsing tests."""
 from __future__ import annotations
 
+import os
 import sys
 import shutil
 import wave
@@ -9,7 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
+import qq_agent_bridge.outgoing_resources as outgoing_resources  # type: ignore
 from qq_agent_bridge.outgoing_resources import (  # type: ignore
+    ArtifactExpectation,
     collect_outgoing_resources,
     inspect_outgoing_resources,
 )
@@ -34,6 +37,26 @@ def write_wav(path: Path, duration_seconds: int, sample_rate: int = 8000) -> Non
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(frames)
+
+
+def install_copy_race(monkeypatch, mutate) -> None:
+    """Run a mutation after source fstat but before bytes are copied."""
+    bounded_copy = getattr(outgoing_resources, "_copy_stream_bounded", None)
+    if bounded_copy is not None:
+        def raced_bounded_copy(src, dst, expected_size):
+            mutate(src)
+            return bounded_copy(src, dst, expected_size)
+
+        monkeypatch.setattr(outgoing_resources, "_copy_stream_bounded", raced_bounded_copy)
+        return
+
+    original_copy = outgoing_resources.shutil.copyfileobj
+
+    def raced_copyfileobj(src, dst, *args, **kwargs):
+        mutate(src)
+        return original_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(outgoing_resources.shutil, "copyfileobj", raced_copyfileobj)
 
 
 def test_recovers_existing_file_when_prose_is_glued_to_directive_path(tmp_path: Path) -> None:
@@ -71,6 +94,9 @@ def test_structured_inspection_reports_unresolved_missing_directive(tmp_path: Pa
     assert result.attempted == 1
     assert result.unresolved == 1
     assert result.warnings == ("无法发送资源：文件不存在或不是普通文件",)
+    assert result.unresolved_expectations == (
+        ArtifactExpectation(kind="file", requested_basename="missing.pdf"),
+    )
 
 
 def test_recovers_unique_top_level_outbox_file_after_broken_directive(tmp_path: Path) -> None:
@@ -370,6 +396,54 @@ def test_unique_discovery_can_be_disabled(tmp_path: Path) -> None:
 
     assert result.resources == ()
     assert result.recovered == 0
+
+
+def test_unique_discovery_aborts_when_entry_cap_is_exceeded(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"report")
+    for index in range(256):
+        (outbox / f".ignored-{index:03d}").write_bytes(b"ignored")
+
+    result = inspect_outgoing_resources(
+        "文件已经整理好",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_repeated_malformed_directives_share_one_bounded_candidate_scan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outbox = make_outbox(tmp_path)
+    original_scan = outgoing_resources._eligible_top_level_files
+    scans = 0
+
+    def counting_scan(path: Path, max_bytes: int):
+        nonlocal scans
+        scans += 1
+        return original_scan(path, max_bytes)
+
+    monkeypatch.setattr(outgoing_resources, "_eligible_top_level_files", counting_scan)
+
+    result = inspect_outgoing_resources(
+        "\n".join(
+            f"QQBOT_SEND_FILE: send-token missing-{index}.pdf" for index in range(3)
+        ),
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.unresolved == 3
+    assert scans == 1
 
 
 def test_collects_image_and_file_directives_inside_workspace(tmp_path: Path) -> None:
@@ -716,6 +790,190 @@ def test_rejects_outbox_replaced_by_symlink_after_job_start(tmp_path: Path) -> N
     assert text == ""
     assert resources == ()
     assert warnings == ["已拒绝发送资源：输出目录状态变化"]
+
+
+def test_nested_parent_swap_never_stages_external_bytes(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    nested = outbox / "nested"
+    nested.mkdir()
+    source = nested / "report.pdf"
+    source.write_bytes(b"inside")
+    external = tmp_path / "external"
+    started = outbox.lstat()
+    original_open = outgoing_resources.os.open
+    swapped = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        shown = os.fspath(path)
+        if not swapped and (shown == os.fspath(source) or shown == "nested"):
+            nested.rename(external)
+            (external / "report.pdf").write_bytes(b"SECRET")
+            nested.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(outgoing_resources.os, "open", racing_open)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {source.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        expected_outbox=(started.st_dev, started.st_ino),
+    )
+
+    assert swapped is True
+    assert result.resources == ()
+    sending = tmp_path / "downloads" / "qq-agent-bridge" / "sending" / "job-1"
+    assert not sending.exists() or not list(sending.iterdir())
+
+
+def test_rejects_dot_and_dotdot_source_components(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    report = outbox / "report.pdf"
+    report.write_bytes(b"report")
+    outbox_rel = outbox.relative_to(tmp_path).as_posix()
+
+    for raw_path in (
+        f"{outbox_rel}/./report.pdf",
+        f"{outbox_rel}/nested/../report.pdf",
+    ):
+        result = inspect_outgoing_resources(
+            f"QQBOT_SEND_FILE: send-token {raw_path}",
+            make_cfg(tmp_path),
+            outbox_dir=outbox,
+            token="send-token",
+            job_id="job-1",
+            discover_unique=False,
+        )
+
+        assert result.resources == ()
+
+
+def test_source_growth_cannot_bypass_remaining_total_budget(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    first = outbox / "first.pdf"
+    second = outbox / "second.pdf"
+    first.write_bytes(b"one")
+    second.write_bytes(b"22")
+    second_inode = second.stat().st_ino
+    cfg = make_cfg(tmp_path)
+    cfg.resources.max_bytes = 8
+    cfg.resources.max_total_bytes = 5
+    mutated = False
+
+    def grow_second(src) -> None:
+        nonlocal mutated
+        if not mutated and os.fstat(src.fileno()).st_ino == second_inode:
+            with second.open("ab") as stream:
+                stream.write(b"GROW")
+            mutated = True
+
+    install_copy_race(monkeypatch, grow_second)
+
+    result = inspect_outgoing_resources(
+        "\n".join(
+            (
+                f"QQBOT_SEND_FILE: send-token {first.relative_to(tmp_path)}",
+                f"QQBOT_SEND_FILE: send-token {second.relative_to(tmp_path)}",
+            )
+        ),
+        cfg,
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert mutated is True
+    assert [resource.path.read_bytes() for resource in result.resources] == [b"one"]
+    sending = tmp_path / "downloads" / "qq-agent-bridge" / "sending" / "job-1"
+    sending_files = sorted(path.read_bytes() for path in sending.iterdir() if path.is_file())
+    assert sending_files == [b"one"]
+
+
+def test_same_size_source_rewrite_removes_staged_copy(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    source = outbox / "report.pdf"
+    source.write_bytes(b"safe")
+    os.utime(source, ns=(1_000_000_000, 1_000_000_000))
+    source_inode = source.stat().st_ino
+    mutated = False
+
+    def rewrite_source(src) -> None:
+        nonlocal mutated
+        if not mutated and os.fstat(src.fileno()).st_ino == source_inode:
+            source.write_bytes(b"EVIL")
+            mutated = True
+
+    install_copy_race(monkeypatch, rewrite_source)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {source.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert mutated is True
+    assert result.resources == ()
+    sending = tmp_path / "downloads" / "qq-agent-bridge" / "sending" / "job-1"
+    assert not sending.exists() or not list(sending.iterdir())
+
+
+def test_short_source_read_removes_staged_copy(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    source = outbox / "report.pdf"
+    source.write_bytes(b"report")
+    source_inode = source.stat().st_ino
+
+    def truncate_source(src) -> None:
+        if os.fstat(src.fileno()).st_ino == source_inode:
+            source.write_bytes(b"x")
+
+    install_copy_race(monkeypatch, truncate_source)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {source.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert result.resources == ()
+    sending = tmp_path / "downloads" / "qq-agent-bridge" / "sending" / "job-1"
+    assert not sending.exists() or not list(sending.iterdir())
+
+
+def test_voice_duration_is_probed_from_stable_staged_copy(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    voice = outbox / "reply.wav"
+    write_wav(voice, 1)
+    probed: list[Path] = []
+    original_probe = outgoing_resources._probe_audio_duration_seconds
+
+    def recording_probe(path: Path) -> float | None:
+        probed.append(path)
+        return original_probe(path)
+
+    monkeypatch.setattr(outgoing_resources, "_probe_audio_duration_seconds", recording_probe)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_VOICE: send-token {voice.relative_to(tmp_path)} duration=1",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert len(result.resources) == 1
+    assert probed == [result.resources[0].path]
 
 
 def test_rejects_hardlink_inside_outbox(tmp_path: Path) -> None:

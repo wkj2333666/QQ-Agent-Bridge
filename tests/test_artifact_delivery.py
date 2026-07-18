@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.artifact_delivery import resolve_artifacts  # type: ignore
 from qq_agent_bridge.outgoing_resources import (  # type: ignore
+    ArtifactExpectation,
     ArtifactInspection,
     OutgoingResource,
 )
@@ -39,8 +40,9 @@ def inspection(
     warnings: tuple[str, ...] = (),
     attempted: int = 0,
     unresolved: int = 0,
+    expectations: tuple[ArtifactExpectation, ...] = (),
 ) -> ArtifactInspection:
-    return ArtifactInspection(text, resources, warnings, attempted, unresolved, 0)
+    return ArtifactInspection(text, resources, warnings, attempted, unresolved, 0, expectations)
 
 
 def test_resolution_skips_repair_for_verified_artifact(tmp_path: Path) -> None:
@@ -77,7 +79,12 @@ def test_resolution_repairs_unresolved_artifact_once(tmp_path: Path) -> None:
             inspected.append(text)
             if text == "repair-output":
                 return inspection(resources=(make_resource(tmp_path),), attempted=1)
-            return inspection(warnings=("missing",), attempted=1, unresolved=1)
+            return inspection(
+                warnings=("missing",),
+                attempted=1,
+                unresolved=1,
+                expectations=(ArtifactExpectation("file", "report.pdf"),),
+            )
 
         async def repair(warnings: tuple[str, ...]) -> str:
             assert warnings == ("missing",)
@@ -98,6 +105,85 @@ def test_resolution_repairs_unresolved_artifact_once(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_resolution_does_not_verify_unrelated_repair_basename(tmp_path: Path) -> None:
+    async def go() -> None:
+        debug_log = make_resource(tmp_path, "debug.log", b"debug")
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(resources=(debug_log,), attempted=1)
+                if text == "repair-output"
+                else inspection(
+                    warnings=("missing report",),
+                    attempted=1,
+                    unresolved=1,
+                    expectations=(ArtifactExpectation("file", "report.pdf"),),
+                )
+            ),
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (debug_log,)
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
+def test_resolution_verifies_matching_repair_basename(tmp_path: Path) -> None:
+    async def go() -> None:
+        report = make_resource(tmp_path, "report.pdf", b"report")
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(resources=(report,), attempted=1)
+                if text == "repair-output"
+                else inspection(
+                    warnings=("missing report",),
+                    attempted=1,
+                    unresolved=1,
+                    expectations=(ArtifactExpectation("file", "report.pdf"),),
+                )
+            ),
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (report,)
+        assert result.repair_attempted is True
+        assert result.verified is True
+
+    asyncio.run(go())
+
+
+def test_resolution_does_not_promote_legacy_unresolved_count_without_metadata(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        report = make_resource(tmp_path, "report.pdf", b"report")
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(resources=(report,), attempted=1)
+                if text == "repair-output"
+                else inspection(warnings=("missing",), attempted=1, unresolved=1)
+            ),
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
 def test_resolution_requires_one_new_resource_per_originally_unresolved_directive(
     tmp_path: Path,
 ) -> None:
@@ -113,6 +199,10 @@ def test_resolution_requires_one_new_resource_per_originally_unresolved_directiv
                     warnings=("first missing", "second missing"),
                     attempted=2,
                     unresolved=2,
+                    expectations=(
+                        ArtifactExpectation("file", "first.pdf"),
+                        ArtifactExpectation("file", "second.pdf"),
+                    ),
                 )
             ),
             repair=lambda _warnings: _completed("repair-output"),
@@ -143,6 +233,10 @@ def test_resolution_verifies_when_repair_covers_every_originally_unresolved_dire
                     warnings=("first missing", "second missing"),
                     attempted=2,
                     unresolved=2,
+                    expectations=(
+                        ArtifactExpectation("file", "first.pdf"),
+                        ArtifactExpectation("file", "second.pdf"),
+                    ),
                 )
             ),
             repair=lambda _warnings: _completed("repair-output"),
@@ -168,6 +262,7 @@ def test_resolution_does_not_verify_empty_repair_from_initial_resources(tmp_path
                     warnings=("missing",),
                     attempted=2,
                     unresolved=1,
+                    expectations=(ArtifactExpectation("file", "second.pdf"),),
                 )
             return inspection()
 
@@ -271,6 +366,7 @@ def test_resolution_deduplicates_repair_resources(tmp_path: Path) -> None:
                 warnings=("missing",),
                 attempted=1,
                 unresolved=1,
+                expectations=(ArtifactExpectation("file", "second.pdf"),),
             )
 
         result = await resolve_artifacts(
@@ -309,6 +405,7 @@ def test_resolution_does_not_count_same_source_with_new_kind_as_repair(
                 warnings=("missing",),
                 attempted=2,
                 unresolved=1,
+                expectations=(ArtifactExpectation("image", "plot.png"),),
             )
 
         result = await resolve_artifacts(
@@ -335,7 +432,11 @@ def test_resolution_rejects_merged_item_count_over_budget(tmp_path: Path) -> Non
             if text == "repair-output":
                 return inspection(resources=(second,), attempted=1)
             return inspection(
-                resources=(first,), warnings=("missing",), attempted=1, unresolved=1
+                resources=(first,),
+                warnings=("missing",),
+                attempted=1,
+                unresolved=1,
+                expectations=(ArtifactExpectation("file", "second.pdf"),),
             )
 
         result = await resolve_artifacts(
@@ -361,7 +462,11 @@ def test_resolution_rejects_merged_total_size_over_budget(tmp_path: Path) -> Non
             if text == "repair-output":
                 return inspection(resources=(second,), attempted=1)
             return inspection(
-                resources=(first,), warnings=("missing",), attempted=1, unresolved=1
+                resources=(first,),
+                warnings=("missing",),
+                attempted=1,
+                unresolved=1,
+                expectations=(ArtifactExpectation("file", "second.pdf"),),
             )
 
         result = await resolve_artifacts(
