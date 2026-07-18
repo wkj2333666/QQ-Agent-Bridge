@@ -2102,6 +2102,7 @@ def test_task_ansi_split_token_and_outbox_are_redacted_everywhere(tmp_path: Path
             assert sensitive not in visible
             assert sensitive not in history
         assert token not in stored_result
+        assert outbox_rel not in stored_result
         assert outbox_abs not in stored_result
         assert "progress ordinary-marker" in visible
         assert "final ordinary-marker" in visible
@@ -3418,6 +3419,9 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
             assert progress is not None
             await progress("正在下载视频")
             await progress("文件发你了")
+            await progress("文件已经发送完毕")
+            await progress("报告上传完成")
+            await progress("附件已成功交付")
             await progress(
                 f"已发送文件\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
             )
@@ -3437,6 +3441,9 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
         assert "正在下载视频" in pre_ack_text
         assert "正在验证并发送任务输出。" in pre_ack_text
         assert "文件发你了" not in pre_ack_text
+        assert "文件已经发送完毕" not in pre_ack_text
+        assert "报告上传完成" not in pre_ack_text
+        assert "附件已成功交付" not in pre_ack_text
         assert "已发送文件" not in pre_ack_text
 
         adapter.release_ack.set()
