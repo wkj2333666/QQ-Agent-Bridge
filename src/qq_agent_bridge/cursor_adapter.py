@@ -371,6 +371,7 @@ class CursorAdapter:
         model: str | None = None,
         progress: ProgressCallback | None = None,
         trace_id: str | None = None,
+        redact_extra: tuple[str, ...] | None = None,
     ) -> str:
         ws = workspace or self.cfg.agent.default_workspace
         if not self.cfg.is_workspace_allowed(ws):
@@ -389,7 +390,7 @@ class CursorAdapter:
         env = {k: os.environ.get(k, "") for k in self.cfg.agent.env_allowlist if k in os.environ}
         env["PATH"] = os.environ.get("PATH", "")
 
-        trace = AgentTrace(self.cfg, trace_id, mode, model, ws)
+        trace = AgentTrace(self.cfg, trace_id, mode, model, ws, redact_extra=redact_extra)
         if trace.path is not None:
             logger.info("agent trace: %s", trace.path)
         proc: asyncio.subprocess.Process | None = None
@@ -432,7 +433,7 @@ class CursorAdapter:
                 logger.warning(
                     "agent process failed with exit code %s: %s",
                     proc.returncode,
-                    redact(cleaned)[:1000],
+                    redact(cleaned, extra=redact_extra)[:1000],
                 )
                 if (
                     model
@@ -456,6 +457,7 @@ class CursorAdapter:
                         model="auto",
                         progress=progress,
                         trace_id=fallback_trace_id,
+                        redact_extra=redact_extra,
                     )
                 return "[error] 助手执行失败"
             return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"

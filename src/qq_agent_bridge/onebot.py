@@ -570,7 +570,7 @@ class OneBotAdapter:
                         data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
                         if not isinstance(data, dict):
                             continue
-                        if self._complete_action_response(data):
+                        if self._complete_action_response(data, conn):
                             continue
                         ev = _normalize_event(data, self.self_id, self.mention_name)
                         if ev and self._handler:
@@ -934,12 +934,20 @@ class OneBotAdapter:
             return None
         return response.get("data")
 
-    def _complete_action_response(self, data: dict[str, Any]) -> bool:
+    def _complete_action_response(
+        self,
+        data: dict[str, Any],
+        conn: ServerConnection | None = None,
+    ) -> bool:
         echo = data.get("echo")
         if echo is None:
             return False
-        fut = self._pending_actions.pop(str(echo), None)
-        self._pending_action_connections.pop(str(echo), None)
+        action_echo = str(echo)
+        selected = self._pending_action_connections.get(action_echo)
+        if conn is not None and selected is not conn:
+            return False
+        fut = self._pending_actions.pop(action_echo, None)
+        self._pending_action_connections.pop(action_echo, None)
         if not fut:
             return False
         if not fut.done():

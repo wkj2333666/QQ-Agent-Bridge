@@ -590,6 +590,30 @@ def test_scheduled_task_reuses_job_pipeline_and_sends_result(tmp_path: Path) -> 
     asyncio.run(go())
 
 
+def test_scheduled_artifact_validation_failure_counts_as_failed(tmp_path: Path) -> None:
+    async def go() -> None:
+        agent = FakeAgent(["QQBOT_SEND_FILE: wrong-token missing.pdf", ""])
+        app, adapter = make_app(tmp_path, agent)
+        now = int(datetime.now(tz=UTC).timestamp())
+
+        await app._handle(
+            make_event(
+                "/schedule in 1s -- task 生成报告文件",
+                mid="artifact-failure-create",
+            )
+        )
+        await app.scheduler.tick(now=now + 2)
+        await app.scheduler.wait_for_runs()
+        await drain_app(app)
+
+        saved = app.schedule_store.list_for_chat("group", True, active_only=False)[0]
+        assert saved.failure_count == 1
+        assert any("文件没有成功生成或无法验证" in item[2] for item in adapter.sent)
+        assert saved.last_error == "artifact delivery failed"
+
+    asyncio.run(go())
+
+
 def test_scheduled_task_mentions_target_in_progress_and_final_reply(tmp_path: Path) -> None:
     async def go() -> None:
         agent = FakeAgent(["该喝水了"])

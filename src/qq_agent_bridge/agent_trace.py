@@ -31,12 +31,14 @@ class AgentTrace:
         mode: str,
         model: str | None,
         workspace: str,
+        redact_extra: tuple[str, ...] | None = None,
     ) -> None:
         self._fh: Any | None = None
         self._started = time.monotonic()
         self._bytes_written = 0
         self._dropped_events = 0
         self._truncation_written = False
+        self._redact_extra = tuple(redact_extra or ())
         self.path: Path | None = None
         self._max_bytes = max(1, self._as_int(cfg.agent.trace_max_bytes, 5 * 1024 * 1024))
         self._max_line_chars = max(1, self._as_int(cfg.agent.trace_max_line_chars, 2000))
@@ -300,7 +302,7 @@ class AgentTrace:
         return f"<{type(value).__name__}>"
 
     def _safe_text(self, value: Any, limit: int) -> str:
-        return strip_ansi(redact(str(value)))[:limit]
+        return strip_ansi(redact(str(value), extra=self._redact_extra))[:limit]
 
     def _trace_root(self, configured: str, workspace: str) -> Path:
         configured_path = Path(configured or "runtime/agent-traces").expanduser()

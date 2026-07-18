@@ -60,6 +60,7 @@ class Job:
     state: str = "queued"
     result: str | None = field(default=None, repr=False)
     artifact_result: str | None = field(default=None, repr=False)
+    artifact_delivery_outcome: str | None = field(default=None, repr=False)
     allow_outgoing_resources: bool = False
     outgoing_dir: str | None = field(default=None, repr=False)
     outgoing_token: str | None = field(default=None, repr=False)
@@ -181,7 +182,10 @@ class Policy:
                 )
             job.state = "done"
             job.artifact_result = result if job.allow_outgoing_resources else None
-            job.result = redact(result)[: self.cfg.effective_max_chars()]
+            job.result = redact(
+                result,
+                extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+            )[: self.cfg.effective_max_chars()]
             return job.result
         except asyncio.CancelledError:
             job.state = "cancelled"

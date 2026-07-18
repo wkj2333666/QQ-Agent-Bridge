@@ -113,6 +113,44 @@ def test_trace_redacts_bare_resource_token_wording(tmp_path: Path) -> None:
     assert "[REDACTED]" in serialized
 
 
+def test_cursor_trace_and_failure_log_redact_job_scoped_bare_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "bare-job-resource-token"
+    outbox = (tmp_path / "downloads" / "outgoing" / "job-1").as_posix()
+    script = tmp_path / "agent.sh"
+    _write_script(
+        script,
+        f"printf '%s\\n' 'phase ordinary-marker {token} {outbox}' >&2; exit 1",
+    )
+    trace_root = _trace_root_for(tmp_path)
+    cfg = _config(tmp_path, trace_root)
+    cfg.agent.binary = str(script)
+    cfg.agent.force_task_tools = False
+
+    with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.cursor_adapter"):
+        result = asyncio.run(
+            CursorAdapter(cfg).run(
+                "hello",
+                str(tmp_path),
+                "task",
+                trace_id="job-scoped-redaction",
+                redact_extra=(token, outbox),
+            )
+        )
+
+    path, _records = _read_trace(trace_root)
+    serialized = path.read_text(encoding="utf-8")
+    assert result == "[error] 助手执行失败"
+    assert token not in serialized
+    assert outbox not in serialized
+    assert "ordinary-marker" in serialized
+    assert token not in caplog.text
+    assert outbox not in caplog.text
+    assert "ordinary-marker" in caplog.text
+
+
 def test_trace_root_and_file_are_private_when_supported(tmp_path: Path) -> None:
     trace_root = _trace_root_for(tmp_path)
     cfg = _config(tmp_path, trace_root)

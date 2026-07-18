@@ -23,6 +23,7 @@ class DisabledAgentAdapter:
         model: str | None = None,
         progress: ProgressCallback | None = None,
         trace_id: str | None = None,
+        redact_extra: tuple[str, ...] | None = None,
     ) -> str:
         return "[error] agent runtime 未配置，请在 config.yaml 里设置 agent.runtime"
 
@@ -47,6 +48,7 @@ async def run_agent(
     model: str | None = None,
     progress: ProgressCallback | None = None,
     trace_id: str | None = None,
+    redact_extra: tuple[str, ...] | None = None,
 ) -> str:
     """Call an Agent while keeping older test/custom adapters compatible."""
     kwargs: dict[str, Any] = {"model": model}
@@ -54,6 +56,8 @@ async def run_agent(
         kwargs["progress"] = progress
     if trace_id is not None and _supports_keyword(agent.run, "trace_id"):
         kwargs["trace_id"] = trace_id
+    if redact_extra is not None and _supports_keyword(agent.run, "redact_extra"):
+        kwargs["redact_extra"] = redact_extra
     return await agent.run(prompt, workspace, mode, **kwargs)
 
 
