@@ -424,6 +424,8 @@ def test_send_waits_for_matching_success_ack() -> None:
 
         assert frame["action"] == "send_group_msg"
         assert frame["echo"] == "send-ack"
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
 
     asyncio.run(go())
 
@@ -449,6 +451,8 @@ def test_send_reraises_transport_error_without_logging_exception_text(caplog: ob
 
         with pytest.raises(RuntimeError, match="sensitive transport detail"):
             await adapter.send("123", True, "hello", "transport-error")
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.onebot"):  # type: ignore[attr-defined]
         asyncio.run(go())
@@ -470,6 +474,78 @@ def test_send_fails_on_ack_timeout(monkeypatch: object) -> None:
 
         with pytest.raises(asyncio.TimeoutError):
             await adapter.send("123", True, "hello", "timeout")
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
+
+    asyncio.run(go())
+
+
+def test_send_uses_exactly_one_connected_gateway() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        first = FakeConn()
+        second = FakeConn()
+        adapter._conns.update((first, second))  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter.send("123", True, "hello", "single-gateway"))
+        for _ in range(10):
+            if first.frames or second.frames:
+                break
+            await asyncio.sleep(0)
+
+        assert len(first.frames) + len(second.frames) == 1
+        frame = json.loads((first.frames or second.frames)[0])
+        assert adapter._complete_action_response(  # type: ignore[attr-defined]
+            {"echo": frame["echo"], "status": "ok", "retcode": 0, "data": {}}
+        )
+        await task
+
+    asyncio.run(go())
+
+
+def test_disconnect_promptly_fails_pending_send_and_cleans_future() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        first = FakeConn()
+        second = FakeConn()
+        adapter._conns.update((first, second))  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter.send("123", True, "hello", "disconnect"))
+        for _ in range(10):
+            if first.frames or second.frames:
+                break
+            await asyncio.sleep(0)
+        selected = first if first.frames else second
+        pending = adapter._pending_actions["disconnect"]  # type: ignore[attr-defined]
+
+        adapter._remove_connection(selected)  # type: ignore[arg-type,attr-defined]
+
+        assert pending.done()
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(task, timeout=0.05)
+        assert selected not in adapter._conns  # type: ignore[operator,attr-defined]
+
+    asyncio.run(go())
+
+
+def test_send_cancellation_cleans_pending_future() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        task, _frame = await start_onebot_send(
+            adapter,
+            conn,
+            adapter.send("123", True, "hello", "cancelled-send"),
+        )
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
 
     asyncio.run(go())
 

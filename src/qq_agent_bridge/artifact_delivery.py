@@ -40,7 +40,7 @@ async def resolve_artifacts(
         return ArtifactResolution(first.clean_text, first.resources, first.warnings, False, False)
 
     repaired = inspect(await repair(first.warnings))
-    merged, budget_ok, repair_contributed = _merge_resources(
+    merged, budget_ok, repair_contributions = _merge_resources(
         first.resources,
         repaired.resources,
         max_items=max_items,
@@ -51,7 +51,9 @@ async def resolve_artifacts(
         merged,
         repaired.warnings,
         True,
-        repaired.unresolved == 0 and repair_contributed and budget_ok,
+        repaired.unresolved == 0
+        and repair_contributions >= first.unresolved
+        and budget_ok,
     )
 
 
@@ -61,11 +63,11 @@ def _merge_resources(
     *,
     max_items: int,
     max_total_bytes: int,
-) -> tuple[tuple[OutgoingResource, ...], bool, bool]:
+) -> tuple[tuple[OutgoingResource, ...], bool, int]:
     merged: list[OutgoingResource] = []
     seen: set[tuple[str, str]] = set()
     total = 0
-    repair_contributed = False
+    repair_contributions = 0
     for resources, from_repair in ((first, False), (repaired, True)):
         for resource in resources:
             source = resource.source_path or resource.path
@@ -73,9 +75,9 @@ def _merge_resources(
             if key in seen:
                 continue
             if len(merged) >= max(0, max_items) or total + resource.size_bytes > max_total_bytes:
-                return tuple(merged), False, repair_contributed
+                return tuple(merged), False, repair_contributions
             seen.add(key)
             merged.append(resource)
             total += resource.size_bytes
-            repair_contributed = repair_contributed or from_repair
-    return tuple(merged), True, repair_contributed
+            repair_contributions += int(from_repair)
+    return tuple(merged), True, repair_contributions

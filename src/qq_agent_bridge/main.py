@@ -88,6 +88,7 @@ class App:
         self.policy: Policy | None = None
         self._reply_tasks: set[asyncio.Task[None]] = set()
         self._heartbeat_tasks: set[asyncio.Task[None]] = set()
+        self._artifact_repair_tasks: set[asyncio.Task[str]] = set()
         self._outgoing_jobs: dict[str, Job] = {}
         self._progress_reporters: dict[str, ProgressReporter] = {}
         self._schedule_parse_outcomes: dict[str, NaturalScheduleOutcome] = {}
@@ -409,6 +410,16 @@ class App:
         reporter = self._progress_reporters.get(job.id)
         return reporter.send_progress if reporter else None
 
+    def _track_artifact_repair_task(self, task: asyncio.Task[str]) -> None:
+        self._artifact_repair_tasks.add(task)
+
+        def finish(done: asyncio.Task[str]) -> None:
+            self._artifact_repair_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finish)
+
     async def _repair_outgoing_artifacts(self, job: Job, warnings: tuple[str, ...]) -> str:
         elapsed = max(0.0, time.time() - job.started)
         parent_timeout = (
@@ -445,19 +456,28 @@ class App:
                 "3. 不要输出解释、寒暄或任何成功声明。",
             ]
         )
-        try:
-            return await asyncio.wait_for(
-                run_agent(
-                    self.agent,
-                    prompt,
-                    self.cfg.agent.default_workspace,
-                    "task",
-                    model=self._agent_model_for("task"),
-                    progress=self._progress_callback_for(job),
-                    trace_id=f"{job.id}-artifact-repair",
-                ),
-                timeout=timeout,
+        repair_task = asyncio.create_task(
+            run_agent(
+                self.agent,
+                prompt,
+                self.cfg.agent.default_workspace,
+                "task",
+                model=self._agent_model_for("task"),
+                progress=None,
+                trace_id=f"{job.id}-artifact-repair",
             )
+        )
+        self._track_artifact_repair_task(repair_task)
+        try:
+            done, _pending = await asyncio.wait({repair_task}, timeout=timeout)
+            if repair_task not in done:
+                repair_task.cancel()
+                logger.warning("artifact repair failed job=%s error=TimeoutError", job.id)
+                return ""
+            return repair_task.result()
+        except asyncio.CancelledError:
+            repair_task.cancel()
+            raise
         except asyncio.TimeoutError:
             logger.warning("artifact repair failed job=%s error=TimeoutError", job.id)
         except Exception as exc:  # noqa: BLE001 - repair failure becomes deterministic bridge text
@@ -532,8 +552,10 @@ class App:
                     expected_outbox=expected_outbox,
                 )
 
+            artifact_result = job.artifact_result
+            job.artifact_result = None
             resolution = await resolve_artifacts(
-                result,
+                artifact_result if artifact_result is not None else result,
                 inspect=inspect,
                 repair=lambda warnings: self._repair_outgoing_artifacts(job, warnings),
                 max_items=self.cfg.resources.max_items,
@@ -571,6 +593,10 @@ class App:
         else:
             reply_text = result
 
+        reply_text = redact(
+            reply_text,
+            extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+        )[: self.cfg.effective_max_chars()]
         remember = self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"}
         if not transactional and remember and reply_text.strip():
             self.memory.append_exchange(job.event, job.args or job.event.text, reply_text)
@@ -1612,12 +1638,16 @@ class App:
                 task.cancel()
             for task in list(self._heartbeat_tasks):
                 task.cancel()
+            for task in list(self._artifact_repair_tasks):
+                task.cancel()
             for task in list(self._schedule_parse_heartbeats.values()):
                 task.cancel()
             if self._reply_tasks:
                 await asyncio.gather(*self._reply_tasks, return_exceptions=True)
             if self._heartbeat_tasks:
                 await asyncio.gather(*self._heartbeat_tasks, return_exceptions=True)
+            if self._artifact_repair_tasks:
+                await asyncio.gather(*self._artifact_repair_tasks, return_exceptions=True)
             if self._schedule_parse_heartbeats:
                 await asyncio.gather(
                     *self._schedule_parse_heartbeats.values(),
