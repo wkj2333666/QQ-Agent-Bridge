@@ -9,7 +9,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
-from qq_agent_bridge.outgoing_resources import collect_outgoing_resources  # type: ignore
+from qq_agent_bridge.outgoing_resources import (  # type: ignore
+    collect_outgoing_resources,
+    inspect_outgoing_resources,
+)
 
 
 def make_cfg(workspace: Path) -> BridgeConfig:
@@ -31,6 +34,43 @@ def write_wav(path: Path, duration_seconds: int, sample_rate: int = 8000) -> Non
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(frames)
+
+
+def test_recovers_existing_file_when_prose_is_glued_to_directive_path(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    report = outbox / "视频总结.md"
+    report.write_text("summary", encoding="utf-8")
+    rel = report.relative_to(tmp_path).as_posix()
+
+    result = inspect_outgoing_resources(
+        f"文件发你啦\nQQBOT_SEND_FILE: send-token {rel}主人，已经整理好了",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.clean_text == "文件发你啦"
+    assert len(result.resources) == 1
+    assert result.resources[0].path.read_text(encoding="utf-8") == "summary"
+    assert result.warnings == ()
+    assert (result.attempted, result.unresolved, result.recovered) == (1, 0, 1)
+
+
+def test_structured_inspection_reports_unresolved_missing_directive(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    result = inspect_outgoing_resources(
+        "QQBOT_SEND_FILE: send-token downloads/qq-agent-bridge/outgoing/job-1/missing.pdf",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.attempted == 1
+    assert result.unresolved == 1
+    assert result.warnings == ("无法发送资源：文件不存在或不是普通文件",)
 
 
 def test_collects_image_and_file_directives_inside_workspace(tmp_path: Path) -> None:
