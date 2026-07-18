@@ -423,6 +423,34 @@ def test_resolution_does_not_count_same_source_with_new_kind_as_repair(
     asyncio.run(go())
 
 
+def test_resolution_does_not_treat_unknown_basename_as_wildcard(tmp_path: Path) -> None:
+    async def go() -> None:
+        unrelated = make_resource(tmp_path, "debug.log")
+
+        def inspect(text: str) -> ArtifactInspection:
+            if text == "repair-output":
+                return inspection(resources=(unrelated,), attempted=1)
+            return inspection(
+                warnings=("token mismatch",),
+                attempted=1,
+                unresolved=1,
+                expectations=(ArtifactExpectation("file", None),),
+            )
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=inspect,
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
 def test_resolution_rejects_merged_item_count_over_budget(tmp_path: Path) -> None:
     async def go() -> None:
         first = make_resource(tmp_path, "first.pdf")

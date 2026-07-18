@@ -3427,6 +3427,8 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
             await progress("已经发给你了")
             await progress("发送完毕")
             await progress("Sent!")
+            await progress("已发送了")
+            await progress("Sent successfully")
             await progress("Delivered")
             await progress("Uploaded")
             await progress("Attached")
@@ -3457,6 +3459,8 @@ def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> Non
         assert "已经发给你了" not in pre_ack_text
         assert "发送完毕" not in pre_ack_text
         assert "Sent!" not in pre_ack_text
+        assert "已发送了" not in pre_ack_text
+        assert "Sent successfully" not in pre_ack_text
         assert "Delivered" not in pre_ack_text
         assert "Uploaded" not in pre_ack_text
         assert "Attached" not in pre_ack_text

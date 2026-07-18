@@ -463,7 +463,12 @@ def _open_source_beneath_outbox(
     directory = getattr(os, "O_DIRECTORY", None)
     if nofollow is None or directory is None:
         return None
-    common_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    common_flags = (
+        os.O_RDONLY
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     directory_flags = common_flags | directory
     directory_fds: list[int] = []
     try:
@@ -508,10 +513,13 @@ def _copy_for_sending(
     target = sending_dir / f"{index:02d}-{secrets.token_hex(4)}-{safe_name}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     created = False
+    created_identity: tuple[int, int] | None = None
     keep = False
     try:
         target_fd = os.open(target, flags, 0o600)
         created = True
+        opened_target = os.fstat(target_fd)
+        created_identity = (opened_target.st_dev, opened_target.st_ino)
         with os.fdopen(target_fd, "wb") as dst:
             if not _copy_stream_bounded(src, dst, expected_stat.st_size):
                 return None
@@ -527,7 +535,7 @@ def _copy_for_sending(
         return None
     finally:
         if created and not keep:
-            _remove_staged_file(target)
+            _remove_staged_file(target, expected_identity=created_identity)
 
 
 def _copy_stream_bounded(src: BinaryIO, dst: BinaryIO, expected_size: int) -> bool:
@@ -554,7 +562,29 @@ def _source_stat_signature(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _remove_staged_file(path: Path) -> None:
+def _remove_staged_file(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    if expected_identity is not None:
+        try:
+            candidates = path.parent.iterdir()
+        except OSError:
+            return
+        for candidate in candidates:
+            try:
+                current = candidate.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if (current.st_dev, current.st_ino) != expected_identity:
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+            return
+        return
     try:
         path.unlink()
     except OSError:
