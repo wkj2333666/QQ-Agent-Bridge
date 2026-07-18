@@ -63,6 +63,7 @@ class Job:
     artifact_delivery_outcome: str | None = field(default=None, repr=False)
     allow_outgoing_resources: bool = False
     outgoing_dir: str | None = field(default=None, repr=False)
+    outgoing_dir_relative: str | None = field(default=None, repr=False)
     outgoing_token: str | None = field(default=None, repr=False)
     outgoing_dir_dev: int | None = field(default=None, repr=False)
     outgoing_dir_ino: int | None = field(default=None, repr=False)
@@ -184,7 +185,11 @@ class Policy:
             job.artifact_result = result if job.allow_outgoing_resources else None
             job.result = redact(
                 strip_ansi(result),
-                extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+                extra=(
+                    job.outgoing_token or "",
+                    job.outgoing_dir or "",
+                    job.outgoing_dir_relative or "",
+                ),
             )[: self.cfg.effective_max_chars()]
             return job.result
         except asyncio.CancelledError:
@@ -198,7 +203,7 @@ class Policy:
             job.result = "[timeout]"
             return job.result
         except Exception as e:  # noqa: BLE001
-            logger.exception("job %s failed", job.id)
+            logger.error("job failed job=%s error=%s", job.id, type(e).__name__)
             job.state = "done"
             job.artifact_result = None
             job.result = f"[error] {type(e).__name__}"

@@ -49,12 +49,24 @@ from .whisper_runner import WhisperRunner
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("qq-bridge")
 ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS = 1.0
-_PRE_ACK_DELIVERY_CLAIM_RE = re.compile(
-    r"(?:文件.{0,8}发(?:给)?你(?:了|啦)|已发送(?:文件|资源)?|发送成功|已交付|已上传|已附加|"
-    r"\b(?:attached|sent|delivered|uploaded)\b)",
+_ARTIFACT_PROGRESS_NOUN_RE = re.compile(
+    r"(?:文件|资源|图片|图像|报告|附件|表格|语音|音频|任务输出|"
+    r"\b(?:file|resource|image|report|attachment|document|pdf|audio|voice|output)\b)",
+    re.IGNORECASE,
+)
+_ARTIFACT_DELIVERY_ACTION_RE = re.compile(
+    r"(?:发送|发给|发你|发到|发往|上传|交付|附加|递交|传给|传到|"
+    r"\b(?:send|sent|deliver(?:ed)?|upload(?:ed)?|attach(?:ed)?)\b)",
     re.IGNORECASE,
 )
 _PRE_ACK_DELIVERY_PROGRESS = "正在验证并发送任务输出。"
+
+
+def _claims_artifact_delivery(text: str) -> bool:
+    return bool(
+        _ARTIFACT_PROGRESS_NOUN_RE.search(text)
+        and _ARTIFACT_DELIVERY_ACTION_RE.search(text)
+    )
 
 
 class App:
@@ -422,7 +434,7 @@ class App:
 
         async def send_progress(text: str) -> None:
             cleaned = redact(strip_ansi(text), extra=redact_extra)
-            if _PRE_ACK_DELIVERY_CLAIM_RE.search(cleaned):
+            if _claims_artifact_delivery(cleaned):
                 cleaned = _PRE_ACK_DELIVERY_PROGRESS
             await reporter.send_progress(cleaned)
 
@@ -1644,6 +1656,7 @@ class App:
         outbox_stat = outbox.lstat()
         job.allow_outgoing_resources = True
         job.outgoing_dir = str(outbox)
+        job.outgoing_dir_relative = outbox.relative_to(workspace).as_posix()
         job.outgoing_token = secrets.token_urlsafe(12)
         job.outgoing_dir_dev = outbox_stat.st_dev
         job.outgoing_dir_ino = outbox_stat.st_ino
@@ -1838,10 +1851,12 @@ class App:
             return "", ""
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
         outbox = Path(job.outgoing_dir).expanduser().resolve(strict=False)
-        try:
-            outbox_rel = outbox.relative_to(workspace).as_posix()
-        except ValueError:
-            outbox_rel = ""
+        outbox_rel = job.outgoing_dir_relative or ""
+        if not outbox_rel:
+            try:
+                outbox_rel = outbox.relative_to(workspace).as_posix()
+            except ValueError:
+                outbox_rel = ""
         return outbox.as_posix(), outbox_rel
 
     def _outgoing_redaction_values(self, job: Job) -> tuple[str, ...]:

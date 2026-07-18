@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -59,6 +62,38 @@ def test_job_repr_omits_resource_sensitive_state() -> None:
     assert raw_result not in shown
     assert "outgoing_dir_dev" not in shown
     assert "outgoing_dir_ino" not in shown
+
+
+def test_runner_exception_log_omits_resource_token_and_paths(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "exception-resource-token"
+    outbox = "/private/workspace/downloads/outgoing/job-1"
+    outbox_relative = "downloads/outgoing/job-1"
+
+    async def raising_runner(_job: Job) -> str:
+        raise RuntimeError(f"failed {token} {outbox} {outbox_relative}")
+
+    async def go() -> None:
+        cfg = BridgeConfig(workspaces={"/private/workspace": True})
+        policy = Policy(cfg, raising_runner)
+        jid, _nonce = policy.start_job(make_ev("/task report"), policy.parse("/task report"))
+        job = policy.jobs[jid]
+        job.allow_outgoing_resources = True
+        job.outgoing_token = token
+        job.outgoing_dir = outbox
+        job.outgoing_dir_relative = outbox_relative
+        policy.start_job_task(job)
+        assert job.task is not None
+        assert await job.task == "[error] RuntimeError"
+
+    with caplog.at_level(logging.ERROR, logger="qq_agent_bridge.policy"):
+        asyncio.run(go())
+
+    assert token not in caplog.text
+    assert outbox not in caplog.text
+    assert outbox_relative not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_parse_and_allow() -> None:
