@@ -516,6 +516,58 @@ def test_streaming_preserves_resource_directive_from_intermediate_message() -> N
     )
 
 
+def test_streaming_retains_final_message_followed_by_resource_directive() -> None:
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, stdout: asyncio.StreamReader, stderr: asyncio.StreamReader) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def run_case() -> tuple[str, list[str]]:
+        cfg = BridgeConfig(workspaces={"/tmp": True})
+        adapter = CursorAdapter(cfg)
+        stdout = asyncio.StreamReader(limit=64 * 1024)
+        stderr = asyncio.StreamReader(limit=64 * 1024)
+        lines = [
+            {"type": "assistant_message", "message": {"content": "文件发你了。"}},
+            {
+                "type": "assistant_message",
+                "message": {
+                    "content": "QQBOT_SEND_FILE: send-token downloads/outgoing/report.pdf"
+                },
+            },
+        ]
+        stdout.feed_data(
+            ("\n".join(json.dumps(item, ensure_ascii=False) for item in lines) + "\n").encode(
+                "utf-8"
+            )
+        )
+        stdout.feed_eof()
+        stderr.feed_eof()
+        progress: list[str] = []
+
+        async def record_progress(text: str) -> None:
+            progress.append(text)
+
+        out, _err = await adapter._communicate_streaming(  # noqa: SLF001
+            FakeProc(stdout, stderr),  # type: ignore[arg-type]
+            record_progress,
+        )
+        return out, progress
+
+    out, progress = asyncio.run(run_case())
+
+    assert progress == []
+    assert out == (
+        "文件发你了。\n"
+        "QQBOT_SEND_FILE: send-token downloads/outgoing/report.pdf"
+    )
+
+
 def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = True

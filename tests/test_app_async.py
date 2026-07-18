@@ -18,6 +18,7 @@ from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CustomCommandAdapter  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Job, Policy  # type: ignore
+from qq_agent_bridge.redactor import strip_ansi  # type: ignore
 from qq_agent_bridge.resources import PreparedResource  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource  # type: ignore
 
@@ -2049,6 +2050,67 @@ def test_task_progress_redacts_job_scoped_bare_token_and_outbox(tmp_path: Path) 
     asyncio.run(go())
 
 
+def test_task_ansi_split_token_and_outbox_are_redacted_everywhere(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        token = ""
+        outbox_rel = ""
+        outbox_abs = ""
+
+        def with_ansi(value: str) -> str:
+            split_at = max(1, len(value) // 2)
+            return f"{value[:split_at]}\x1b[31m{value[split_at:]}\x1b[0m"
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            nonlocal token, outbox_rel, outbox_abs
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            outbox_abs = (tmp_path / outbox_rel).as_posix()
+            assert progress is not None
+            await progress(
+                "progress ordinary-marker "
+                f"{with_ansi(token)} {with_ansi(outbox_rel)} {with_ansi(outbox_abs)}"
+            )
+            return (
+                "final ordinary-marker "
+                f"{with_ansi(token)} {with_ansi(outbox_rel)} {with_ansi(outbox_abs)}"
+            )
+
+        event = make_ev("/task redact ansi", group="group", mid="progress-redact-ansi")
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(event)
+        await wait_until_sent(adapter, "final ordinary-marker")
+
+        assert app.policy is not None
+        job = next(iter(app.policy.jobs.values()))
+        visible = strip_ansi("\n".join(item[2] for item in adapter.sent))
+        history = strip_ansi(app.memory.format_history(event))
+        stored_result = strip_ansi(job.result or "")
+        for sensitive in (token, outbox_rel, outbox_abs):
+            assert sensitive not in visible
+            assert sensitive not in history
+        assert token not in stored_result
+        assert outbox_abs not in stored_result
+        assert "progress ordinary-marker" in visible
+        assert "final ordinary-marker" in visible
+        assert "final ordinary-marker" in history
+        assert "final ordinary-marker" in stored_result
+
+    asyncio.run(go())
+
+
 def test_ask_does_not_pass_progress_callback() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -3312,6 +3374,77 @@ def test_malformed_file_directive_sends_real_file_before_success_text(tmp_path: 
         delivery_events = [event for event in adapter.events if event[1] != "收到，我处理一下。"]
         assert delivery_events[0][0] == "file"
         assert delivery_events[1] == ("text", "文件发你啦")
+
+    asyncio.run(go())
+
+
+def test_artifact_success_progress_waits_for_resource_ack(tmp_path: Path) -> None:
+    class AckBlockingFileAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release_ack = asyncio.Event()
+
+        async def send_file(
+            self,
+            chat_id: str,
+            is_group: bool,
+            path: Path,
+            echo: str | None = None,
+        ) -> None:
+            self.events.append(("file-send", path.name))
+            self.send_started.set()
+            await self.release_ack.wait()
+            await super().send_file(chat_id, is_group, path, echo)
+
+    async def go() -> None:
+        adapter = AckBlockingFileAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        cfg.progress.min_progress_interval_seconds = 0
+        cfg.progress.max_progress_messages = 10
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            report = tmp_path / outbox_rel / "report.pdf"
+            report.write_bytes(b"report")
+            assert progress is not None
+            await progress("正在下载视频")
+            await progress("文件发你了")
+            await progress(
+                f"已发送文件\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+            )
+            return f"文件发你了\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(
+            make_ev("/task 下载视频并生成报告", group="group", mid="artifact-progress-ack")
+        )
+        await asyncio.wait_for(adapter.send_started.wait(), timeout=0.5)
+
+        pre_ack_text = "\n".join(item[2] for item in adapter.sent)
+        assert "正在下载视频" in pre_ack_text
+        assert "正在验证并发送任务输出。" in pre_ack_text
+        assert "文件发你了" not in pre_ack_text
+        assert "已发送文件" not in pre_ack_text
+
+        adapter.release_ack.set()
+        await wait_until_sent(adapter, "文件发你了")
+
+        file_ack_index = next(i for i, event in enumerate(adapter.events) if event[0] == "file")
+        success_index = adapter.events.index(("text", "文件发你了"))
+        assert file_ack_index < success_index
 
     asyncio.run(go())
 
