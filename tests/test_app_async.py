@@ -2466,6 +2466,61 @@ def test_attached_resources_are_passed_to_cursor_prompt_without_memory_pollution
     asyncio.run(go())
 
 
+def test_animated_resource_frames_live_until_agent_finishes_then_are_cleaned() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        app = App(cfg)
+        prepared = (
+            PreparedResource(
+                kind="image",
+                name="reaction.gif",
+                local_path="downloads/reaction.gif",
+                animation_status="ready",
+                animation_frame_count=12,
+                animation_duration_seconds=2.4,
+                animation_frame_paths=("downloads/frame-001.png", "downloads/frame-002.png"),
+                animation_frame_times=(0.0, 2.4),
+            ),
+        )
+        cleaned: list[tuple[PreparedResource, ...]] = []
+
+        async def fake_prepare(_ev: ChatEvent) -> tuple[PreparedResource, ...]:
+            return prepared
+
+        def fake_cleanup(resources: tuple[PreparedResource, ...]) -> None:
+            cleaned.append(resources)
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+        ) -> str:
+            assert not cleaned
+            assert "source_frames=12" in prompt
+            assert "downloads/frame-001.png" in prompt
+            assert "首帧不能代表完整动图" in prompt
+            return "看完了"
+
+        app.resources.prepare = fake_prepare  # type: ignore[attr-defined, method-assign]
+        app.resources.cleanup_prepared = fake_cleanup  # type: ignore[attr-defined, method-assign]
+        app.agent.run = fake_agent  # type: ignore[method-assign]
+        event = make_ev(
+            "/ask 这个动图在做什么",
+            mid="animated-agent-lifecycle",
+            resources=(ChatResource(kind="image", url="https://qq.example/reaction.gif"),),
+        )
+
+        result = await app._agent_runner(
+            Job("animated-agent-lifecycle", "ask", "这个动图在做什么", event)
+        )
+
+        assert result == "看完了"
+        assert cleaned == [prepared]
+
+    asyncio.run(go())
+
+
 def test_private_attachment_only_message_defaults_to_ask() -> None:
     async def go() -> None:
         adapter = FakeAdapter()

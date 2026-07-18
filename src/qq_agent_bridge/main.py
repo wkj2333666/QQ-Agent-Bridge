@@ -1530,44 +1530,49 @@ class App:
         ambient_context = self._ambient_context_for(cmd, args or ev.text, ev)
         self_knowledge = build_prompt_self_knowledge(self.cfg, ev)
         resource_context = ""
-        if cmd in {"ask", "plan", "task", "code"}:
-            resource_context = format_resource_context(await self.resources.prepare(ev))
-        outgoing_resource_context = ""
-        outgoing_job = self._outgoing_jobs.get(ev.id)
-        if cmd in {"task", "code"} and outgoing_job:
-            outgoing_resource_context = self._format_outgoing_resource_context(outgoing_job)
-        runtime_reference_base = ""
-        if cmd in {"task", "code"}:
-            runtime_reference_base = self._prepare_runtime_skill_bundle()
-        schedule_context = self._schedule_prompt_context(job)
-        prompt = build_agent_prompt(
-            cmd,
-            args or ev.text,
-            ev,
-            history=history,
-            ambient_context=ambient_context,
-            self_knowledge=self_knowledge,
-            resource_context=resource_context,
-            outgoing_resource_context=outgoing_resource_context,
-            profile_prompt=select_profile_prompt(self.cfg, ev),
-            runtime_reference_base=runtime_reference_base,
-            schedule_context=schedule_context,
-        )
-        ws = self.cfg.agent.default_workspace
-        if cmd == "shell":
-            return "[error] shell command is not implemented"
-        agent_mode = "code" if cmd == "code" else "plan" if cmd == "plan" else "task" if cmd == "task" else "ask"
-        model = self._agent_model_for(cmd)
-        progress = self._progress_callback_for(job) if cmd in {"task", "code"} else None
-        return await run_agent(
-            self.agent,
-            prompt,
-            ws,
-            agent_mode,
-            model=model,
-            progress=progress,
-            trace_id=job.id,
-        )
+        prepared_resources = ()
+        try:
+            if cmd in {"ask", "plan", "task", "code"}:
+                prepared_resources = await self.resources.prepare(ev)
+                resource_context = format_resource_context(prepared_resources)
+            outgoing_resource_context = ""
+            outgoing_job = self._outgoing_jobs.get(ev.id)
+            if cmd in {"task", "code"} and outgoing_job:
+                outgoing_resource_context = self._format_outgoing_resource_context(outgoing_job)
+            runtime_reference_base = ""
+            if cmd in {"task", "code"}:
+                runtime_reference_base = self._prepare_runtime_skill_bundle()
+            schedule_context = self._schedule_prompt_context(job)
+            prompt = build_agent_prompt(
+                cmd,
+                args or ev.text,
+                ev,
+                history=history,
+                ambient_context=ambient_context,
+                self_knowledge=self_knowledge,
+                resource_context=resource_context,
+                outgoing_resource_context=outgoing_resource_context,
+                profile_prompt=select_profile_prompt(self.cfg, ev),
+                runtime_reference_base=runtime_reference_base,
+                schedule_context=schedule_context,
+            )
+            ws = self.cfg.agent.default_workspace
+            if cmd == "shell":
+                return "[error] shell command is not implemented"
+            agent_mode = "code" if cmd == "code" else "plan" if cmd == "plan" else "task" if cmd == "task" else "ask"
+            model = self._agent_model_for(cmd)
+            progress = self._progress_callback_for(job) if cmd in {"task", "code"} else None
+            return await run_agent(
+                self.agent,
+                prompt,
+                ws,
+                agent_mode,
+                model=model,
+                progress=progress,
+                trace_id=job.id,
+            )
+        finally:
+            self.resources.cleanup_prepared(prepared_resources)
 
     def _schedule_prompt_context(self, job: Job) -> str:
         if job.source != "schedule" or job.scheduled_for is None:

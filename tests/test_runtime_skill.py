@@ -85,6 +85,7 @@ def test_runtime_skill_fallback_requires_direct_media_evidence(monkeypatch) -> N
 
     assert "字幕、转写、音频、抽帧画面/实际媒体或用户提供片段之一" in skill
     assert "页面元数据、简介或页面正文不能单独作为正片内容证据" in skill
+    assert "首帧不能代表完整动图" in skill
 
 
 def test_runtime_skill_fallback_reports_access_blockers_without_bypass(monkeypatch) -> None:
@@ -177,6 +178,7 @@ def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
             "PyMuPDF",
             "Chromium",
             "不要安装",
+            "GIF/APNG/动画 WebP",
         ),
         "visual-media.md": ("图片生成", "识图", "视频理解"),
         "audio-voice-music.md": (

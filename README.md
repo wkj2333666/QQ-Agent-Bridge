@@ -39,6 +39,8 @@ QQ user/group
   mention the bot to process it.
 - Resource handoff for images, files, voice, audio, videos, URLs, and forwarded
   chat records.
+- Bounded GIF, APNG, and animated WebP sampling so agents receive temporal
+  evidence instead of silently treating the first frame as the whole image.
 - Outgoing image/file/audio/voice delivery through guarded `QQBOT_SEND_*`
   directives.
 - Bubblewrap-based sandboxing for local CLI agent execution.
@@ -345,6 +347,20 @@ Key safety choices:
 - The workspace comes only from config, never from chat text.
 - Bubblewrap mounts system/runtime paths read-only and uses a private sandbox
   home for agent auth state.
+
+## Input Resources And Animation
+
+The bridge stages QQ attachments inside the workspace and passes relative paths
+to the agent. With `resources.animation_enabled`, GIF, APNG, and animated WebP
+inputs are probed by `ffprobe` and sampled by `ffmpeg`, with an isolated Pillow
+worker covering decoder gaps. Sampling uses configurable frame, duration,
+resolution, and timeout limits. Defaults are 8 frames, 30 seconds, and
+a 1024-pixel maximum output dimension, with a 40-megapixel source-canvas cap.
+The original attachment remains available when
+animation extraction fails, but the prompt explicitly marks dynamic evidence as
+unavailable. Sampled frames are removed when the agent call finishes, fails, or
+times out. Deployments must provide the configured `ffprobe` and `ffmpeg`
+binaries.
 
 ## Resource Sending
 

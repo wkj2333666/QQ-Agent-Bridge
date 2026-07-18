@@ -45,7 +45,7 @@ You are a QQ bot runtime agent. The bridge injects `QQ_COMMAND`; treat it as the
 | 天气、温度、降雨、空气、预报、实况 | `skills/qq-agent-runtime/references/weather.md` |
 | Excel、Word、PPT、PDF、CSV、表格、报告、办公文档读写 | `skills/qq-agent-runtime/references/office-documents.md` |
 | 环境工具、micromamba base、PDF/Office/媒体工具探测与验证 | `skills/qq-agent-runtime/references/environment-tools.md` |
-| 图片生成、绘图、图表、识图、视频理解、网页视频 | `skills/qq-agent-runtime/references/visual-media.md` |
+| 图片生成、绘图、图表、识图、动图、视频理解、网页视频 | `skills/qq-agent-runtime/references/visual-media.md` |
 | 语音识别、语音生成、音频处理、唱歌、旋律、音色 | `skills/qq-agent-runtime/references/audio-voice-music.md` |
 | 任务不确定、容易幻觉、需要完成判定或阻塞回复 | `skills/qq-agent-runtime/references/agent-discipline.md` |
 | QQ 资源收发、outbox/token、QQBOT_SEND_*、进度消息 | `skills/qq-agent-runtime/references/qq-bridge-interface.md` |

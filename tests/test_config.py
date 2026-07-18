@@ -226,6 +226,18 @@ def test_example_config_documents_empty_profile_maps() -> None:
     assert cfg.profiles.users == {}
 
 
+def test_example_config_enables_bounded_animated_image_processing() -> None:
+    cfg = BridgeConfig.load(ROOT / "config.example.yaml")
+
+    assert cfg.resources.animation_enabled is True
+    assert cfg.resources.animation_ffmpeg_binary == "ffmpeg"
+    assert cfg.resources.animation_ffprobe_binary == "ffprobe"
+    assert 2 <= cfg.resources.animation_max_frames <= 16
+    assert 1 <= cfg.resources.animation_max_duration_seconds <= 120
+    assert 256 <= cfg.resources.animation_max_dimension <= 2048
+    assert 1_000_000 <= cfg.resources.animation_max_source_pixels <= 100_000_000
+
+
 def test_example_config_defaults_group_mentions_to_chat() -> None:
     cfg = BridgeConfig.load(ROOT / "config.example.yaml")
 

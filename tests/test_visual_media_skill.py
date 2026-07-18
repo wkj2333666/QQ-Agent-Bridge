@@ -81,6 +81,15 @@ def test_visual_media_reference_defines_an_evidence_driven_video_workflow() -> N
     )
 
 
+def test_visual_media_reference_requires_multiframe_evidence_for_animated_images() -> None:
+    text = _reference_text()
+
+    for needle in ("GIF", "APNG", "WebP", "多帧", "首帧", "ffmpeg"):
+        assert needle in text
+    assert "首帧不能代表完整动图" in text
+    assert "动态证据不可用" in text
+
+
 def test_visual_media_reference_names_bilibili_short_urls_and_a_cross_platform_workflow() -> None:
     text = _reference_text()
 
