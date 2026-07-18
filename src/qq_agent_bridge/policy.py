@@ -59,6 +59,7 @@ class Job:
     confirm_nonce: str | None = None
     state: str = "queued"
     result: str | None = None
+    artifact_result: str | None = field(default=None, repr=False)
     allow_outgoing_resources: bool = False
     outgoing_dir: str | None = None
     outgoing_token: str | None = None
@@ -179,19 +180,23 @@ class Policy:
                     ),
                 )
             job.state = "done"
+            job.artifact_result = result if job.allow_outgoing_resources else None
             job.result = redact(result)[: self.cfg.effective_max_chars()]
             return job.result
         except asyncio.CancelledError:
             job.state = "cancelled"
+            job.artifact_result = None
             job.result = "[cancelled]"
             raise
         except asyncio.TimeoutError:
             job.state = "done"
+            job.artifact_result = None
             job.result = "[timeout]"
             return job.result
         except Exception as e:  # noqa: BLE001
             logger.exception("job %s failed", job.id)
             job.state = "done"
+            job.artifact_result = None
             job.result = f"[error] {type(e).__name__}"
             return job.result
 

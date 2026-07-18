@@ -98,6 +98,65 @@ def test_resolution_repairs_unresolved_artifact_once(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_resolution_requires_one_new_resource_per_originally_unresolved_directive(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        repaired = make_resource(tmp_path, "first.pdf")
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(resources=(repaired,), attempted=1)
+                if text == "repair-output"
+                else inspection(
+                    warnings=("first missing", "second missing"),
+                    attempted=2,
+                    unresolved=2,
+                )
+            ),
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (repaired,)
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
+def test_resolution_verifies_when_repair_covers_every_originally_unresolved_directive(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        first = make_resource(tmp_path, "first.pdf")
+        second = make_resource(tmp_path, "second.pdf")
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(resources=(first, second), attempted=2)
+                if text == "repair-output"
+                else inspection(
+                    warnings=("first missing", "second missing"),
+                    attempted=2,
+                    unresolved=2,
+                )
+            ),
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (first, second)
+        assert result.repair_attempted is True
+        assert result.verified is True
+
+    asyncio.run(go())
+
+
 def test_resolution_does_not_verify_empty_repair_from_initial_resources(tmp_path: Path) -> None:
     async def go() -> None:
         first = make_resource(tmp_path)

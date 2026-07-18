@@ -43,6 +43,18 @@ def test_redact_bare_outgoing_directive_tokens() -> None:
 
     assert all(token not in out for token in tokens.values())
     assert out.count("[REDACTED]") == len(tokens)
+    assert all(f"QQBOT_SEND_{kind}: [REDACTED]" in out for kind in tokens)
+
+
+def test_redact_replaces_full_openai_and_github_secrets() -> None:
+    openai_secret = "sk-" + "aB3_" * 8
+    github_secret = "ghp_" + "Z9x" * 12
+
+    out = redact(f"openai={openai_secret} github={github_secret}")
+
+    assert openai_secret not in out
+    assert github_secret not in out
+    assert out.count("[REDACTED]") == 2
 
 
 if __name__ == "__main__":

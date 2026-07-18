@@ -535,6 +535,7 @@ class OneBotAdapter:
         self._handler: MessageHandler | None = None
         self._conns: set[ServerConnection] = set()
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_action_connections: dict[str, ServerConnection] = {}
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
         self._recent_messages: dict[str, ChatReply] = {}
         self._recent_message_ids: deque[str] = deque()
@@ -582,7 +583,7 @@ class OneBotAdapter:
             except websockets.ConnectionClosed:
                 pass
             finally:
-                self._conns.discard(conn)
+                self._remove_connection(conn)
 
         self._server = await websockets.serve(
             _serve,
@@ -760,6 +761,7 @@ class OneBotAdapter:
             if not fut.done():
                 fut.cancel()
         self._pending_actions.clear()
+        self._pending_action_connections.clear()
         for c in list(self._conns):
             await c.close()
         self._conns.clear()
@@ -884,20 +886,21 @@ class OneBotAdapter:
     ) -> None:
         if not self._conns:
             raise ConnectionError("OneBot gateway is not connected")
+        conn = next(iter(self._conns))
         action_echo = echo or f"qq-agent-bridge-send-{time.time_ns()}"
         if action_echo in self._pending_actions:
             raise RuntimeError("OneBot action echo is already pending")
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending_actions[action_echo] = fut
+        self._pending_action_connections[action_echo] = conn
         frame = {"action": action, "params": params, "echo": action_echo}
         try:
-            data = json.dumps(frame)
-            for conn in list(self._conns):
-                await self._send_frame(conn, data)
+            await self._send_frame(conn, json.dumps(frame))
             response = await asyncio.wait_for(fut, timeout=self.SEND_ACTION_TIMEOUT_SECONDS)
         finally:
             self._pending_actions.pop(action_echo, None)
+            self._pending_action_connections.pop(action_echo, None)
         if response.get("status") != "ok" or response.get("retcode") != 0:
             raise RuntimeError(f"OneBot action {action} failed")
 
@@ -916,6 +919,7 @@ class OneBotAdapter:
         self._pending_actions[echo] = fut
         frame = {"action": action, "params": params, "echo": echo}
         conn = next(iter(self._conns))
+        self._pending_action_connections[echo] = conn
         try:
             await self._send_frame(conn, json.dumps(frame))
             response = await asyncio.wait_for(fut, timeout=timeout)
@@ -924,6 +928,7 @@ class OneBotAdapter:
             return None
         finally:
             self._pending_actions.pop(echo, None)
+            self._pending_action_connections.pop(echo, None)
         if response.get("retcode") not in (0, None) or response.get("status") not in ("ok", "async", None):
             logger.warning("onebot action %s failed: %s", action, response)
             return None
@@ -934,11 +939,22 @@ class OneBotAdapter:
         if echo is None:
             return False
         fut = self._pending_actions.pop(str(echo), None)
+        self._pending_action_connections.pop(str(echo), None)
         if not fut:
             return False
         if not fut.done():
             fut.set_result(data)
         return True
+
+    def _remove_connection(self, conn: ServerConnection) -> None:
+        self._conns.discard(conn)
+        for echo, pending_conn in list(self._pending_action_connections.items()):
+            if pending_conn is not conn:
+                continue
+            self._pending_action_connections.pop(echo, None)
+            fut = self._pending_actions.pop(echo, None)
+            if fut and not fut.done():
+                fut.set_exception(ConnectionError("OneBot gateway disconnected"))
 
     async def _send_frame(self, conn: ServerConnection, data: str) -> None:
         try:
