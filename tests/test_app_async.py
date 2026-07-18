@@ -1992,6 +1992,63 @@ def test_task_progress_directive_sends_intermediate_message() -> None:
     asyncio.run(go())
 
 
+def test_task_progress_redacts_job_scoped_bare_token_and_outbox(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        seen_extra: tuple[str, ...] = ()
+        token = ""
+        outbox_rel = ""
+        outbox_abs = ""
+
+        async def fake_cursor(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+            redact_extra: tuple[str, ...] | None = None,
+        ) -> str:
+            nonlocal seen_extra, token, outbox_rel, outbox_abs
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            outbox_abs = (tmp_path / outbox_rel).as_posix()
+            seen_extra = tuple(redact_extra or ())
+            assert progress is not None
+            await progress(f"phase ordinary-marker {token} {outbox_rel} {outbox_abs}")
+            return f"final ordinary-marker {token} {outbox_rel} {outbox_abs}"
+
+        event = make_ev("/task redact progress", group="group", mid="progress-redact-extra")
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_cursor  # type: ignore[method-assign]
+
+        await app._handle(event)
+        await wait_until_sent(adapter, "final ordinary-marker")
+
+        visible = "\n".join(item[2] for item in adapter.sent)
+        history = app.memory.format_history(event)
+        assert app.policy is not None
+        job = next(iter(app.policy.jobs.values()))
+        assert token in seen_extra
+        assert outbox_rel in seen_extra
+        assert outbox_abs in seen_extra
+        assert token not in visible
+        assert outbox_rel not in visible
+        assert outbox_abs not in visible
+        assert token not in history
+        assert outbox_rel not in history
+        assert outbox_abs not in history
+        assert job.result is not None
+        assert token not in job.result
+        assert outbox_abs not in job.result
+        assert "ordinary-marker" in visible
+
+    asyncio.run(go())
+
+
 def test_ask_does_not_pass_progress_callback() -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -3568,7 +3625,10 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
             model: str | None,
             progress: Any,
             trace_id: str | None,
+            redact_extra: tuple[str, ...] | None = None,
         ) -> str:
+            assert job.outgoing_token in tuple(redact_extra or ())
+            assert job.outgoing_dir in tuple(redact_extra or ())
             calls.append((agent, prompt, workspace, mode, model, progress, trace_id))
             return ""
 

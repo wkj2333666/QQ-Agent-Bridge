@@ -503,6 +503,34 @@ def test_send_uses_exactly_one_connected_gateway() -> None:
     asyncio.run(go())
 
 
+def test_only_selected_connection_can_complete_action_response() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        first = FakeConn()
+        second = FakeConn()
+        adapter._conns.update((first, second))  # type: ignore[arg-type]
+
+        task = asyncio.create_task(adapter.send("123", True, "hello", "bound-ack"))
+        for _ in range(10):
+            if first.frames or second.frames:
+                break
+            await asyncio.sleep(0)
+        selected = first if first.frames else second
+        wrong = second if selected is first else first
+        frame = json.loads(selected.frames[0])
+        response = {"echo": frame["echo"], "status": "ok", "retcode": 0, "data": {}}
+
+        assert not adapter._complete_action_response(response, wrong)  # type: ignore[arg-type,attr-defined]
+        assert not task.done()
+        assert "bound-ack" in adapter._pending_actions  # type: ignore[attr-defined]
+        assert adapter._complete_action_response(response, selected)  # type: ignore[arg-type,attr-defined]
+        await task
+        assert adapter._pending_actions == {}  # type: ignore[attr-defined]
+        assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
+
+    asyncio.run(go())
+
+
 def test_disconnect_promptly_fails_pending_send_and_cleans_future() -> None:
     async def go() -> None:
         adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")

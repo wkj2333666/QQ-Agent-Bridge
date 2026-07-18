@@ -409,7 +409,14 @@ class App:
 
     def _progress_callback_for(self, job: Job):
         reporter = self._progress_reporters.get(job.id)
-        return reporter.send_progress if reporter else None
+        if not reporter:
+            return None
+        redact_extra = self._outgoing_redaction_values(job)
+
+        async def send_progress(text: str) -> None:
+            await reporter.send_progress(redact(text, extra=redact_extra))
+
+        return send_progress
 
     def _track_artifact_repair_task(self, task: asyncio.Task[str]) -> None:
         self._artifact_repair_tasks.add(task)
@@ -466,6 +473,7 @@ class App:
                 model=self._agent_model_for("task"),
                 progress=None,
                 trace_id=f"{job.id}-artifact-repair",
+                redact_extra=self._outgoing_redaction_values(job),
             )
         )
         self._track_artifact_repair_task(repair_task)
@@ -519,6 +527,8 @@ class App:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - delivery failures become class-only logs
+            if job.artifact_delivery_outcome is not None:
+                job.artifact_delivery_outcome = "failed"
             logger.error(
                 "job reply delivery failed job=%s error=%s",
                 job.id,
@@ -557,6 +567,7 @@ class App:
             return
         transactional = False
         if job.allow_outgoing_resources and job.outgoing_dir and job.outgoing_token:
+            job.artifact_delivery_outcome = "failed"
             expected_outbox = (
                 (job.outgoing_dir_dev, job.outgoing_dir_ino)
                 if job.outgoing_dir_dev is not None and job.outgoing_dir_ino is not None
@@ -584,6 +595,8 @@ class App:
             )
             outgoing = resolution.resources
             transactional = bool(outgoing) or not resolution.verified
+            if not transactional:
+                job.artifact_delivery_outcome = None
             if not resolution.verified:
                 reply_text = "文件没有成功生成或无法验证，本次未发送。"
             elif outgoing:
@@ -604,6 +617,7 @@ class App:
                     else:
                         sent += 1
                 if failed == 0:
+                    job.artifact_delivery_outcome = "succeeded"
                     reply_text = resolution.text
                 elif sent == 0:
                     reply_text = "文件已经生成，但发送到 QQ 失败，本次未确认交付。"
@@ -1246,6 +1260,8 @@ class App:
             raise
         if result in {"[timeout]", "[cancelled]"} or result.startswith("[error]"):
             return ScheduleExecutionResult("failed", result, jid)
+        if job.artifact_delivery_outcome == "failed":
+            return ScheduleExecutionResult("failed", "artifact delivery failed", jid)
         return ScheduleExecutionResult("succeeded", job_id=jid)
 
     def _schedule_execution_allowed(self, schedule: Schedule) -> tuple[bool, str]:
@@ -1733,6 +1749,7 @@ class App:
                 model=model,
                 progress=progress,
                 trace_id=job.id,
+                redact_extra=self._outgoing_redaction_values(job),
             )
         finally:
             self.resources.cleanup_prepared(prepared_resources)
