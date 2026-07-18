@@ -40,6 +40,7 @@ def write_wav(path: Path, duration_seconds: int, sample_rate: int = 8000) -> Non
 
 class FakeAdapter:
     def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
         self.sent: list[tuple[str, bool, str, str | None]] = []
         self.sent_reply_to: list[tuple[str | None, str | None]] = []
         self.sent_at: list[tuple[str, str, str, str | None]] = []
@@ -56,6 +57,7 @@ class FakeAdapter:
         echo: str | None = None,
         reply_to: str | None = None,
     ) -> None:
+        self.events.append(("text", text))
         self.sent.append((chat_id, is_group, text, echo))
         if reply_to is not None:
             self.sent_reply_to.append((echo, reply_to))
@@ -76,6 +78,7 @@ class FakeAdapter:
         path: Path,
         echo: str | None = None,
     ) -> None:
+        self.events.append(("file", path.name))
         self.sent_files.append((chat_id, is_group, path, echo))
 
     async def send_voice(
@@ -3195,6 +3198,305 @@ def test_cursor_output_can_send_image_and_file_resources(tmp_path: Path) -> None
     asyncio.run(go())
 
 
+def test_malformed_file_directive_sends_real_file_before_success_text(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            report = tmp_path / outbox_rel / "视频总结.md"
+            report.write_text("summary", encoding="utf-8")
+            return f"文件发你啦\nQQBOT_SEND_FILE: {token} {outbox_rel}/视频总结.md主人，整理好了"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(make_ev("/task 总结视频写成文件", group="group", mid="artifact-glued"))
+        await wait_until_sent(adapter, "文件发你啦")
+
+        delivery_events = [event for event in adapter.events if event[1] != "收到，我处理一下。"]
+        assert delivery_events[0][0] == "file"
+        assert delivery_events[1] == ("text", "文件发你啦")
+
+    asyncio.run(go())
+
+
+def test_missing_artifact_invokes_one_repair_and_sends_result(tmp_path: Path) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        agent_calls = 0
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            nonlocal agent_calls
+            agent_calls += 1
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            if agent_calls == 1:
+                return f"文件发你啦\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+            report = tmp_path / outbox_rel / "report.pdf"
+            report.write_bytes(b"repaired")
+            return f"QQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(make_ev("/task 生成报告文件", group="group", mid="artifact-repair"))
+        await wait_until_sent(adapter, "文件发你啦")
+
+        assert agent_calls == 2
+        assert len(adapter.sent_files) == 1
+        assert adapter.sent_files[0][2].read_bytes() == b"repaired"
+
+    asyncio.run(go())
+
+
+def test_adapter_file_failure_suppresses_agent_success_text(tmp_path: Path) -> None:
+    class FailingFileAdapter(FakeAdapter):
+        async def send_file(
+            self,
+            chat_id: str,
+            is_group: bool,
+            path: Path,
+            echo: str | None = None,
+        ) -> None:
+            raise RuntimeError("upload failed")
+
+    async def go() -> None:
+        adapter = FailingFileAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        outgoing_token = ""
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            nonlocal outgoing_token
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            outgoing_token = token
+            report = tmp_path / outbox_rel / "report.pdf"
+            report.write_bytes(b"pdf")
+            return f"文件发你啦\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(make_ev("/task 生成报告文件", group="group", mid="artifact-failure"))
+        await wait_until_sent(adapter, "发送到 QQ 失败")
+
+        assert all("文件发你啦" not in item[2] for item in adapter.sent)
+        assert any("文件已经生成，但发送到 QQ 失败" in item[2] for item in adapter.sent)
+        assert all(outgoing_token not in item[2] for item in adapter.sent)
+        assert all(str(tmp_path) not in item[2] for item in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_partial_adapter_failure_reports_verified_counts(tmp_path: Path) -> None:
+    class PartiallyFailingAdapter(FakeAdapter):
+        async def send_file(
+            self,
+            chat_id: str,
+            is_group: bool,
+            path: Path,
+            echo: str | None = None,
+        ) -> None:
+            if self.sent_files:
+                raise RuntimeError("second upload failed")
+            await super().send_file(chat_id, is_group, path, echo)
+
+    async def go() -> None:
+        adapter = PartiallyFailingAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            outbox = tmp_path / outbox_rel
+            (outbox / "first.pdf").write_bytes(b"first")
+            (outbox / "second.pdf").write_bytes(b"second")
+            return (
+                "文件都发你啦\n"
+                f"QQBOT_SEND_FILE: {token} {outbox_rel}/first.pdf\n"
+                f"QQBOT_SEND_FILE: {token} {outbox_rel}/second.pdf"
+            )
+
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(make_ev("/task 生成两个文件", group="group", mid="artifact-partial"))
+        await wait_until_sent(adapter, "另有 1 个发送失败")
+
+        assert len(adapter.sent_files) == 1
+        assert adapter.sent[-1][2] == "已发送 1 个资源，另有 1 个发送失败。"
+        assert all("文件都发你啦" not in item[2] for item in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        cfg.agent.task_model = "repair-model"
+        app = App(cfg)
+        event = make_ev("/task 生成报告", group="group", mid="artifact-runtime")
+        job = Job(id="artifact-runtime-job", cmd="task", args="生成报告", event=event)
+        app._configure_outgoing_resources(job)
+        job.started = main_module.time.time() - (cfg.effective_max_runtime() - 30)
+        calls: list[tuple[object, str, str | None, str, str | None, str | None]] = []
+        timeouts: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def fake_run_agent(
+            agent: object,
+            prompt: str,
+            workspace: str | None,
+            mode: str,
+            *,
+            model: str | None,
+            progress: Any,
+            trace_id: str | None,
+        ) -> str:
+            calls.append((agent, prompt, workspace, mode, model, trace_id))
+            return ""
+
+        async def capture_wait_for(awaitable: Any, timeout: float) -> Any:
+            timeouts.append(timeout)
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(main_module, "run_agent", fake_run_agent)  # type: ignore[attr-defined]
+        monkeypatch.setattr(main_module.asyncio, "wait_for", capture_wait_for)  # type: ignore[attr-defined]
+
+        await app._repair_outgoing_artifacts(job, ("无法发送资源：文件不存在或不是普通文件",))
+
+        assert len(calls) == 1
+        agent, prompt, workspace, mode, model, trace_id = calls[0]
+        assert agent is app.agent
+        assert workspace == str(tmp_path)
+        assert (mode, model, trace_id) == ("task", "repair-model", "artifact-runtime-job-artifact-repair")
+        assert job.outgoing_token in prompt
+        assert "生成报告" in prompt
+        assert "只输出有效的 QQBOT_SEND_* 指令" in prompt
+        assert len(timeouts) == 1
+        assert 0 < timeouts[0] <= 30
+
+    asyncio.run(go())
+
+
+def test_artifact_repair_propagates_cancellation(tmp_path: Path, monkeypatch: object) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        app = App(cfg)
+        job = Job(
+            id="artifact-cancel-job",
+            cmd="task",
+            args="生成报告",
+            event=make_ev("/task 生成报告", group="group", mid="artifact-cancel"),
+        )
+        app._configure_outgoing_resources(job)
+
+        async def cancelled_agent(*args: Any, **kwargs: Any) -> str:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(main_module, "run_agent", cancelled_agent)  # type: ignore[attr-defined]
+
+        try:
+            await app._repair_outgoing_artifacts(job, ("missing",))
+        except asyncio.CancelledError:
+            return
+        raise AssertionError("artifact repair cancellation was swallowed")
+
+    asyncio.run(go())
+
+
+def test_delivery_failure_memory_records_bridge_outcome(tmp_path: Path) -> None:
+    class FailingFileAdapter(FakeAdapter):
+        async def send_file(
+            self,
+            chat_id: str,
+            is_group: bool,
+            path: Path,
+            echo: str | None = None,
+        ) -> None:
+            raise RuntimeError("upload failed")
+
+    async def go() -> None:
+        adapter = FailingFileAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            outbox_rel, token = extract_outgoing_prompt_context(prompt)
+            report = tmp_path / outbox_rel / "report.pdf"
+            report.write_bytes(b"pdf")
+            return f"文件发你啦\nQQBOT_SEND_FILE: {token} {outbox_rel}/report.pdf"
+
+        event = make_ev("/task 生成报告文件", group="group", mid="artifact-memory")
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(event)
+        await wait_until_sent(adapter, "本次未确认交付")
+
+        history = app.memory.format_history(event)
+        assert "本次未确认交付" in history
+        assert "文件发你啦" not in history
+
+    asyncio.run(go())
+
+
 def test_cursor_output_can_send_human_voice_resource(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -3300,10 +3602,11 @@ def test_cursor_output_rejects_resource_paths_outside_workspace(tmp_path: Path) 
         app.cursor.run = fake_cursor  # type: ignore[method-assign]
 
         await app._handle(make_ev("/task 发文件", group="group", mid="send-res-2"))
-        await wait_until_sent(adapter, "已拒绝发送")
+        await wait_until_sent(adapter, "文件没有成功生成或无法验证")
 
         assert adapter.sent_files == []
         assert adapter.sent_images == []
+        assert adapter.sent[-1][2] == "文件没有成功生成或无法验证，本次未发送。"
 
     asyncio.run(go())
 

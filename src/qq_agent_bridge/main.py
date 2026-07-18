@@ -9,9 +9,11 @@ from datetime import UTC, datetime
 import logging
 import secrets
 import sys
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .artifact_delivery import resolve_artifacts
 from .attachment_cache import AttachmentCache
 from .agent_runtime import build_agent_adapter, run_agent
 from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
@@ -21,7 +23,7 @@ from .memory import ConversationMemory, GroupAmbientMemory
 from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
-from .outgoing_resources import collect_outgoing_resources
+from .outgoing_resources import OutgoingResource, inspect_outgoing_resources
 from .policy import COMMANDS, Job, Policy
 from .prompting import build_agent_prompt, select_profile_prompt
 from .profile_store import write_profiles_to_config
@@ -407,6 +409,60 @@ class App:
         reporter = self._progress_reporters.get(job.id)
         return reporter.send_progress if reporter else None
 
+    async def _repair_outgoing_artifacts(self, job: Job, warnings: tuple[str, ...]) -> str:
+        elapsed = max(0.0, time.time() - job.started)
+        remaining = max(0.0, self.cfg.effective_max_runtime() - elapsed)
+        timeout = min(90.0, remaining)
+        if timeout <= 0:
+            return ""
+
+        safe_warnings = tuple(
+            redact(
+                warning,
+                extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+            ).strip()
+            for warning in warnings
+            if warning.strip()
+        )
+        warning_text = "\n".join(f"- {warning}" for warning in safe_warnings)
+        if not warning_text:
+            warning_text = "- 资源声明无法验证"
+        prompt = "\n".join(
+            [
+                "修复本次任务的输出资源交付。",
+                f"原始任务：{job.args or job.event.text}",
+                "验证失败原因：",
+                warning_text,
+                self._format_outgoing_resource_context(job),
+                "要求：",
+                "1. 只修复缺失的资源声明或文件，复用本次任务已经完成的工作。",
+                "2. 使用当前输出目录和令牌，只输出有效的 QQBOT_SEND_* 指令。",
+                "3. 不要输出解释、寒暄或任何成功声明。",
+            ]
+        )
+        try:
+            return await asyncio.wait_for(
+                run_agent(
+                    self.agent,
+                    prompt,
+                    self.cfg.agent.default_workspace,
+                    "task",
+                    model=self._agent_model_for("task"),
+                    progress=self._progress_callback_for(job),
+                    trace_id=f"{job.id}-artifact-repair",
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("artifact repair failed job=%s error=TimeoutError", job.id)
+        except Exception as exc:  # noqa: BLE001 - repair failure becomes deterministic bridge text
+            logger.warning(
+                "artifact repair failed job=%s error=%s",
+                job.id,
+                type(exc).__name__,
+            )
+        return ""
+
     async def _cleanup_policy(self) -> None:
         if self.policy:
             await self.policy.cleanup()
@@ -449,27 +505,66 @@ class App:
         if job.cmd == "schedule":
             await self._finish_schedule_parse_job(job, result)
             return
+        transactional = False
         if job.allow_outgoing_resources and job.outgoing_dir and job.outgoing_token:
-            clean_result, outgoing, warnings = collect_outgoing_resources(
-                result,
-                self.cfg,
-                outbox_dir=job.outgoing_dir,
-                token=job.outgoing_token,
-                job_id=job.id,
-                expected_outbox=(
-                    (job.outgoing_dir_dev, job.outgoing_dir_ino)
-                    if job.outgoing_dir_dev is not None and job.outgoing_dir_ino is not None
-                    else None
-                ),
+            expected_outbox = (
+                (job.outgoing_dir_dev, job.outgoing_dir_ino)
+                if job.outgoing_dir_dev is not None and job.outgoing_dir_ino is not None
+                else None
             )
+
+            def inspect(text: str):
+                return inspect_outgoing_resources(
+                    text,
+                    self.cfg,
+                    outbox_dir=job.outgoing_dir,
+                    token=job.outgoing_token,
+                    job_id=job.id,
+                    expected_outbox=expected_outbox,
+                )
+
+            resolution = await resolve_artifacts(
+                result,
+                inspect=inspect,
+                repair=lambda warnings: self._repair_outgoing_artifacts(job, warnings),
+                max_items=self.cfg.resources.max_items,
+                max_total_bytes=self.cfg.resources.max_total_bytes,
+            )
+            outgoing = resolution.resources
+            transactional = bool(outgoing) or not resolution.verified
+            if not resolution.verified:
+                reply_text = "文件没有成功生成或无法验证，本次未发送。"
+            elif outgoing:
+                sent = 0
+                failed = 0
+                for index, resource in enumerate(outgoing):
+                    try:
+                        await self._send_outgoing_resource(job, resource, index)
+                    except Exception as exc:  # noqa: BLE001 - isolate each OneBot resource failure
+                        failed += 1
+                        logger.warning(
+                            "outgoing resource delivery failed job=%s index=%d kind=%s error=%s",
+                            job.id,
+                            index,
+                            resource.kind,
+                            type(exc).__name__,
+                        )
+                    else:
+                        sent += 1
+                if failed == 0:
+                    reply_text = resolution.text
+                elif sent == 0:
+                    reply_text = "文件已经生成，但发送到 QQ 失败，本次未确认交付。"
+                else:
+                    reply_text = f"已发送 {sent} 个资源，另有 {failed} 个发送失败。"
+            else:
+                reply_text = resolution.text
         else:
-            clean_result, outgoing, warnings = result, (), []
-        if self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"} and clean_result.strip():
-            self.memory.append_exchange(job.event, job.args or job.event.text, clean_result)
-        reply_text = clean_result
-        if warnings:
-            warning_text = "\n".join(warnings)
-            reply_text = f"{reply_text}\n{warning_text}".strip()
+            reply_text = result
+
+        remember = self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"}
+        if not transactional and remember and reply_text.strip():
+            self.memory.append_exchange(job.event, job.args or job.event.text, reply_text)
         reply_text = guard_internal_output(reply_text)
         ev = job.event
         if reply_text.strip():
@@ -488,14 +583,25 @@ class App:
                     self.proactive.record_bot_send(ev.chat_id)
                 else:
                     await self._send_text(ev.chat_id, ev.is_group, reply, f"{ev.id}-{i}")
-        for i, resource in enumerate(outgoing):
-            echo = f"{ev.id}-r{i}"
-            if resource.kind == "image":
-                await self.adapter.send_image(ev.chat_id, ev.is_group, resource.path, echo)
-            elif resource.kind == "voice":
-                await self.adapter.send_voice(ev.chat_id, ev.is_group, resource.path, echo)
-            elif resource.kind == "file":
-                await self.adapter.send_file(ev.chat_id, ev.is_group, resource.path, echo)
+        if transactional and remember and reply_text.strip():
+            self.memory.append_exchange(job.event, job.args or job.event.text, reply_text)
+
+    async def _send_outgoing_resource(
+        self,
+        job: Job,
+        resource: OutgoingResource,
+        index: int,
+    ) -> None:
+        ev = job.event
+        echo = f"{ev.id}-r{index}"
+        if resource.kind == "image":
+            await self.adapter.send_image(ev.chat_id, ev.is_group, resource.path, echo)
+        elif resource.kind == "voice":
+            await self.adapter.send_voice(ev.chat_id, ev.is_group, resource.path, echo)
+        elif resource.kind == "file":
+            await self.adapter.send_file(ev.chat_id, ev.is_group, resource.path, echo)
+        else:
+            raise ValueError("unsupported outgoing resource kind")
 
     async def _send_text(
         self,
