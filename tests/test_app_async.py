@@ -3795,10 +3795,12 @@ def test_app_shutdown_bounds_cancellation_resistant_repair_drain(
 
         assert cancellation_seen.is_set()
         assert adapter.stopped.is_set()
-        assert app._artifact_repair_tasks == set()
+        assert app._artifact_repair_tasks == {repair_task}
         assert not repair_task.done()
         cleanup_release.set()
         assert await repair_task == "late cleanup"
+        await asyncio.sleep(0)
+        assert app._artifact_repair_tasks == set()
 
     asyncio.run(go())
 

@@ -502,7 +502,7 @@ class App:
         for task in done:
             if not task.cancelled():
                 task.exception()
-        self._artifact_repair_tasks.difference_update(tasks)
+        self._artifact_repair_tasks.difference_update(done)
         if pending:
             logger.warning(
                 "artifact repair shutdown cleanup timed out pending=%d",
