@@ -830,6 +830,70 @@ def test_nested_parent_swap_never_stages_external_bytes(tmp_path: Path, monkeypa
     assert not sending.exists() or not list(sending.iterdir())
 
 
+def test_final_source_open_is_nonblocking_before_type_check(tmp_path: Path, monkeypatch) -> None:
+    outbox = make_outbox(tmp_path)
+    fifo = outbox / "pipe"
+    os.mkfifo(fifo)
+    original_open = outgoing_resources.os.open
+    checked = False
+
+    def checking_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal checked
+        if os.fspath(path) == "pipe" and dir_fd is not None:
+            checked = True
+            if not flags & os.O_NONBLOCK:
+                raise RuntimeError("blocking FIFO open")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(outgoing_resources.os, "open", checking_open)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {fifo.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert checked is True
+    assert result.resources == ()
+
+
+def test_failed_copy_removes_created_inode_without_unlinking_replacement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outbox = make_outbox(tmp_path)
+    source = outbox / "report.pdf"
+    source.write_bytes(b"report")
+    sending = tmp_path / "downloads" / "qq-agent-bridge" / "sending" / "job-1"
+    moved = sending / "moved-original"
+    replacement_bytes = b"replacement"
+
+    def replace_target(_src, _dst, _expected_size: int) -> bool:
+        target = next(sending.iterdir())
+        target.rename(moved)
+        target.write_bytes(replacement_bytes)
+        return False
+
+    monkeypatch.setattr(outgoing_resources, "_copy_stream_bounded", replace_target)
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {source.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert result.resources == ()
+    remaining = list(sending.iterdir())
+    assert len(remaining) == 1
+    assert remaining[0].read_bytes() == replacement_bytes
+
+
 def test_rejects_dot_and_dotdot_source_components(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     report = outbox / "report.pdf"

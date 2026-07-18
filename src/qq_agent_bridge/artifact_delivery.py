@@ -118,6 +118,6 @@ def _resource_matches_expectation(
     if resource.kind != expectation.kind:
         return False
     if expectation.requested_basename is None:
-        return True
+        return False
     source_name = resource.source_path.name if resource.source_path is not None else resource.name
     return source_name == expectation.requested_basename
