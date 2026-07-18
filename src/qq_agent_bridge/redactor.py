@@ -10,6 +10,10 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         r"\1[REDACTED]",
     ),
     (
+        re.compile(r"(?i)((?:资源发送令牌|resource\s+send(?:ing)?\s+token)\s*[：:]\s*)(\S+)"),
+        r"\1[REDACTED]",
+    ),
+    (
         re.compile(
             r"(?i)(api[_-]?key|token|secret|password|passwd|auth)"
             r"[\"'\s:=]+([A-Za-z0-9_\-]{8,})"

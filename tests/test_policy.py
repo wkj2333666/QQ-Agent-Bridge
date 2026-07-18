@@ -35,6 +35,32 @@ def make_ev(
     )
 
 
+def test_job_repr_omits_resource_sensitive_state() -> None:
+    token = "repr-resource-token"
+    outbox = "/private/workspace/downloads/outgoing/job-1"
+    raw_result = f"raw result {token} {outbox}"
+    job = Job(
+        id="job-1",
+        cmd="task",
+        args="report",
+        event=make_ev("/task report"),
+        result=raw_result,
+        artifact_result=raw_result,
+        outgoing_dir=outbox,
+        outgoing_token=token,
+        outgoing_dir_dev=123,
+        outgoing_dir_ino=456,
+    )
+
+    shown = repr(job)
+
+    assert token not in shown
+    assert outbox not in shown
+    assert raw_result not in shown
+    assert "outgoing_dir_dev" not in shown
+    assert "outgoing_dir_ino" not in shown
+
+
 def test_parse_and_allow() -> None:
     cfg = BridgeConfig(
         owners=["1000000001"],

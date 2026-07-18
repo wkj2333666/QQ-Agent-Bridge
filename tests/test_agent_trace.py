@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import sys
@@ -97,6 +98,21 @@ printf '%s\\n' 'stderr secret=abcdefgh123456' >&2
     assert "[REDACTED]" in serialized
 
 
+def test_trace_redacts_bare_resource_token_wording(tmp_path: Path) -> None:
+    trace_root = _trace_root_for(tmp_path)
+    cfg = _config(tmp_path, trace_root)
+    token = "trace-resource-token-value"
+    trace = AgentTrace(cfg, "job-resource-token", "task", "auto", str(tmp_path))
+
+    trace.record("stdout", "assistant_message", summary=f"资源发送令牌：{token}")
+    trace.close()
+
+    path, _records = _read_trace(trace_root)
+    serialized = path.read_text(encoding="utf-8")
+    assert token not in serialized
+    assert "[REDACTED]" in serialized
+
+
 def test_trace_root_and_file_are_private_when_supported(tmp_path: Path) -> None:
     trace_root = _trace_root_for(tmp_path)
     cfg = _config(tmp_path, trace_root)
@@ -141,6 +157,31 @@ def test_custom_non_json_trace_closes_without_changing_result(tmp_path: Path) ->
     assert result == "custom result"
     assert any(record["event"] == "text" and record["stream"] == "stdout" for record in records)
     assert any(record["event"] == "exit" for record in records)
+
+
+def test_custom_command_invocation_log_omits_prompt_resource_token(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script = tmp_path / "custom.sh"
+    _write_script(script, "printf '%s\\n' 'custom result'")
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.runtime = "custom-cli"
+    cfg.agent.command = {"task": [str(script), "{prompt}"]}
+    cfg.agent.use_bwrap = False
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.force_task_tools = False
+    token = "logged-repair-resource-token"
+    prompt = f"修复资源。资源发送令牌：{token}"
+
+    with caplog.at_level(logging.INFO, logger="qq_agent_bridge.cursor_adapter"):
+        result = asyncio.run(CustomCommandAdapter(cfg).run(prompt, str(tmp_path), "task"))
+
+    assert result == "custom result"
+    assert token not in caplog.text
+    assert prompt not in caplog.text
+    assert "agent invoke" in caplog.text
 
 
 def test_timeout_trace_records_timeout_and_exit(tmp_path: Path) -> None:

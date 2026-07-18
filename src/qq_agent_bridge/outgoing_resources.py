@@ -85,7 +85,7 @@ def inspect_outgoing_resources(
     attempted = 0
     unresolved = 0
     recovered = 0
-    seen_sources: set[tuple[str, str]] = set()
+    seen_sources: set[str] = set()
 
     def warn(message: str) -> None:
         nonlocal unresolved
@@ -106,7 +106,7 @@ def inspect_outgoing_resources(
         if outbox is None or not _is_relative_to(resolved, outbox):
             warn("已拒绝发送资源：路径不在本次任务输出目录内")
             return None
-        source_key = kind, str(resolved)
+        source_key = str(resolved)
         if source_key in seen_sources:
             return None
         seen_sources.add(source_key)
@@ -190,7 +190,12 @@ def inspect_outgoing_resources(
             if duration_seconds > MAX_QQ_VOICE_SECONDS:
                 warn("无法发送QQ语音：时长超过60秒限制")
                 continue
-        recovered_path = _recover_glued_path(raw_path, workspace, outbox)
+        recovered_path = _recover_glued_path(
+            raw_path,
+            workspace,
+            outbox,
+            cfg.resources.max_bytes,
+        )
         if recovered_path is not None:
             raw_path = recovered_path
             recovered += 1
@@ -213,7 +218,7 @@ def inspect_outgoing_resources(
     ):
         outbox, outbox_warning = _validate_outbox(outbox_path, workspace, expected_outbox)
         if outbox_warning is None and outbox is not None:
-            candidates = _eligible_top_level_files(outbox)
+            candidates = _eligible_top_level_files(outbox, cfg.resources.max_bytes)
             if len(candidates) == 1:
                 candidate = candidates[0]
                 kind = "image" if candidate.suffix.lower() in _IMAGE_SUFFIXES else "file"
@@ -234,9 +239,14 @@ def inspect_outgoing_resources(
     )
 
 
-def _recover_glued_path(raw_path: str, workspace: Path, outbox: Path) -> str | None:
+def _recover_glued_path(
+    raw_path: str,
+    workspace: Path,
+    outbox: Path,
+    max_bytes: int,
+) -> str | None:
     matches: list[str] = []
-    for candidate in _eligible_top_level_files(outbox):
+    for candidate in _eligible_top_level_files(outbox, max_bytes):
         absolute = candidate.as_posix()
         relative = candidate.relative_to(workspace).as_posix()
         for shown in (absolute, relative):
@@ -249,7 +259,7 @@ def _recover_glued_path(raw_path: str, workspace: Path, outbox: Path) -> str | N
     return winners[0] if len(winners) == 1 else None
 
 
-def _eligible_top_level_files(outbox: Path) -> list[Path]:
+def _eligible_top_level_files(outbox: Path, max_bytes: int) -> list[Path]:
     eligible: list[Path] = []
     try:
         candidates = outbox.iterdir()
@@ -262,7 +272,11 @@ def _eligible_top_level_files(outbox: Path) -> list[Path]:
             candidate_stat = candidate.lstat()
         except OSError:
             continue
-        if stat.S_ISREG(candidate_stat.st_mode) and candidate_stat.st_nlink == 1:
+        if (
+            stat.S_ISREG(candidate_stat.st_mode)
+            and candidate_stat.st_nlink == 1
+            and candidate_stat.st_size <= max_bytes
+        ):
             eligible.append(candidate)
     return eligible
 

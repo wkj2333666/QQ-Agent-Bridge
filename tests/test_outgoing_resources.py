@@ -297,7 +297,34 @@ def test_unique_discovery_rejects_oversized_file(tmp_path: Path) -> None:
     )
 
     assert result.resources == ()
+    assert result.clean_text == "普通文本回答"
+    assert result.warnings == ()
+    assert result.unresolved == 0
     assert result.recovered == 0
+
+
+def test_unique_discovery_ignores_oversized_decoy_beside_eligible_file(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"pdf")
+    (outbox / "oversized.tmp").write_bytes(b"too-large")
+    cfg = make_cfg(tmp_path)
+    cfg.resources.max_bytes = 3
+
+    result = inspect_outgoing_resources(
+        "文件已经整理好",
+        cfg,
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.clean_text == "文件已经整理好"
+    assert len(result.resources) == 1
+    assert result.resources[0].source_path == outbox / "report.pdf"
+    assert result.resources[0].path.read_bytes() == b"pdf"
+    assert result.warnings == ()
+    assert result.unresolved == 0
+    assert result.recovered == 1
 
 
 def test_unique_discovery_classifies_images_and_audio_as_files(tmp_path: Path) -> None:
@@ -395,6 +422,32 @@ def test_duplicate_directives_stage_and_count_resource_once(tmp_path: Path) -> N
     assert len(result.resources) == 1
     assert result.resources[0].path.read_bytes() == b"pdf"
     assert result.warnings == ()
+    assert len(list(result.resources[0].path.parent.iterdir())) == 1
+
+
+def test_same_source_emitted_as_image_and_file_is_staged_once(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    image = outbox / "plot.png"
+    image.write_bytes(b"png")
+    relative = image.relative_to(tmp_path)
+
+    result = inspect_outgoing_resources(
+        "\n".join(
+            (
+                f"QQBOT_SEND_IMAGE: send-token {relative}",
+                f"QQBOT_SEND_FILE: send-token {relative}",
+            )
+        ),
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.attempted == 2
+    assert [resource.kind for resource in result.resources] == ["image"]
+    assert result.warnings == ()
+    assert result.unresolved == 0
     assert len(list(result.resources[0].path.parent.iterdir())) == 1
 
 

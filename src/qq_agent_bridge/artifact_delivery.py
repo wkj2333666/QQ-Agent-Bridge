@@ -65,13 +65,13 @@ def _merge_resources(
     max_total_bytes: int,
 ) -> tuple[tuple[OutgoingResource, ...], bool, int]:
     merged: list[OutgoingResource] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     total = 0
     repair_contributions = 0
     for resources, from_repair in ((first, False), (repaired, True)):
         for resource in resources:
             source = resource.source_path or resource.path
-            key = resource.kind, str(source.resolve(strict=False))
+            key = str(source.resolve(strict=False))
             if key in seen:
                 continue
             if len(merged) >= max(0, max_items) or total + resource.size_bytes > max_total_bytes:
