@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import sys
 import wave
@@ -1075,6 +1076,32 @@ def test_reply_chunks_wait_between_sends(monkeypatch: object) -> None:
         assert [item[3] for item in adapter.sent] == ["chunk-delay-0", "chunk-delay-1", "chunk-delay-2"]
 
     asyncio.run(go())
+
+
+def test_reply_delivery_failure_log_uses_exception_class_only(caplog: object) -> None:
+    async def go() -> None:
+        app = App(make_cfg())
+
+        async def failed() -> str:
+            raise RuntimeError(
+                "QQBOT_SEND_FILE: bare-directive-token downloads/private-report.pdf"
+            )
+
+        job = Job(
+            id="secret-safe-delivery",
+            cmd="task",
+            args="report",
+            event=make_ev("/task report"),
+            task=asyncio.create_task(failed()),
+        )
+        await app._reply_when_done(job)
+
+    with caplog.at_level(logging.ERROR, logger="qq_agent_bridge.main"):  # type: ignore[attr-defined]
+        asyncio.run(go())
+
+    assert "RuntimeError" in caplog.text  # type: ignore[attr-defined]
+    assert "bare-directive-token" not in caplog.text  # type: ignore[attr-defined]
+    assert all(record.exc_info is None for record in caplog.records)  # type: ignore[attr-defined]
 
 
 def test_status_path_runs_cleanup_for_seen_messages() -> None:
@@ -3420,6 +3447,45 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
         assert "只输出有效的 QQBOT_SEND_* 指令" in prompt
         assert len(timeouts) == 1
         assert 0 < timeouts[0] <= 30
+
+    asyncio.run(go())
+
+
+def test_artifact_repair_uses_job_specific_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        app = App(cfg)
+        job = Job(
+            id="artifact-job-budget",
+            cmd="task",
+            args="生成报告",
+            event=make_ev("/task 生成报告", group="group", mid="artifact-job-budget"),
+            started=95.0,
+            timeout_seconds=12.0,
+        )
+        app._configure_outgoing_resources(job)
+        timeouts: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def fake_run_agent(*args: Any, **kwargs: Any) -> str:
+            return ""
+
+        async def capture_wait_for(awaitable: Any, timeout: float) -> Any:
+            timeouts.append(timeout)
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(main_module.time, "time", lambda: 100.0)  # type: ignore[attr-defined]
+        monkeypatch.setattr(main_module, "run_agent", fake_run_agent)  # type: ignore[attr-defined]
+        monkeypatch.setattr(main_module.asyncio, "wait_for", capture_wait_for)  # type: ignore[attr-defined]
+
+        await app._repair_outgoing_artifacts(job, ("missing",))
+
+        assert timeouts == [7.0]
 
     asyncio.run(go())
 

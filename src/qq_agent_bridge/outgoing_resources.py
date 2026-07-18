@@ -85,6 +85,7 @@ def inspect_outgoing_resources(
     attempted = 0
     unresolved = 0
     recovered = 0
+    seen_sources: set[tuple[str, str]] = set()
 
     def warn(message: str) -> None:
         nonlocal unresolved
@@ -98,15 +99,19 @@ def inspect_outgoing_resources(
         duration_seconds: int | None,
     ) -> OutgoingResource | None:
         nonlocal total_bytes
-        if len(resources) >= max(0, cfg.resources.max_items):
-            warn("无法发送资源：超过发送数量限制")
-            return None
         resolved = _resolve_workspace_path(raw_path, workspace)
         if resolved is None:
             warn("已拒绝发送资源：路径不在工作区内")
             return None
         if outbox is None or not _is_relative_to(resolved, outbox):
             warn("已拒绝发送资源：路径不在本次任务输出目录内")
+            return None
+        source_key = kind, str(resolved)
+        if source_key in seen_sources:
+            return None
+        seen_sources.add(source_key)
+        if len(resources) >= max(0, cfg.resources.max_items):
+            warn("无法发送资源：超过发送数量限制")
             return None
         try:
             source_stat = resolved.stat()
@@ -185,9 +190,6 @@ def inspect_outgoing_resources(
             if duration_seconds > MAX_QQ_VOICE_SECONDS:
                 warn("无法发送QQ语音：时长超过60秒限制")
                 continue
-        if len(resources) >= max(0, cfg.resources.max_items):
-            warn("无法发送资源：超过发送数量限制")
-            continue
         recovered_path = _recover_glued_path(raw_path, workspace, outbox)
         if recovered_path is not None:
             raw_path = recovered_path

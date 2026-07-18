@@ -163,9 +163,10 @@ def test_does_not_guess_when_multiple_top_level_files_exist(tmp_path: Path) -> N
     outbox = make_outbox(tmp_path)
     (outbox / "notes.md").write_text("notes", encoding="utf-8")
     (outbox / "report.pdf").write_bytes(b"pdf")
+    missing = outbox / "missing.pdf"
 
     result = inspect_outgoing_resources(
-        "QQBOT_SEND_FILE: send-token missing.pdf",
+        f"QQBOT_SEND_FILE: send-token {missing.relative_to(tmp_path)}",
         make_cfg(tmp_path),
         outbox_dir=outbox,
         token="send-token",
@@ -174,15 +175,17 @@ def test_does_not_guess_when_multiple_top_level_files_exist(tmp_path: Path) -> N
 
     assert result.resources == ()
     assert result.unresolved == 1
+    assert result.warnings == ("无法发送资源：文件不存在或不是普通文件",)
 
 
 def test_unique_discovery_ignores_nested_temporary_files(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     (outbox / "tmp").mkdir()
     (outbox / "tmp" / "frame.png").write_bytes(b"frame")
+    missing = outbox / "missing.pdf"
 
     result = inspect_outgoing_resources(
-        "QQBOT_SEND_FILE: send-token missing.pdf",
+        f"QQBOT_SEND_FILE: send-token {missing.relative_to(tmp_path)}",
         make_cfg(tmp_path),
         outbox_dir=outbox,
         token="send-token",
@@ -190,6 +193,7 @@ def test_unique_discovery_ignores_nested_temporary_files(tmp_path: Path) -> None
     )
 
     assert result.resources == ()
+    assert result.warnings == ("无法发送资源：文件不存在或不是普通文件",)
 
 
 def test_recovers_unique_top_level_file_when_agent_omits_directive(tmp_path: Path) -> None:
@@ -369,6 +373,29 @@ def test_collects_image_and_file_directives_inside_workspace(tmp_path: Path) -> 
     assert resources[0].path != image
     assert resources[0].path.read_bytes() == b"png"
     assert resources[1].path.read_bytes() == b"pdf"
+
+
+def test_duplicate_directives_stage_and_count_resource_once(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    report = outbox / "report.pdf"
+    report.write_bytes(b"pdf")
+    cfg = make_cfg(tmp_path)
+    cfg.resources.max_items = 1
+    directive = f"QQBOT_SEND_FILE: send-token {report.relative_to(tmp_path)}"
+
+    result = inspect_outgoing_resources(
+        f"{directive}\n{directive}",
+        cfg,
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.attempted == 2
+    assert len(result.resources) == 1
+    assert result.resources[0].path.read_bytes() == b"pdf"
+    assert result.warnings == ()
+    assert len(list(result.resources[0].path.parent.iterdir())) == 1
 
 
 def test_collects_animated_image_without_changing_its_format(tmp_path: Path) -> None:
