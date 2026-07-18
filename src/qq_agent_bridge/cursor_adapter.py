@@ -61,6 +61,20 @@ class CursorAdapter:
             return given
         return shutil.which(given) or given
 
+    @staticmethod
+    def _is_usage_limit_error(text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        return any(
+            phrase in normalized
+            for phrase in (
+                "you've hit your usage limit",
+                "you have hit your usage limit",
+                "usage limit",
+                "spend limit",
+                "monthly cycle",
+            )
+        )
+
     def _build_cmd(
         self,
         prompt: str,
@@ -417,6 +431,29 @@ class CursorAdapter:
                     proc.returncode,
                     redact(cleaned)[:1000],
                 )
+                if (
+                    model
+                    and str(model).strip().lower() != "auto"
+                    and self._is_usage_limit_error(cleaned)
+                ):
+                    logger.warning(
+                        "model %s hit its usage limit; retrying once with Auto",
+                        model,
+                    )
+                    if progress:
+                        try:
+                            await progress("指定模型额度已用尽，正在切换 Auto 重试。")
+                        except Exception:  # noqa: BLE001 - fallback must not fail the job
+                            logger.exception("usage-limit fallback progress failed")
+                    fallback_trace_id = f"{trace_id}-auto-fallback" if trace_id else None
+                    return await self.run(
+                        prompt,
+                        ws,
+                        mode,
+                        model="auto",
+                        progress=progress,
+                        trace_id=fallback_trace_id,
+                    )
                 return "[error] 助手执行失败"
             return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"
         except asyncio.TimeoutError:

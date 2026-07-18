@@ -950,6 +950,35 @@ def test_nonzero_subprocess_output_is_generic(tmp_path: Path) -> None:
     assert "cli" not in lowered
 
 
+def test_explicit_model_usage_limit_falls_back_to_auto(tmp_path: Path) -> None:
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *'--model composer'*) printf \"You've hit your usage limit\" >&2; exit 1;;\n"
+        "  *) printf 'auto result'; exit 0;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("read image", str(tmp_path), "task", model="composer"))
+
+    assert result == "auto result"
+
+
+def test_usage_limit_detection_does_not_match_generic_failures() -> None:
+    assert CursorAdapter._is_usage_limit_error("You've hit your usage limit")  # noqa: SLF001
+    assert CursorAdapter._is_usage_limit_error("set a Spend Limit to continue")  # noqa: SLF001
+    assert not CursorAdapter._is_usage_limit_error("permission denied")  # noqa: SLF001
+
+
 def _has_bind(cmd: list[str], flag: str, source: str, target: str) -> bool:
     for idx, item in enumerate(cmd[:-2]):
         if item == flag and cmd[idx + 1] == source and cmd[idx + 2] == target:
