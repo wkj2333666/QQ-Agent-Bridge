@@ -69,9 +69,12 @@ class CursorAdapter:
             for phrase in (
                 "you've hit your usage limit",
                 "you have hit your usage limit",
+                "you're out of usage",
+                "you are out of usage",
                 "usage limit",
                 "spend limit",
                 "monthly cycle",
+                "switch to auto",
             )
         )
 
