@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CustomCommandAdapter, CursorAdapter  # type: ignore
 from qq_agent_bridge.agent_trace import AgentTrace  # type: ignore
+from qq_agent_bridge.redactor import strip_ansi  # type: ignore
 
 
 def _config(workspace: Path, trace_root: Path) -> BridgeConfig:
@@ -149,6 +150,47 @@ def test_cursor_trace_and_failure_log_redact_job_scoped_bare_values(
     assert token not in caplog.text
     assert outbox not in caplog.text
     assert "ordinary-marker" in caplog.text
+
+
+def test_trace_redacts_job_values_split_by_ansi(tmp_path: Path) -> None:
+    trace_root = _trace_root_for(tmp_path)
+    cfg = _config(tmp_path, trace_root)
+    token = "ansi-split-sensitive-value"
+    outbox = (tmp_path / "downloads" / "outgoing" / "job-ansi").as_posix()
+
+    def with_ansi(value: str) -> str:
+        split_at = max(1, len(value) // 2)
+        return f"{value[:split_at]}\x1b[32m{value[split_at:]}\x1b[0m"
+
+    trace = AgentTrace(
+        cfg,
+        "job-ansi-redaction",
+        "task",
+        "auto",
+        str(tmp_path),
+        redact_extra=(token, outbox),
+    )
+    safe_text = strip_ansi(
+        trace._safe_text(  # noqa: SLF001
+            f"trace ordinary-marker {with_ansi(token)} {with_ansi(outbox)}",
+            1000,
+        )
+    )
+    trace.record(
+        "stdout",
+        "assistant_message",
+        summary=f"trace ordinary-marker {with_ansi(token)} {with_ansi(outbox)}",
+    )
+    trace.close()
+
+    path, _records = _read_trace(trace_root)
+    serialized = strip_ansi(path.read_text(encoding="utf-8"))
+    assert token not in safe_text
+    assert outbox not in safe_text
+    assert "trace ordinary-marker" in safe_text
+    assert token not in serialized
+    assert outbox not in serialized
+    assert "trace ordinary-marker" in serialized
 
 
 def test_trace_root_and_file_are_private_when_supported(tmp_path: Path) -> None:

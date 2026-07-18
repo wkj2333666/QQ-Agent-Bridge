@@ -302,7 +302,7 @@ class AgentTrace:
         return f"<{type(value).__name__}>"
 
     def _safe_text(self, value: Any, limit: int) -> str:
-        return strip_ansi(redact(str(value), extra=self._redact_extra))[:limit]
+        return redact(strip_ansi(str(value)), extra=self._redact_extra)[:limit]
 
     def _trace_root(self, configured: str, workspace: str) -> Path:
         configured_path = Path(configured or "runtime/agent-traces").expanduser()

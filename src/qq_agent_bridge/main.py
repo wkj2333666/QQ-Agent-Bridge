@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 import logging
+import re
 import secrets
 import sys
 import time
@@ -29,7 +30,7 @@ from .prompting import build_agent_prompt, select_profile_prompt
 from .profile_store import write_profiles_to_config
 from .proactive import MentionDecision, ProactiveSpeaker
 from .progress import ProgressReporter
-from .redactor import redact
+from .redactor import redact, strip_ansi
 from .resources import ResourceManager, format_resource_context
 from .runtime_skill import prepare_runtime_skill_bundle
 from .schedule_parser import (
@@ -48,6 +49,12 @@ from .whisper_runner import WhisperRunner
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("qq-bridge")
 ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS = 1.0
+_PRE_ACK_DELIVERY_CLAIM_RE = re.compile(
+    r"(?:文件.{0,8}发(?:给)?你(?:了|啦)|已发送(?:文件|资源)?|发送成功|已交付|已上传|已附加|"
+    r"\b(?:attached|sent|delivered|uploaded)\b)",
+    re.IGNORECASE,
+)
+_PRE_ACK_DELIVERY_PROGRESS = "正在验证并发送任务输出。"
 
 
 class App:
@@ -414,7 +421,10 @@ class App:
         redact_extra = self._outgoing_redaction_values(job)
 
         async def send_progress(text: str) -> None:
-            await reporter.send_progress(redact(text, extra=redact_extra))
+            cleaned = redact(strip_ansi(text), extra=redact_extra)
+            if _PRE_ACK_DELIVERY_CLAIM_RE.search(cleaned):
+                cleaned = _PRE_ACK_DELIVERY_PROGRESS
+            await reporter.send_progress(cleaned)
 
         return send_progress
 
@@ -629,7 +639,7 @@ class App:
             reply_text = result
 
         reply_text = redact(
-            reply_text,
+            strip_ansi(reply_text),
             extra=self._outgoing_redaction_values(job),
         )[: self.cfg.effective_max_chars()]
         remember = self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"}

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import BridgeConfig, LEGACY_OWNER_COMMANDS
-from .redactor import redact
+from .redactor import redact, strip_ansi
 from .types import ChatEvent, CommandName, ParsedCommand
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ class Policy:
             job.state = "done"
             job.artifact_result = result if job.allow_outgoing_resources else None
             job.result = redact(
-                result,
+                strip_ansi(result),
                 extra=(job.outgoing_token or "", job.outgoing_dir or ""),
             )[: self.cfg.effective_max_chars()]
             return job.result

@@ -538,8 +538,6 @@ class CursorAdapter:
                 if clean_message.strip():
                     await flush_pending_assistant_message()
                     pending_assistant_message = clean_message
-                elif outgoing_directives:
-                    await flush_pending_assistant_message()
                 continue
             if text:
                 await flush_pending_assistant_message()
