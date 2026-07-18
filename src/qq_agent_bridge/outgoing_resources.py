@@ -22,11 +22,23 @@ _DIRECTIVE_RE = re.compile(
 
 
 @dataclass(frozen=True)
+class ArtifactInspection:
+    clean_text: str
+    resources: tuple["OutgoingResource", ...]
+    warnings: tuple[str, ...]
+    attempted: int
+    unresolved: int
+    recovered: int
+
+
+@dataclass(frozen=True)
 class OutgoingResource:
     kind: str
     path: Path
     name: str
     duration_seconds: int | None = None
+    source_path: Path | None = None
+    size_bytes: int = 0
 
 
 def collect_outgoing_resources(
@@ -38,6 +50,26 @@ def collect_outgoing_resources(
     job_id: str = "job",
     expected_outbox: tuple[int, int] | None = None,
 ) -> tuple[str, tuple[OutgoingResource, ...], list[str]]:
+    result = inspect_outgoing_resources(
+        text,
+        cfg,
+        outbox_dir=outbox_dir,
+        token=token,
+        job_id=job_id,
+        expected_outbox=expected_outbox,
+    )
+    return result.clean_text, result.resources, list(result.warnings)
+
+
+def inspect_outgoing_resources(
+    text: str,
+    cfg: BridgeConfig,
+    *,
+    outbox_dir: Path | str | None = None,
+    token: str | None = None,
+    job_id: str = "job",
+    expected_outbox: tuple[int, int] | None = None,
+) -> ArtifactInspection:
     workspace = Path(cfg.agent.default_workspace).expanduser().resolve(strict=False)
     workspace_allowed = cfg.is_workspace_allowed(str(workspace))
     outbox_path = Path(outbox_dir).expanduser() if outbox_dir else None
@@ -45,78 +77,91 @@ def collect_outgoing_resources(
     warnings: list[str] = []
     kept_lines: list[str] = []
     total_bytes = 0
+    attempted = 0
+    unresolved = 0
+    recovered = 0
+
+    def warn(message: str) -> None:
+        nonlocal unresolved
+        warnings.append(message)
+        unresolved += 1
 
     for line in text.splitlines():
         match = _DIRECTIVE_RE.match(line)
         if not match:
             kept_lines.append(line)
             continue
+        attempted += 1
         directive_kind = match.group(1).lower()
         kind = "file" if directive_kind == "audio" else directive_kind
         if not workspace_allowed:
-            warnings.append("已拒绝发送资源：工作区未授权")
+            warn("已拒绝发送资源：工作区未授权")
             continue
         if outbox_path is None or not token:
-            warnings.append("已拒绝发送资源：当前任务未启用资源发送")
+            warn("已拒绝发送资源：当前任务未启用资源发送")
             continue
         outbox, outbox_warning = _validate_outbox(outbox_path, workspace, expected_outbox)
         if outbox_warning:
-            warnings.append(outbox_warning)
+            warn(outbox_warning)
             continue
         parsed = _parse_token_path(match.group(2), token)
         if parsed is None:
-            warnings.append("已拒绝发送资源：令牌不匹配")
+            warn("已拒绝发送资源：令牌不匹配")
             continue
         raw_path, metadata = parsed
         duration_seconds = None
         if directive_kind == "voice":
             duration_seconds = _duration_seconds_from_metadata(metadata)
             if duration_seconds is None:
-                warnings.append("无法发送QQ语音：缺少时长元数据，需确认不超过60秒")
+                warn("无法发送QQ语音：缺少时长元数据，需确认不超过60秒")
                 continue
             if duration_seconds > MAX_QQ_VOICE_SECONDS:
-                warnings.append("无法发送QQ语音：时长超过60秒限制")
+                warn("无法发送QQ语音：时长超过60秒限制")
                 continue
         if len(resources) >= max(0, cfg.resources.max_items):
-            warnings.append("无法发送资源：超过发送数量限制")
+            warn("无法发送资源：超过发送数量限制")
             continue
+        recovered_path = _recover_glued_path(raw_path, workspace, outbox)
+        if recovered_path is not None:
+            raw_path = recovered_path
+            recovered += 1
         resolved = _resolve_workspace_path(raw_path, workspace)
         if resolved is None:
-            warnings.append("已拒绝发送资源：路径不在工作区内")
+            warn("已拒绝发送资源：路径不在工作区内")
             continue
         if not _is_relative_to(resolved, outbox):
-            warnings.append("已拒绝发送资源：路径不在本次任务输出目录内")
+            warn("已拒绝发送资源：路径不在本次任务输出目录内")
             continue
         try:
             source_stat = resolved.stat()
         except OSError:
-            warnings.append("无法发送资源：文件不存在或不是普通文件")
+            warn("无法发送资源：文件不存在或不是普通文件")
             continue
         if not stat.S_ISREG(source_stat.st_mode):
-            warnings.append("无法发送资源：文件不存在或不是普通文件")
+            warn("无法发送资源：文件不存在或不是普通文件")
             continue
         if source_stat.st_nlink != 1:
-            warnings.append("无法发送资源：文件不是本次任务生成的独立文件")
+            warn("无法发送资源：文件不是本次任务生成的独立文件")
             continue
         size = source_stat.st_size
         if size > cfg.resources.max_bytes:
-            warnings.append("无法发送资源：文件超过大小限制")
+            warn("无法发送资源：文件超过大小限制")
             continue
         if total_bytes + size > cfg.resources.max_total_bytes:
-            warnings.append("无法发送资源：资源总大小超过限制")
+            warn("无法发送资源：资源总大小超过限制")
             continue
         if directive_kind == "voice":
             actual_duration = _probe_audio_duration_seconds(resolved)
             if actual_duration is None:
-                warnings.append("无法发送QQ语音：无法验证实际时长")
+                warn("无法发送QQ语音：无法验证实际时长")
                 continue
             if actual_duration > MAX_QQ_VOICE_SECONDS:
-                warnings.append("无法发送QQ语音：实际时长超过60秒限制")
+                warn("无法发送QQ语音：实际时长超过60秒限制")
                 continue
             duration_seconds = max(1, round(actual_duration))
         stable = _copy_for_sending(resolved, workspace, cfg, job_id, len(resources), source_stat)
         if stable is None:
-            warnings.append("无法发送资源：文件状态变化，已拒绝发送")
+            warn("无法发送资源：文件状态变化，已拒绝发送")
             continue
         resources.append(
             OutgoingResource(
@@ -124,12 +169,54 @@ def collect_outgoing_resources(
                 path=stable,
                 name=stable.name,
                 duration_seconds=duration_seconds,
+                source_path=resolved,
+                size_bytes=size,
             )
         )
         total_bytes += size
 
     cleaned = "\n".join(line for line in kept_lines).strip()
-    return cleaned, tuple(resources), warnings
+    return ArtifactInspection(
+        clean_text=cleaned,
+        resources=tuple(resources),
+        warnings=tuple(warnings),
+        attempted=attempted,
+        unresolved=unresolved,
+        recovered=recovered,
+    )
+
+
+def _recover_glued_path(raw_path: str, workspace: Path, outbox: Path) -> str | None:
+    matches: list[str] = []
+    for candidate in _eligible_top_level_files(outbox):
+        absolute = candidate.as_posix()
+        relative = candidate.relative_to(workspace).as_posix()
+        for shown in (absolute, relative):
+            if raw_path.startswith(shown) and raw_path != shown:
+                matches.append(shown)
+    if not matches:
+        return None
+    longest = max(len(value) for value in matches)
+    winners = sorted({value for value in matches if len(value) == longest})
+    return winners[0] if len(winners) == 1 else None
+
+
+def _eligible_top_level_files(outbox: Path) -> list[Path]:
+    eligible: list[Path] = []
+    try:
+        candidates = outbox.iterdir()
+    except OSError:
+        return eligible
+    for candidate in candidates:
+        if candidate.name.startswith("."):
+            continue
+        try:
+            candidate_stat = candidate.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(candidate_stat.st_mode) and candidate_stat.st_nlink == 1:
+            eligible.append(candidate)
+    return eligible
 
 
 def _parse_token_path(value: str, expected_token: str) -> tuple[str, list[str]] | None:
