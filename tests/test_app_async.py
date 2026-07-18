@@ -1491,17 +1491,23 @@ def test_group_owner_can_set_mode_and_persist_without_rewriting_other_config(
     asyncio.run(go())
 
 
-def test_group_owner_can_set_chat_mode() -> None:
+def test_group_owner_can_set_chat_mode(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
         cfg = make_cfg()
         app = make_app(cfg, lambda *_args: "unused", adapter)
+        app.config_path = tmp_path / "config.yaml"
+        app.config_path.write_text(
+            "mention_modes:\n  default: chat\n  groups: {}\n",
+            encoding="utf-8",
+        )
 
         await app._handle(
             make_ev("/mode set chat", sender="owner", group="group", mid="mode-chat-set")
         )
 
         assert cfg.mention_mode_for_group("group") == "chat"
+        assert BridgeConfig.load(app.config_path).mention_modes.groups == {"group": "chat"}
         assert adapter.sent == [
             (
                 "group",
