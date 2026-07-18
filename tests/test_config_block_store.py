@@ -14,6 +14,13 @@ from qq_agent_bridge.mention_mode_store import write_mention_modes_to_config  # 
 from qq_agent_bridge.profile_store import write_profiles_to_config  # type: ignore
 
 
+def test_repository_local_config_is_protected_from_test_writes() -> None:
+    local_config = Path(__file__).resolve().parents[1] / "config.yaml"
+
+    with pytest.raises(AssertionError, match="repository-local config.yaml"):
+        config_block_store._write_text_atomic(local_config, "should not be written\n")
+
+
 def test_rewriting_identical_block_does_not_append_duplicate(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     modes = MentionModeConfig(default="ask", groups={"group": "task"})
