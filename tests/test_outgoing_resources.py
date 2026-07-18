@@ -76,10 +76,11 @@ def test_structured_inspection_reports_unresolved_missing_directive(tmp_path: Pa
 def test_recovers_unique_top_level_outbox_file_after_broken_directive(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     report = outbox / "report.pdf"
+    missing = outbox / "missing.pdf"
     report.write_bytes(b"pdf")
 
     result = inspect_outgoing_resources(
-        "QQBOT_SEND_FILE: send-token missing.pdf",
+        f"QQBOT_SEND_FILE: send-token {missing.relative_to(tmp_path)}",
         make_cfg(tmp_path),
         outbox_dir=outbox,
         token="send-token",
@@ -88,7 +89,74 @@ def test_recovers_unique_top_level_outbox_file_after_broken_directive(tmp_path: 
 
     assert len(result.resources) == 1
     assert result.resources[0].path.read_bytes() == b"pdf"
+    assert result.warnings == ()
     assert (result.unresolved, result.recovered) == (0, 1)
+
+
+def test_unique_discovery_does_not_recover_after_token_mismatch(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "QQBOT_SEND_FILE: wrong-token missing.pdf",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.unresolved == 1
+    assert result.warnings == ("已拒绝发送资源：令牌不匹配",)
+
+
+def test_unique_discovery_does_not_recover_outbox_external_workspace_file(
+    tmp_path: Path,
+) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"pdf")
+    outside_outbox = tmp_path / "elsewhere.pdf"
+    outside_outbox.write_bytes(b"elsewhere")
+
+    result = inspect_outgoing_resources(
+        f"QQBOT_SEND_FILE: send-token {outside_outbox.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.unresolved == 1
+    assert result.warnings == ("已拒绝发送资源：路径不在本次任务输出目录内",)
+
+
+def test_unique_discovery_does_not_recover_mixed_missing_and_token_mismatch(
+    tmp_path: Path,
+) -> None:
+    outbox = make_outbox(tmp_path)
+    missing = outbox / "missing.pdf"
+    (outbox / "report.pdf").write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "\n".join(
+            (
+                f"QQBOT_SEND_FILE: send-token {missing.relative_to(tmp_path)}",
+                "QQBOT_SEND_FILE: wrong-token missing.pdf",
+            )
+        ),
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.unresolved == 2
+    assert result.warnings == (
+        "无法发送资源：文件不存在或不是普通文件",
+        "已拒绝发送资源：令牌不匹配",
+    )
 
 
 def test_does_not_guess_when_multiple_top_level_files_exist(tmp_path: Path) -> None:

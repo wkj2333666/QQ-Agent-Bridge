@@ -14,6 +14,7 @@ from pathlib import Path
 from .config import BridgeConfig
 
 MAX_QQ_VOICE_SECONDS = 60
+_MISSING_FILE_WARNING = "无法发送资源：文件不存在或不是普通文件"
 _IMAGE_SUFFIXES = frozenset(
     {".apng", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 )
@@ -110,10 +111,10 @@ def inspect_outgoing_resources(
         try:
             source_stat = resolved.stat()
         except OSError:
-            warn("无法发送资源：文件不存在或不是普通文件")
+            warn(_MISSING_FILE_WARNING)
             return None
         if not stat.S_ISREG(source_stat.st_mode):
-            warn("无法发送资源：文件不存在或不是普通文件")
+            warn(_MISSING_FILE_WARNING)
             return None
         if source_stat.st_nlink != 1:
             warn("无法发送资源：文件不是本次任务生成的独立文件")
@@ -201,8 +202,11 @@ def inspect_outgoing_resources(
         and token
         and (
             attempted == 0
-            or "无法发送资源：文件不存在或不是普通文件" in warnings
-            or "已拒绝发送资源：路径不在本次任务输出目录内" in warnings
+            or (
+                attempted == 1
+                and unresolved == 1
+                and warnings == [_MISSING_FILE_WARNING]
+            )
         )
     ):
         outbox, outbox_warning = _validate_outbox(outbox_path, workspace, expected_outbox)
@@ -212,12 +216,9 @@ def inspect_outgoing_resources(
                 candidate = candidates[0]
                 kind = "image" if candidate.suffix.lower() in _IMAGE_SUFFIXES else "file"
                 if stage_resource(candidate.as_posix(), kind, kind, None) is not None:
-                    warnings[:] = [
-                        warning
-                        for warning in warnings
-                        if warning != "无法发送资源：文件不存在或不是普通文件"
-                    ]
-                    unresolved = 0
+                    if attempted == 1:
+                        warnings.remove(_MISSING_FILE_WARNING)
+                        unresolved -= 1
                     recovered += 1
 
     cleaned = "\n".join(line for line in kept_lines).strip()
