@@ -14,6 +14,9 @@ from pathlib import Path
 from .config import BridgeConfig
 
 MAX_QQ_VOICE_SECONDS = 60
+_IMAGE_SUFFIXES = frozenset(
+    {".apng", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+)
 
 _DIRECTIVE_RE = re.compile(
     r"^\s*QQBOT_SEND_(IMAGE|FILE|VOICE|AUDIO)\s*:\s*(.+?)\s*$",
@@ -69,6 +72,7 @@ def inspect_outgoing_resources(
     token: str | None = None,
     job_id: str = "job",
     expected_outbox: tuple[int, int] | None = None,
+    discover_unique: bool = True,
 ) -> ArtifactInspection:
     workspace = Path(cfg.agent.default_workspace).expanduser().resolve(strict=False)
     workspace_allowed = cfg.is_workspace_allowed(str(workspace))
@@ -85,6 +89,68 @@ def inspect_outgoing_resources(
         nonlocal unresolved
         warnings.append(message)
         unresolved += 1
+
+    def stage_resource(
+        raw_path: str,
+        kind: str,
+        directive_kind: str,
+        duration_seconds: int | None,
+    ) -> OutgoingResource | None:
+        nonlocal total_bytes
+        if len(resources) >= max(0, cfg.resources.max_items):
+            warn("无法发送资源：超过发送数量限制")
+            return None
+        resolved = _resolve_workspace_path(raw_path, workspace)
+        if resolved is None:
+            warn("已拒绝发送资源：路径不在工作区内")
+            return None
+        if outbox is None or not _is_relative_to(resolved, outbox):
+            warn("已拒绝发送资源：路径不在本次任务输出目录内")
+            return None
+        try:
+            source_stat = resolved.stat()
+        except OSError:
+            warn("无法发送资源：文件不存在或不是普通文件")
+            return None
+        if not stat.S_ISREG(source_stat.st_mode):
+            warn("无法发送资源：文件不存在或不是普通文件")
+            return None
+        if source_stat.st_nlink != 1:
+            warn("无法发送资源：文件不是本次任务生成的独立文件")
+            return None
+        size = source_stat.st_size
+        if size > cfg.resources.max_bytes:
+            warn("无法发送资源：文件超过大小限制")
+            return None
+        if total_bytes + size > cfg.resources.max_total_bytes:
+            warn("无法发送资源：资源总大小超过限制")
+            return None
+        if directive_kind == "voice":
+            actual_duration = _probe_audio_duration_seconds(resolved)
+            if actual_duration is None:
+                warn("无法发送QQ语音：无法验证实际时长")
+                return None
+            if actual_duration > MAX_QQ_VOICE_SECONDS:
+                warn("无法发送QQ语音：实际时长超过60秒限制")
+                return None
+            duration_seconds = max(1, round(actual_duration))
+        stable = _copy_for_sending(resolved, workspace, cfg, job_id, len(resources), source_stat)
+        if stable is None:
+            warn("无法发送资源：文件状态变化，已拒绝发送")
+            return None
+        resource = OutgoingResource(
+            kind=kind,
+            path=stable,
+            name=stable.name,
+            duration_seconds=duration_seconds,
+            source_path=resolved,
+            size_bytes=size,
+        )
+        resources.append(resource)
+        total_bytes += size
+        return resource
+
+    outbox: Path | None = None
 
     for line in text.splitlines():
         match = _DIRECTIVE_RE.match(line)
@@ -125,55 +191,34 @@ def inspect_outgoing_resources(
         if recovered_path is not None:
             raw_path = recovered_path
             recovered += 1
-        resolved = _resolve_workspace_path(raw_path, workspace)
-        if resolved is None:
-            warn("已拒绝发送资源：路径不在工作区内")
-            continue
-        if not _is_relative_to(resolved, outbox):
-            warn("已拒绝发送资源：路径不在本次任务输出目录内")
-            continue
-        try:
-            source_stat = resolved.stat()
-        except OSError:
-            warn("无法发送资源：文件不存在或不是普通文件")
-            continue
-        if not stat.S_ISREG(source_stat.st_mode):
-            warn("无法发送资源：文件不存在或不是普通文件")
-            continue
-        if source_stat.st_nlink != 1:
-            warn("无法发送资源：文件不是本次任务生成的独立文件")
-            continue
-        size = source_stat.st_size
-        if size > cfg.resources.max_bytes:
-            warn("无法发送资源：文件超过大小限制")
-            continue
-        if total_bytes + size > cfg.resources.max_total_bytes:
-            warn("无法发送资源：资源总大小超过限制")
-            continue
-        if directive_kind == "voice":
-            actual_duration = _probe_audio_duration_seconds(resolved)
-            if actual_duration is None:
-                warn("无法发送QQ语音：无法验证实际时长")
-                continue
-            if actual_duration > MAX_QQ_VOICE_SECONDS:
-                warn("无法发送QQ语音：实际时长超过60秒限制")
-                continue
-            duration_seconds = max(1, round(actual_duration))
-        stable = _copy_for_sending(resolved, workspace, cfg, job_id, len(resources), source_stat)
-        if stable is None:
-            warn("无法发送资源：文件状态变化，已拒绝发送")
-            continue
-        resources.append(
-            OutgoingResource(
-                kind=kind,
-                path=stable,
-                name=stable.name,
-                duration_seconds=duration_seconds,
-                source_path=resolved,
-                size_bytes=size,
-            )
+        stage_resource(raw_path, kind, directive_kind, duration_seconds)
+
+    if (
+        discover_unique
+        and not resources
+        and workspace_allowed
+        and outbox_path is not None
+        and token
+        and (
+            attempted == 0
+            or "无法发送资源：文件不存在或不是普通文件" in warnings
+            or "已拒绝发送资源：路径不在本次任务输出目录内" in warnings
         )
-        total_bytes += size
+    ):
+        outbox, outbox_warning = _validate_outbox(outbox_path, workspace, expected_outbox)
+        if outbox_warning is None and outbox is not None:
+            candidates = _eligible_top_level_files(outbox)
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                kind = "image" if candidate.suffix.lower() in _IMAGE_SUFFIXES else "file"
+                if stage_resource(candidate.as_posix(), kind, kind, None) is not None:
+                    warnings[:] = [
+                        warning
+                        for warning in warnings
+                        if warning != "无法发送资源：文件不存在或不是普通文件"
+                    ]
+                    unresolved = 0
+                    recovered += 1
 
     cleaned = "\n".join(line for line in kept_lines).strip()
     return ArtifactInspection(

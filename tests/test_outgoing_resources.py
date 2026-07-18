@@ -73,6 +73,206 @@ def test_structured_inspection_reports_unresolved_missing_directive(tmp_path: Pa
     assert result.warnings == ("无法发送资源：文件不存在或不是普通文件",)
 
 
+def test_recovers_unique_top_level_outbox_file_after_broken_directive(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    report = outbox / "report.pdf"
+    report.write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "QQBOT_SEND_FILE: send-token missing.pdf",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert len(result.resources) == 1
+    assert result.resources[0].path.read_bytes() == b"pdf"
+    assert (result.unresolved, result.recovered) == (0, 1)
+
+
+def test_does_not_guess_when_multiple_top_level_files_exist(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "notes.md").write_text("notes", encoding="utf-8")
+    (outbox / "report.pdf").write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "QQBOT_SEND_FILE: send-token missing.pdf",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.unresolved == 1
+
+
+def test_unique_discovery_ignores_nested_temporary_files(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "tmp").mkdir()
+    (outbox / "tmp" / "frame.png").write_bytes(b"frame")
+
+    result = inspect_outgoing_resources(
+        "QQBOT_SEND_FILE: send-token missing.pdf",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+
+
+def test_recovers_unique_top_level_file_when_agent_omits_directive(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    report = outbox / "report.pdf"
+    report.write_bytes(b"pdf")
+    result = inspect_outgoing_resources(
+        "文件已经整理好",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.clean_text == "文件已经整理好"
+    assert len(result.resources) == 1
+    assert result.resources[0].path.read_bytes() == b"pdf"
+    assert result.attempted == 0
+    assert result.recovered == 1
+
+
+def test_text_only_output_without_outbox_file_stays_text_only(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.clean_text == "普通文本回答"
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_unique_discovery_rejects_symlink(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"pdf")
+    (outbox / "report.pdf").symlink_to(target)
+
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_unique_discovery_rejects_hard_link(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"pdf")
+    (outbox / "report.pdf").hardlink_to(target)
+
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_unique_discovery_ignores_hidden_file(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / ".report.pdf").write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_unique_discovery_rejects_oversized_file(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"pdf")
+    cfg = make_cfg(tmp_path)
+    cfg.resources.max_bytes = 2
+
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        cfg,
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
+def test_unique_discovery_classifies_images_and_audio_as_files(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    image = outbox / "plot.png"
+    image.write_bytes(b"png")
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert [resource.kind for resource in result.resources] == ["image"]
+
+    second_outbox = make_outbox(tmp_path, job_id="job-2")
+    audio = second_outbox / "music.mp3"
+    audio.write_bytes(b"mp3")
+    second_result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=second_outbox,
+        token="send-token",
+        job_id="job-2",
+    )
+
+    assert [resource.kind for resource in second_result.resources] == ["file"]
+
+
+def test_unique_discovery_can_be_disabled(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    (outbox / "report.pdf").write_bytes(b"pdf")
+
+    result = inspect_outgoing_resources(
+        "普通文本回答",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+        discover_unique=False,
+    )
+
+    assert result.resources == ()
+    assert result.recovered == 0
+
+
 def test_collects_image_and_file_directives_inside_workspace(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     image = outbox / "plot.png"
