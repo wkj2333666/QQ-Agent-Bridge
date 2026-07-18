@@ -411,7 +411,12 @@ class App:
 
     async def _repair_outgoing_artifacts(self, job: Job, warnings: tuple[str, ...]) -> str:
         elapsed = max(0.0, time.time() - job.started)
-        remaining = max(0.0, self.cfg.effective_max_runtime() - elapsed)
+        parent_timeout = (
+            job.timeout_seconds
+            if job.timeout_seconds is not None
+            else self.cfg.effective_max_runtime()
+        )
+        remaining = max(0.0, parent_timeout - elapsed)
         timeout = min(90.0, remaining)
         if timeout <= 0:
             return ""
@@ -472,8 +477,12 @@ class App:
             await self._reply_when_done_inner(job)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - delivery failures must not leak task exceptions
-            logger.exception("job reply delivery failed job=%s", job.id)
+        except Exception as exc:  # noqa: BLE001 - delivery failures become class-only logs
+            logger.error(
+                "job reply delivery failed job=%s error=%s",
+                job.id,
+                type(exc).__name__,
+            )
         finally:
             await self._cleanup_reply_job(job)
 

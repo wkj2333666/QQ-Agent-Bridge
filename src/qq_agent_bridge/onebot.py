@@ -514,6 +514,8 @@ def _normalize_event(raw: dict[str, Any], self_id: str, mention_name: str = "") 
 class OneBotAdapter:
     """Reverse WS server. Gateway connects to us."""
 
+    SEND_ACTION_TIMEOUT_SECONDS = 5.0
+
     def __init__(
         self,
         host: str,
@@ -866,9 +868,6 @@ class OneBotAdapter:
         message: list[dict[str, Any]],
         echo: str | None = None,
     ) -> None:
-        if not self._conns:
-            logger.warning("no gateway conn, cannot send")
-            return
         action = "send_group_msg" if is_group else "send_private_msg"
         params: dict[str, Any] = {"message": message}
         if is_group:
@@ -884,14 +883,23 @@ class OneBotAdapter:
         echo: str | None = None,
     ) -> None:
         if not self._conns:
-            logger.warning("no gateway conn, cannot send")
-            return
-        frame: dict[str, Any] = {"action": action, "params": params}
-        if echo:
-            frame["echo"] = echo
-        data = json.dumps(frame)
-        for conn in list(self._conns):
-            await self._send_frame(conn, data)
+            raise ConnectionError("OneBot gateway is not connected")
+        action_echo = echo or f"qq-agent-bridge-send-{time.time_ns()}"
+        if action_echo in self._pending_actions:
+            raise RuntimeError("OneBot action echo is already pending")
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending_actions[action_echo] = fut
+        frame = {"action": action, "params": params, "echo": action_echo}
+        try:
+            data = json.dumps(frame)
+            for conn in list(self._conns):
+                await self._send_frame(conn, data)
+            response = await asyncio.wait_for(fut, timeout=self.SEND_ACTION_TIMEOUT_SECONDS)
+        finally:
+            self._pending_actions.pop(action_echo, None)
+        if response.get("status") != "ok" or response.get("retcode") != 0:
+            raise RuntimeError(f"OneBot action {action} failed")
 
     async def _call_action(
         self,
@@ -935,5 +943,6 @@ class OneBotAdapter:
     async def _send_frame(self, conn: ServerConnection, data: str) -> None:
         try:
             await conn.send(data)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("send failed: %s", e)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("onebot transport send failed error=%s", type(exc).__name__)
+            raise

@@ -1,10 +1,14 @@
 """OneBot event normalization tests."""
 from __future__ import annotations
 
+from collections.abc import Awaitable
+import logging
 import sys
 from pathlib import Path
 import asyncio
 import json
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -378,6 +382,138 @@ class FakeConn:
         self.frames.append(data)
 
 
+async def start_onebot_send(
+    adapter: OneBotAdapter,
+    conn: FakeConn,
+    send: Awaitable[None],
+) -> tuple[asyncio.Task[None], dict[str, object]]:
+    task = asyncio.create_task(send)
+    for _ in range(10):
+        if conn.frames:
+            break
+        await asyncio.sleep(0)
+    assert conn.frames
+    return task, json.loads(conn.frames[-1])
+
+
+async def complete_successful_send(
+    adapter: OneBotAdapter,
+    conn: FakeConn,
+    send: Awaitable[None],
+) -> dict[str, object]:
+    task, frame = await start_onebot_send(adapter, conn, send)
+    assert not task.done()
+    assert adapter._complete_action_response(  # type: ignore[attr-defined]
+        {"echo": frame["echo"], "status": "ok", "retcode": 0, "data": {}}
+    )
+    await task
+    return frame
+
+
+def test_send_waits_for_matching_success_ack() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send("123", True, "hello", "send-ack"),
+        )
+
+        assert frame["action"] == "send_group_msg"
+        assert frame["echo"] == "send-ack"
+
+    asyncio.run(go())
+
+
+def test_send_fails_without_gateway() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+
+        with pytest.raises(ConnectionError):
+            await adapter.send("123", True, "hello", "no-gateway")
+
+    asyncio.run(go())
+
+
+def test_send_reraises_transport_error_without_logging_exception_text(caplog: object) -> None:
+    class FailingConn(FakeConn):
+        async def send(self, data: str) -> None:
+            raise RuntimeError("sensitive transport detail")
+
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        adapter._conns.add(FailingConn())  # type: ignore[arg-type]
+
+        with pytest.raises(RuntimeError, match="sensitive transport detail"):
+            await adapter.send("123", True, "hello", "transport-error")
+
+    with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.onebot"):  # type: ignore[attr-defined]
+        asyncio.run(go())
+
+    assert "sensitive transport detail" not in caplog.text  # type: ignore[attr-defined]
+    assert "RuntimeError" in caplog.text  # type: ignore[attr-defined]
+
+
+def test_send_fails_on_ack_timeout(monkeypatch: object) -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            OneBotAdapter,
+            "SEND_ACTION_TIMEOUT_SECONDS",
+            0.01,
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await adapter.send("123", True, "hello", "timeout")
+
+    asyncio.run(go())
+
+
+def test_send_fails_on_non_ok_status() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        task, frame = await start_onebot_send(
+            adapter,
+            conn,
+            adapter.send("123", True, "hello", "bad-status"),
+        )
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {"echo": frame["echo"], "status": "failed", "retcode": 0, "data": {}}
+        )
+
+        with pytest.raises(RuntimeError):
+            await task
+
+    asyncio.run(go())
+
+
+def test_send_fails_on_nonzero_retcode() -> None:
+    async def go() -> None:
+        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
+        conn = FakeConn()
+        adapter._conns.add(conn)  # type: ignore[arg-type]
+        task, frame = await start_onebot_send(
+            adapter,
+            conn,
+            adapter.send("123", True, "hello", "bad-retcode"),
+        )
+        adapter._complete_action_response(  # type: ignore[attr-defined]
+            {"echo": frame["echo"], "status": "ok", "retcode": 100, "data": {}}
+        )
+
+        with pytest.raises(RuntimeError):
+            await task
+
+    asyncio.run(go())
+
+
 def test_resolve_record_url_uses_file_id_and_returns_response_file() -> None:
     async def go() -> None:
         adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
@@ -482,9 +618,11 @@ def test_send_image_uses_onebot_image_segment(tmp_path: Path) -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_image("123", True, image, "img-echo")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_image("123", True, image, "img-echo"),
+        )
         assert frame["action"] == "send_group_msg"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["message"][0]["type"] == "image"
@@ -575,9 +713,11 @@ def test_send_file_uses_upload_action(tmp_path: Path) -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_file("123", True, report, "file-echo")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_file("123", True, report, "file-echo"),
+        )
         assert frame["action"] == "upload_group_file"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["file"] == report.resolve().as_uri()
@@ -595,9 +735,11 @@ def test_send_voice_uses_onebot_record_segment(tmp_path: Path) -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_voice("123", False, voice, "voice-echo")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_voice("123", False, voice, "voice-echo"),
+        )
         assert frame["action"] == "send_private_msg"
         assert frame["params"]["user_id"] == 123
         assert frame["params"]["message"][0]["type"] == "record"
@@ -613,9 +755,11 @@ def test_send_at_uses_onebot_at_segment() -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_at("123", "456", "这句接得上", "at-echo")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_at("123", "456", "这句接得上", "at-echo"),
+        )
         assert frame["action"] == "send_group_msg"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["message"] == [
@@ -633,9 +777,11 @@ def test_send_text_can_quote_message() -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send("123", True, "这句接得上", "quote-echo", reply_to="43")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send("123", True, "这句接得上", "quote-echo", reply_to="43"),
+        )
         assert frame["action"] == "send_group_msg"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["message"] == [
@@ -653,9 +799,11 @@ def test_send_ats_uses_multiple_onebot_at_segments() -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_ats("123", ("456", "789"), "都出来冒个泡", "ats-echo")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_ats("123", ("456", "789"), "都出来冒个泡", "ats-echo"),
+        )
         assert frame["action"] == "send_group_msg"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["message"] == [
@@ -674,9 +822,17 @@ def test_send_ats_can_quote_message_before_mentions() -> None:
         conn = FakeConn()
         adapter._conns.add(conn)  # type: ignore[arg-type]
 
-        await adapter.send_ats("123", ("456", "789"), "都出来冒个泡", "ats-quote", reply_to="43")
-
-        frame = json.loads(conn.frames[0])
+        frame = await complete_successful_send(
+            adapter,
+            conn,
+            adapter.send_ats(
+                "123",
+                ("456", "789"),
+                "都出来冒个泡",
+                "ats-quote",
+                reply_to="43",
+            ),
+        )
         assert frame["action"] == "send_group_msg"
         assert frame["params"]["group_id"] == 123
         assert frame["params"]["message"] == [

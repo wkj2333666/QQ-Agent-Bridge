@@ -27,6 +27,24 @@ def test_redact_qrish() -> None:
     assert "REDACTED" in out or "qr" not in out.lower()  # loose
 
 
+def test_redact_bare_outgoing_directive_tokens() -> None:
+    tokens = {
+        "IMAGE": "image-directive-token",
+        "FILE": "file-directive-token",
+        "VOICE": "voice-directive-token",
+        "AUDIO": "audio-directive-token",
+    }
+    text = "\n".join(
+        f"QQBOT_SEND_{kind}: {token} downloads/outgoing/resource.bin"
+        for kind, token in tokens.items()
+    )
+
+    out = redact(text)
+
+    assert all(token not in out for token in tokens.values())
+    assert out.count("[REDACTED]") == len(tokens)
+
+
 if __name__ == "__main__":
     test_redact_basic()
     test_strip_ansi()

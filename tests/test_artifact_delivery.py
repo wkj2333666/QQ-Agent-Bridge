@@ -98,6 +98,82 @@ def test_resolution_repairs_unresolved_artifact_once(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_resolution_does_not_verify_empty_repair_from_initial_resources(tmp_path: Path) -> None:
+    async def go() -> None:
+        first = make_resource(tmp_path)
+
+        def inspect(text: str) -> ArtifactInspection:
+            if text == "initial":
+                return inspection(
+                    resources=(first,),
+                    warnings=("missing",),
+                    attempted=2,
+                    unresolved=1,
+                )
+            return inspection()
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=inspect,
+            repair=lambda _warnings: _completed(""),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (first,)
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
+def test_resolution_keeps_attempted_zero_text_only_output_verified() -> None:
+    async def go() -> None:
+        calls = 0
+
+        async def repair(_warnings: tuple[str, ...]) -> str:
+            nonlocal calls
+            calls += 1
+            return "unused"
+
+        result = await resolve_artifacts(
+            "plain text",
+            inspect=lambda _text: inspection(text="plain text"),
+            repair=repair,
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.text == "plain text"
+        assert result.resources == ()
+        assert result.repair_attempted is False
+        assert result.verified is True
+        assert calls == 0
+
+    asyncio.run(go())
+
+
+def test_resolution_does_not_verify_repair_with_zero_merged_resources() -> None:
+    async def go() -> None:
+        result = await resolve_artifacts(
+            "initial",
+            inspect=lambda text: (
+                inspection(warnings=("missing",), attempted=1, unresolved=1)
+                if text == "initial"
+                else inspection()
+            ),
+            repair=lambda _warnings: _completed(""),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == ()
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
 def test_resolution_never_repairs_failed_repair_twice() -> None:
     async def go() -> None:
         calls = 0

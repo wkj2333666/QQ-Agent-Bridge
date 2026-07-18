@@ -5,6 +5,7 @@ import re
 from typing import Iterable
 
 _SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?im)(QQBOT_SEND_(?:IMAGE|FILE|VOICE|AUDIO)\s*:\s*)(\S+)"),
     re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|auth)[\"'\s:=]+([A-Za-z0-9_\-]{8,})"),
     re.compile(r"(?i)(sk-[A-Za-z0-9]{20,})"),  # openai style
     re.compile(r"(?i)(ghp_[A-Za-z0-9]{30,})"),  # github
