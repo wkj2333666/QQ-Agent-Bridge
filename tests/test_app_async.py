@@ -3305,6 +3305,48 @@ def test_valid_initial_directive_uses_real_token_without_repair(tmp_path: Path) 
     asyncio.run(go())
 
 
+def test_task_reply_redacts_relative_outbox_path_and_token_from_prose_and_memory(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        outbox_rel = ""
+        outgoing_token = ""
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            nonlocal outbox_rel, outgoing_token
+            outbox_rel, outgoing_token = extract_outgoing_prompt_context(prompt)
+            return f"结果保存在 {outbox_rel}/report.pdf，本次值是 {outgoing_token}。"
+
+        event = make_ev("/task 生成报告说明", group="group", mid="artifact-prose-redaction")
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.cursor.run = fake_agent  # type: ignore[method-assign]
+
+        await app._handle(event)
+        await wait_until_sent(adapter, "结果保存在")
+
+        reply = adapter.sent[-1][2]
+        history = app.memory.format_history(event)
+        assert outbox_rel not in reply
+        assert outgoing_token not in reply
+        assert outbox_rel not in history
+        assert outgoing_token not in history
+        assert "[REDACTED]/report.pdf" in reply
+
+    asyncio.run(go())
+
+
 def test_missing_artifact_invokes_one_repair_and_sends_result(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -3506,6 +3548,9 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
         event = make_ev("/task 生成报告", group="group", mid="artifact-runtime")
         job = Job(id="artifact-runtime-job", cmd="task", args="生成报告", event=event)
         app._configure_outgoing_resources(job)
+        assert job.outgoing_dir is not None
+        assert job.outgoing_token is not None
+        outbox_rel = Path(job.outgoing_dir).relative_to(tmp_path).as_posix()
         job.started = main_module.time.time() - (cfg.effective_max_runtime() - 30)
         calls: list[tuple[object, str, str | None, str, str | None, Any, str | None]] = []
         timeouts: list[float] = []
@@ -3536,7 +3581,10 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
         monkeypatch.setattr(app, "_progress_callback_for", lambda _job: live_progress)
         monkeypatch.setattr(main_module.asyncio, "wait", capture_wait)  # type: ignore[attr-defined]
 
-        await app._repair_outgoing_artifacts(job, ("无法发送资源：文件不存在或不是普通文件",))
+        await app._repair_outgoing_artifacts(
+            job,
+            (f"失败值 {job.outgoing_token} 位置 {outbox_rel}",),
+        )
 
         assert len(calls) == 1
         agent, prompt, workspace, mode, model, progress, trace_id = calls[0]
@@ -3545,6 +3593,7 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
         assert (mode, model, trace_id) == ("task", "repair-model", "artifact-runtime-job-artifact-repair")
         assert progress is None
         assert job.outgoing_token in prompt
+        assert "- 失败值 [REDACTED] 位置 [REDACTED]" in prompt
         assert "生成报告" in prompt
         assert "只输出有效的 QQBOT_SEND_* 指令" in prompt
         assert len(timeouts) == 1
@@ -3636,6 +3685,120 @@ def test_artifact_repair_timeout_returns_before_cancellation_cleanup(
         await asyncio.wait_for(cleanup_finished.wait(), timeout=0.5)
         await asyncio.sleep(0)
         assert app._artifact_repair_tasks == set()
+
+    asyncio.run(go())
+
+
+def test_artifact_reply_returns_at_parent_cap_with_cancellation_resistant_repair(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        cfg.workspaces = {str(tmp_path): True}
+        cfg.agent.default_workspace = str(tmp_path)
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        event = make_ev("/task 生成报告", group="group", mid="artifact-reply-cap")
+        job = Job(
+            id="artifact-reply-cap-job",
+            cmd="task",
+            args="生成报告",
+            event=event,
+            timeout_seconds=0.03,
+        )
+        app._configure_outgoing_resources(job)
+        assert job.outgoing_dir is not None
+        assert job.outgoing_token is not None
+        outbox_rel = Path(job.outgoing_dir).relative_to(tmp_path)
+        raw_result = f"QQBOT_SEND_FILE: {job.outgoing_token} {outbox_rel}/missing.pdf"
+
+        async def done() -> str:
+            return raw_result
+
+        cleanup_release = asyncio.Event()
+
+        async def cancellation_resistant_agent(*args: Any, **kwargs: Any) -> str:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await cleanup_release.wait()
+                return "late cleanup"
+
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            main_module,
+            "run_agent",
+            cancellation_resistant_agent,
+        )
+        job.task = asyncio.create_task(done())
+        job.artifact_result = raw_result
+
+        started = asyncio.get_running_loop().time()
+        await asyncio.wait_for(app._reply_when_done(job), timeout=0.15)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 0.1
+        assert adapter.sent[-1][2] == "文件没有成功生成或无法验证，本次未发送。"
+        assert app._artifact_repair_tasks
+        cleanup_release.set()
+        await asyncio.gather(*app._artifact_repair_tasks)
+        await asyncio.sleep(0)
+        assert app._artifact_repair_tasks == set()
+
+    asyncio.run(go())
+
+
+def test_app_shutdown_bounds_cancellation_resistant_repair_drain(
+    monkeypatch: object,
+) -> None:
+    class LifecycleAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+
+        async def start(self, handler: Any) -> None:
+            self.started.set()
+
+        async def stop(self) -> None:
+            self.stopped.set()
+
+    async def go() -> None:
+        app = App(make_cfg())
+        adapter = LifecycleAdapter()
+        app.adapter = adapter  # type: ignore[assignment]
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            main_module,
+            "ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS",
+            0.01,
+            raising=False,
+        )
+        cleanup_release = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+
+        async def cancellation_resistant_cleanup() -> str:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await cleanup_release.wait()
+                return "late cleanup"
+
+        repair_task = asyncio.create_task(cancellation_resistant_cleanup())
+        app._track_artifact_repair_task(repair_task)
+        run_task = asyncio.create_task(app.run())
+        await adapter.started.wait()
+
+        run_task.cancel()
+        await asyncio.wait_for(run_task, timeout=0.15)
+
+        assert cancellation_seen.is_set()
+        assert adapter.stopped.is_set()
+        assert app._artifact_repair_tasks == set()
+        assert not repair_task.done()
+        cleanup_release.set()
+        assert await repair_task == "late cleanup"
 
     asyncio.run(go())
 

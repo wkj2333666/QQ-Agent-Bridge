@@ -396,7 +396,7 @@ class CursorAdapter:
         try:
             cmd = self._build_cmd(prompt, ws, mode, model, stream=progress is not None)
 
-            logger.info("agent invoke: %s ...", " ".join(cmd[:4]))
+            logger.info("agent invoke: executable=%s mode=%s", cmd[0], mode)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=ws,

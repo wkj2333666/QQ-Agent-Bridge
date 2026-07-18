@@ -47,6 +47,7 @@ from .whisper_runner import WhisperRunner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("qq-bridge")
+ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS = 1.0
 
 
 class App:
@@ -435,7 +436,7 @@ class App:
         safe_warnings = tuple(
             redact(
                 warning,
-                extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+                extra=self._outgoing_redaction_values(job),
             ).strip()
             for warning in warnings
             if warning.strip()
@@ -487,6 +488,26 @@ class App:
                 type(exc).__name__,
             )
         return ""
+
+    async def _drain_artifact_repair_tasks(self) -> None:
+        tasks = tuple(self._artifact_repair_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS),
+        )
+        for task in done:
+            if not task.cancelled():
+                task.exception()
+        self._artifact_repair_tasks.difference_update(tasks)
+        if pending:
+            logger.warning(
+                "artifact repair shutdown cleanup timed out pending=%d",
+                len(pending),
+            )
 
     async def _cleanup_policy(self) -> None:
         if self.policy:
@@ -595,7 +616,7 @@ class App:
 
         reply_text = redact(
             reply_text,
-            extra=(job.outgoing_token or "", job.outgoing_dir or ""),
+            extra=self._outgoing_redaction_values(job),
         )[: self.cfg.effective_max_chars()]
         remember = self.cfg.memory.enabled and job.cmd in {"ask", "plan", "task", "code"}
         if not transactional and remember and reply_text.strip():
@@ -1638,16 +1659,13 @@ class App:
                 task.cancel()
             for task in list(self._heartbeat_tasks):
                 task.cancel()
-            for task in list(self._artifact_repair_tasks):
-                task.cancel()
             for task in list(self._schedule_parse_heartbeats.values()):
                 task.cancel()
             if self._reply_tasks:
                 await asyncio.gather(*self._reply_tasks, return_exceptions=True)
             if self._heartbeat_tasks:
                 await asyncio.gather(*self._heartbeat_tasks, return_exceptions=True)
-            if self._artifact_repair_tasks:
-                await asyncio.gather(*self._artifact_repair_tasks, return_exceptions=True)
+            await self._drain_artifact_repair_tasks()
             if self._schedule_parse_heartbeats:
                 await asyncio.gather(
                     *self._schedule_parse_heartbeats.values(),
@@ -1767,11 +1785,8 @@ class App:
     def _format_outgoing_resource_context(self, job: Job) -> str:
         if not job.outgoing_dir or not job.outgoing_token:
             return ""
-        workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
-        outbox = Path(job.outgoing_dir).resolve(strict=False)
-        try:
-            outbox_rel = outbox.relative_to(workspace).as_posix()
-        except ValueError:
+        _outbox_absolute, outbox_rel = self._outgoing_path_values(job)
+        if not outbox_rel:
             return ""
         token = job.outgoing_token
         return "\n".join(
@@ -1789,6 +1804,25 @@ class App:
                     "泛音频、音乐、较长音频请按文件发送。"
                 ),
             ]
+        )
+
+    def _outgoing_path_values(self, job: Job) -> tuple[str, str]:
+        if not job.outgoing_dir:
+            return "", ""
+        workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
+        outbox = Path(job.outgoing_dir).expanduser().resolve(strict=False)
+        try:
+            outbox_rel = outbox.relative_to(workspace).as_posix()
+        except ValueError:
+            outbox_rel = ""
+        return outbox.as_posix(), outbox_rel
+
+    def _outgoing_redaction_values(self, job: Job) -> tuple[str, ...]:
+        outbox_absolute, outbox_relative = self._outgoing_path_values(job)
+        return tuple(
+            value
+            for value in (job.outgoing_token or "", outbox_absolute, outbox_relative)
+            if value
         )
 
     def _prepare_runtime_skill_bundle(self) -> str:

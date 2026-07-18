@@ -288,6 +288,44 @@ def test_resolution_deduplicates_repair_resources(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_resolution_does_not_count_same_source_with_new_kind_as_repair(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        first = make_resource(tmp_path, "plot.png", b"png")
+        repaired_alias = OutgoingResource(
+            kind="image",
+            path=first.path,
+            name=first.name,
+            source_path=first.source_path,
+            size_bytes=first.size_bytes,
+        )
+
+        def inspect(text: str) -> ArtifactInspection:
+            if text == "repair-output":
+                return inspection(resources=(repaired_alias,), attempted=1)
+            return inspection(
+                resources=(first,),
+                warnings=("missing",),
+                attempted=2,
+                unresolved=1,
+            )
+
+        result = await resolve_artifacts(
+            "initial",
+            inspect=inspect,
+            repair=lambda _warnings: _completed("repair-output"),
+            max_items=4,
+            max_total_bytes=1024,
+        )
+
+        assert result.resources == (first,)
+        assert result.repair_attempted is True
+        assert result.verified is False
+
+    asyncio.run(go())
+
+
 def test_resolution_rejects_merged_item_count_over_budget(tmp_path: Path) -> None:
     async def go() -> None:
         first = make_resource(tmp_path, "first.pdf")

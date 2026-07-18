@@ -46,6 +46,18 @@ def test_redact_bare_outgoing_directive_tokens() -> None:
     assert all(f"QQBOT_SEND_{kind}: [REDACTED]" in out for kind in tokens)
 
 
+def test_redact_bare_resource_token_wording_without_hiding_normal_prose() -> None:
+    token = "bare-resource-token-value"
+    sensitive = f"资源发送令牌：{token}"
+    ordinary = "资源发送需要令牌，但这句普通说明应当保留。"
+
+    out = redact(f"{sensitive}\n{ordinary}")
+
+    assert token not in out
+    assert "资源发送令牌：[REDACTED]" in out
+    assert ordinary in out
+
+
 def test_redact_replaces_full_openai_and_github_secrets() -> None:
     openai_secret = "sk-" + "aB3_" * 8
     github_secret = "ghp_" + "Z9x" * 12

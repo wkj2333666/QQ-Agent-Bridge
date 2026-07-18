@@ -55,16 +55,16 @@ class Job:
     args: str
     event: ChatEvent
     started: float = field(default_factory=time.time)
-    task: asyncio.Task[str] | None = None
+    task: asyncio.Task[str] | None = field(default=None, repr=False)
     confirm_nonce: str | None = None
     state: str = "queued"
-    result: str | None = None
+    result: str | None = field(default=None, repr=False)
     artifact_result: str | None = field(default=None, repr=False)
     allow_outgoing_resources: bool = False
-    outgoing_dir: str | None = None
-    outgoing_token: str | None = None
-    outgoing_dir_dev: int | None = None
-    outgoing_dir_ino: int | None = None
+    outgoing_dir: str | None = field(default=None, repr=False)
+    outgoing_token: str | None = field(default=None, repr=False)
+    outgoing_dir_dev: int | None = field(default=None, repr=False)
+    outgoing_dir_ino: int | None = field(default=None, repr=False)
     timeout_seconds: float | None = None
     source: str = "chat"
     schedule_id: str | None = None
