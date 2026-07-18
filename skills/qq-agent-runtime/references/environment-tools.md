@@ -19,7 +19,7 @@ micromamba run -n base python -c '...'
 先做无副作用、针对性的探测，不要用大范围 `find /`：
 
 ```bash
-command -v chromium ffmpeg curl node
+command -v chromium ffmpeg ffprobe curl node
 command -v pandoc libreoffice yt-dlp wkhtmltopdf
 micromamba run -n base python -c 'import fitz; print(fitz.__doc__)'
 micromamba run -n base python -c 'import yaml, aiohttp, websockets; print("base libraries ok")'
@@ -63,6 +63,7 @@ micromamba run -n base python -c \
 ### 图片、视频、音频
 
 - 图片/视频转码和抽帧优先使用已探测到的 ffmpeg；先检查输入和输出，不要只凭命令返回“看起来成功”。
+- GIF/APNG/动画 WebP 通常已由 bridge 用 ffprobe 确认动态属性，并用 ffmpeg 有界采样；ffmpeg 解码能力不足时 bridge 会使用隔离的 Pillow worker 后备。按资源上下文列出的时间顺序读取全部采样帧。首帧不能代表完整动图，动态证据不可用时不得猜测动作或后续内容。
 - 视频下载、网页访问、字幕或转写必须遵守对应媒体 skill；工具缺失、登录或反爬阻塞时报告证据，不要用标题臆测内容。
 - 音频识别、TTS 和转换使用项目已有的 backend/config；普通转码不是语音识别或唱歌能力。
 

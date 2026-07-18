@@ -19,12 +19,14 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+from .animated_image import AnimatedImageExtractor, AnimationExtraction
 from .config import BridgeConfig
 from .types import ChatEvent, ChatResource, TranscriptStatus
 from .whisper_runner import TranscriptionResult, WhisperRunner
 
 FetchFunc = Callable[[str, int], Awaitable[tuple[bytes, str]]]
 RecordUrlFunc = Callable[[ChatResource], Awaitable[str | None]]
+AnimationExtractFunc = Callable[[Path, Path], Awaitable[AnimationExtraction]]
 
 MAX_FORWARD_TITLE_CHARS = 120
 MAX_FORWARD_ITEM_CHARS = 500
@@ -43,6 +45,12 @@ class PreparedResource:
     transcript_status: TranscriptStatus | None = None
     transcript_language: str | None = None
     transcript_error: str | None = None
+    animation_status: str | None = None
+    animation_frame_count: int | None = None
+    animation_duration_seconds: float | None = None
+    animation_frame_paths: tuple[str, ...] = ()
+    animation_frame_times: tuple[float, ...] = ()
+    animation_error: str | None = None
 
 
 class ResourceManager:
@@ -54,11 +62,13 @@ class ResourceManager:
         fetch: FetchFunc | None = None,
         record_url: RecordUrlFunc | None = None,
         transcriber: WhisperRunner | None = None,
+        animation_extractor: AnimationExtractFunc | None = None,
     ) -> None:
         self.cfg = cfg
         self.fetch = fetch or self._fetch_http
         self.record_url = record_url
         self.transcriber = transcriber
+        self.animation_extractor = animation_extractor or AnimatedImageExtractor(cfg.resources).extract
 
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
         if not self.cfg.resources.enabled or not ev.resources:
@@ -112,15 +122,106 @@ class ResourceManager:
             if root not in target.parents:
                 continue
             target.write_bytes(payload)
-            refs.append(
-                PreparedResource(
-                    kind=resource.kind,
-                    name=resource.name,
-                    local_path=target.relative_to(workspace).as_posix(),
-                    duration_seconds=resource.duration_seconds,
-                )
+            prepared = PreparedResource(
+                kind=resource.kind,
+                name=resource.name,
+                local_path=target.relative_to(workspace).as_posix(),
+                duration_seconds=resource.duration_seconds,
             )
+            if self._is_animation_candidate(resource, content_type, target, payload):
+                prepared = await self._with_animation(prepared, target, workspace)
+            refs.append(prepared)
         return tuple(refs)
+
+    async def _with_animation(
+        self,
+        prepared: PreparedResource,
+        source: Path,
+        workspace: Path,
+    ) -> PreparedResource:
+        if not self.cfg.resources.animation_enabled:
+            return prepared
+        try:
+            result = await self.animation_extractor(source, workspace)
+        except Exception:  # noqa: BLE001 - original image remains usable
+            return replace(
+                prepared,
+                animation_status="unavailable",
+                animation_error="animation extraction failed",
+            )
+        if result.status == "static":
+            return prepared
+        return replace(
+            prepared,
+            animation_status=result.status,
+            animation_frame_count=result.source_frame_count,
+            animation_duration_seconds=result.duration_seconds,
+            animation_frame_paths=result.frame_paths,
+            animation_frame_times=result.frame_times,
+            animation_error=result.error,
+        )
+
+    @staticmethod
+    def _is_animation_candidate(
+        resource: ChatResource,
+        content_type: str,
+        target: Path,
+        payload: bytes,
+    ) -> bool:
+        if resource.kind not in {"image", "file"}:
+            return False
+        mime = (content_type or resource.mime_type or "").split(";", 1)[0].strip().lower()
+        if mime in {"image/gif", "image/apng", "image/webp"}:
+            return True
+        names = (resource.name or "", resource.url or "", target.name)
+        if any(
+            urlsplit(value).path.lower().endswith((".gif", ".apng", ".webp"))
+            for value in names
+            if value
+        ):
+            return True
+        return ResourceManager._is_apng_payload(payload)
+
+    @staticmethod
+    def _is_apng_payload(payload: bytes) -> bool:
+        if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False
+        offset = 8
+        while offset + 12 <= len(payload):
+            length = int.from_bytes(payload[offset : offset + 4], "big")
+            chunk_type = payload[offset + 4 : offset + 8]
+            if chunk_type == b"acTL":
+                return True
+            if chunk_type in {b"IDAT", b"IEND"}:
+                return False
+            offset += 12 + length
+        return False
+
+    def cleanup_prepared(self, resources: tuple[PreparedResource, ...]) -> None:
+        try:
+            workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
+            root = self._resource_root(workspace)
+        except (OSError, ValueError):
+            return
+        parents: set[Path] = set()
+        for resource in resources:
+            for relative in resource.animation_frame_paths:
+                path = (workspace / relative).resolve(strict=False)
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+                try:
+                    if path.is_file() and not path.is_symlink():
+                        path.unlink()
+                        parents.add(path.parent)
+                except OSError:
+                    continue
+        for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
 
     async def _prepare_voice(
         self,
@@ -360,6 +461,10 @@ class ResourceManager:
         guessed = mimetypes.guess_extension(mime) if mime else None
         if guessed:
             return guessed
+        for value in (resource.name or "", resource.url or ""):
+            suffix = Path(urlsplit(value).path).suffix.lower()
+            if suffix in {".gif", ".apng", ".webp"}:
+                return suffix
         if resource.kind == "image":
             return ".img"
         if resource.kind == "audio":
@@ -443,6 +548,7 @@ def format_resource_context(resources: tuple[PreparedResource, ...]) -> str:
             lines.append(res.text)
         elif res.local_path:
             lines.append(f"- {res.kind}: {res.local_path}{details}")
+            _append_animation_context(lines, res)
             _append_transcript_context(lines, res)
         elif res.kind == "voice":
             name = res.name or "unavailable voice"
@@ -451,6 +557,30 @@ def format_resource_context(resources: tuple[PreparedResource, ...]) -> str:
         elif res.url:
             lines.append(f"- {res.kind}: {res.url}{details}")
     return "\n".join(lines)
+
+
+def _append_animation_context(lines: list[str], resource: PreparedResource) -> None:
+    if resource.animation_status == "ready":
+        count = resource.animation_frame_count or "unknown"
+        duration = (
+            f"{resource.animation_duration_seconds:.3f}s"
+            if resource.animation_duration_seconds is not None
+            else "unknown"
+        )
+        lines.append(
+            f"  animated image: source_frames={count}, duration={duration}, "
+            f"sampled_frames={len(resource.animation_frame_paths)}"
+        )
+        for index, path in enumerate(resource.animation_frame_paths):
+            if index < len(resource.animation_frame_times):
+                timestamp = resource.animation_frame_times[index]
+                lines.append(f"  sampled frame {index + 1} (t={timestamp:.3f}s): {path}")
+            else:
+                lines.append(f"  sampled frame {index + 1}: {path}")
+        lines.append("  动图理解必须结合这些采样帧；首帧不能代表完整动图。")
+    elif resource.animation_status == "unavailable":
+        error = resource.animation_error or "animation extraction unavailable"
+        lines.append(f"  dynamic evidence unavailable ({error}); 不得把首帧当作完整动图。")
 
 
 def _append_transcript_context(lines: list[str], resource: PreparedResource) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import sys
+from types import SimpleNamespace
 import wave
 from pathlib import Path
 
@@ -116,6 +117,155 @@ def test_resource_manager_stages_downloadable_resource_under_workspace(tmp_path:
     assert tmp_path in local.parents
     assert "downloads" in local.parts
     assert "qq-agent-bridge" in local.parts
+
+
+def test_resource_manager_extracts_bounded_animation_frames_and_cleans_them(
+    tmp_path: Path,
+) -> None:
+    extracted: list[Path] = []
+
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        return b"GIF89a-animation", "image/gif"
+
+    async def extract(source: Path, workspace: Path):
+        extracted.append(source)
+        frame_dir = source.parent / f"{source.stem}.frames"
+        frame_dir.mkdir()
+        frames = []
+        for index in range(3):
+            frame = frame_dir / f"frame-{index + 1:03d}.png"
+            frame.write_bytes(f"frame-{index}".encode())
+            frames.append(frame.relative_to(workspace).as_posix())
+        return SimpleNamespace(
+            status="ready",
+            source_frame_count=12,
+            duration_seconds=2.4,
+            frame_paths=tuple(frames),
+            frame_times=(0.0, 1.2, 2.4),
+            error=None,
+        )
+
+    cfg = make_cfg(tmp_path)
+    cfg.resources.animation_enabled = True
+    cfg.resources.animation_max_frames = 6
+    manager = ResourceManager(cfg, fetch=fetch, animation_extractor=extract)
+    event = make_ev(
+        (
+            ChatResource(
+                kind="image",
+                url="https://qq.example/reaction.gif",
+                name="reaction.gif",
+                mime_type="image/gif",
+            ),
+        ),
+        mid="animated-gif",
+    )
+
+    refs = asyncio.run(manager.prepare(event))
+
+    assert len(refs) == 1
+    assert extracted == [tmp_path / refs[0].local_path]
+    assert refs[0].animation_status == "ready"
+    assert refs[0].animation_frame_count == 12
+    assert refs[0].animation_duration_seconds == 2.4
+    assert len(refs[0].animation_frame_paths) == 3
+    context = format_resource_context(refs)
+    assert "animated image" in context
+    assert "source_frames=12" in context
+    assert "sampled frame 1" in context
+    assert "t=1.200s" in context
+    assert "首帧不能代表完整动图" in context
+
+    manager.cleanup_prepared(refs)
+
+    assert not any((tmp_path / path).exists() for path in refs[0].animation_frame_paths)
+
+
+def test_animation_extraction_failure_keeps_original_and_marks_dynamic_evidence_unavailable(
+    tmp_path: Path,
+) -> None:
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        return b"RIFF-animation-webp", "image/webp"
+
+    async def extract(source: Path, workspace: Path):
+        return SimpleNamespace(
+            status="unavailable",
+            source_frame_count=None,
+            duration_seconds=None,
+            frame_paths=(),
+            frame_times=(),
+            error="ffprobe unavailable",
+        )
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch, animation_extractor=extract)
+    refs = asyncio.run(
+        manager.prepare(
+            make_ev(
+                (
+                    ChatResource(
+                        kind="image",
+                        url="https://qq.example/reaction.webp",
+                        name="reaction.webp",
+                    ),
+                ),
+                mid="animated-webp-failed",
+            )
+        )
+    )
+
+    assert refs[0].local_path is not None
+    assert (tmp_path / refs[0].local_path).is_file()
+    assert refs[0].animation_status == "unavailable"
+    context = format_resource_context(refs)
+    assert "dynamic evidence unavailable" in context
+    assert "ffprobe unavailable" in context
+
+
+def test_apng_chunk_is_detected_without_probing_regular_png_files(tmp_path: Path) -> None:
+    png_signature = b"\x89PNG\r\n\x1a\n"
+    apng = png_signature + (8).to_bytes(4, "big") + b"acTL" + b"\0" * 12
+    static_png = png_signature + (0).to_bytes(4, "big") + b"IDAT" + b"\0" * 4
+    extracted: list[str] = []
+
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        return (apng if "animated" in url else static_png), "image/png"
+
+    async def extract(source: Path, workspace: Path):
+        extracted.append(source.name)
+        return SimpleNamespace(
+            status="ready",
+            source_frame_count=4,
+            duration_seconds=0.4,
+            frame_paths=(),
+            frame_times=(),
+            error=None,
+        )
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch, animation_extractor=extract)
+    refs = asyncio.run(
+        manager.prepare(
+            make_ev(
+                (
+                    ChatResource(
+                        kind="image",
+                        url="https://qq.example/animated.png",
+                        name="animated.png",
+                    ),
+                    ChatResource(
+                        kind="image",
+                        url="https://qq.example/static.png",
+                        name="static.png",
+                    ),
+                ),
+                mid="apng-detection",
+            )
+        )
+    )
+
+    assert len(refs) == 2
+    assert len(extracted) == 1
+    assert refs[0].animation_status == "ready"
+    assert refs[1].animation_status is None
 
 
 def test_resource_manager_keeps_unconverted_qq_voice_with_duration_context(tmp_path: Path) -> None:

@@ -37,6 +37,7 @@ QQ 用户/群聊
 - 长任务进度消息和心跳。
 - 附件缓存：手机端可先发图片/文件，再 @bot 处理最近附件。
 - 支持把图片、文件、语音、音频、视频、URL、合并转发记录交给 agent。
+- GIF、APNG 和动画 WebP 会在受限时长、帧数与分辨率内抽帧，连同原图交给 agent，避免只看首帧误判。
 - 通过受保护的 `QQBOT_SEND_*` 指令发送 agent 生成的图片、文件、音频或 QQ 语音。
 - 基于 Bubblewrap 的本地 CLI Agent 沙箱。
 - Runtime skill pack：提示 agent 如何做搜索、查天气、处理办公文档、理解媒体、处理语音/音乐、避免幻觉，并遵守 QQ bridge 的资源收发协议。
@@ -307,6 +308,17 @@ agent:
 - `/code` 是 owner 批准后的工作区编辑入口，未测试前建议保持关闭。
 - 工作区只来自本地配置，不接受聊天消息里的路径作为可信输入。
 - Bubblewrap 会把系统和运行时路径只读挂载，并使用私有 sandbox home 存放 agent 认证状态。
+
+## 输入资源与动图
+
+Bridge 会把 QQ 附件暂存到 workspace 内，再把相对路径交给 agent。启用
+`resources.animation_enabled` 后，GIF、APNG 和动画 WebP 会先由 `ffprobe`
+确认帧数与时长，再由 `ffmpeg` 有界抽取采样帧；当前 ffmpeg 无法解码时会使用
+独立的 Pillow 子进程后备。默认最多 8 帧、前 30 秒、
+最长边 1024 像素，源画布最多 4000 万像素；这些边界可在
+`resources.animation_*` 中调整。部署机器需要能
+找到配置的 `ffprobe` 和 `ffmpeg`，工具缺失或解析失败时原附件仍可用，但提示会
+明确标记动态证据不可用。采样帧在本次 agent 调用结束、失败或超时后自动清理。
 
 ## 资源发送
 

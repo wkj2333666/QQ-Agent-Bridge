@@ -88,6 +88,14 @@ class ResourcesConfig:
     cache_enabled: bool = True
     cache_ttl_seconds: int = 600
     cache_max_items: int = 4
+    animation_enabled: bool = True
+    animation_ffmpeg_binary: str = "ffmpeg"
+    animation_ffprobe_binary: str = "ffprobe"
+    animation_max_frames: int = 8
+    animation_max_duration_seconds: int = 30
+    animation_max_dimension: int = 1024
+    animation_max_source_pixels: int = 40_000_000
+    animation_timeout_seconds: float = 20.0
     allowed_kinds: list[str] = field(
         default_factory=lambda: ["image", "file", "audio", "voice", "video", "url", "forward"]
     )
@@ -214,6 +222,22 @@ class BridgeConfig:
         memory = MemoryConfig(**raw.get("memory", {}))
         ambient_memory = AmbientMemoryConfig(**raw.get("ambient_memory", {}))
         resources = ResourcesConfig(**raw.get("resources", {}))
+        resources.animation_max_frames = min(16, max(2, int(resources.animation_max_frames)))
+        resources.animation_max_duration_seconds = min(
+            120, max(1, int(resources.animation_max_duration_seconds))
+        )
+        resources.animation_max_dimension = min(
+            2048, max(256, int(resources.animation_max_dimension))
+        )
+        resources.animation_max_source_pixels = min(
+            100_000_000, max(1_000_000, int(resources.animation_max_source_pixels))
+        )
+        animation_timeout = float(resources.animation_timeout_seconds)
+        resources.animation_timeout_seconds = (
+            min(120.0, max(1.0, animation_timeout))
+            if math.isfinite(animation_timeout)
+            else ResourcesConfig.animation_timeout_seconds
+        )
         whisper_raw = raw.get("whisper", {})
         whisper = (
             WhisperConfig(**whisper_raw) if isinstance(whisper_raw, dict) else WhisperConfig()

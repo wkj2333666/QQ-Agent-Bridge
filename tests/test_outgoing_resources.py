@@ -63,6 +63,27 @@ def test_collects_image_and_file_directives_inside_workspace(tmp_path: Path) -> 
     assert resources[1].path.read_bytes() == b"pdf"
 
 
+def test_collects_animated_image_without_changing_its_format(tmp_path: Path) -> None:
+    outbox = make_outbox(tmp_path)
+    animation = outbox / "reaction.gif"
+    animation.write_bytes(b"GIF89a-animated")
+
+    text, resources, warnings = collect_outgoing_resources(
+        f"QQBOT_SEND_IMAGE: send-token {animation.relative_to(tmp_path)}",
+        make_cfg(tmp_path),
+        outbox_dir=outbox,
+        token="send-token",
+        job_id="job-1",
+    )
+
+    assert text == ""
+    assert warnings == []
+    assert len(resources) == 1
+    assert resources[0].kind == "image"
+    assert resources[0].path.suffix == ".gif"
+    assert resources[0].path.read_bytes() == animation.read_bytes()
+
+
 def test_collects_voice_directive_with_duration_under_qq_limit(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     voice = outbox / "reply.wav"

@@ -68,6 +68,16 @@ resources:
   cache_enabled: true
   cache_ttl_seconds: 600
   cache_max_items: 4
+  # GIF/APNG/animated WebP are probed and sampled before the Agent runs.
+  # ffmpeg/ffprobe are preferred; the locked Pillow worker handles decoder gaps.
+  animation_enabled: true
+  animation_ffmpeg_binary: "ffmpeg"
+  animation_ffprobe_binary: "ffprobe"
+  animation_max_frames: 8
+  animation_max_duration_seconds: 30
+  animation_max_dimension: 1024
+  animation_max_source_pixels: 40000000
+  animation_timeout_seconds: 20
   allowed_kinds: ["image", "file", "audio", "voice", "video", "url", "forward"]
 
 # Whisper voice transcription; keep disabled until the binary and model are configured.
