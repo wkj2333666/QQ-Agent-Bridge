@@ -146,6 +146,23 @@ def test_private_retrieval_does_not_include_other_users_or_group_subjects(
     assert "FAKE-GROUP" not in text
 
 
+def test_private_retrieval_fails_closed_when_sender_does_not_match_scope(
+    store: LongTermMemoryStore,
+) -> None:
+    add_memory(store, PRIVATE, subject_kind="user", subject_id="u1", content="MY-PRIVATE")
+    add_memory(
+        store,
+        PRIVATE,
+        subject_kind="user",
+        subject_id="attacker",
+        content="CONTAMINATED-PRIVATE",
+    )
+
+    text = make_retriever(store).retrieve(PRIVATE, "attacker", (), None, "继续")
+
+    assert text == ""
+
+
 def test_retrieval_filters_non_active_sensitive_expired_and_low_score_items(
     store: LongTermMemoryStore,
 ) -> None:

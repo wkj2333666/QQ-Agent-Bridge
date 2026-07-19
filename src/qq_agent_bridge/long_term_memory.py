@@ -1453,6 +1453,8 @@ class LongTermMemoryRetriever:
     ) -> str:
         if not self.enabled or not self.store.is_scope_enabled(scope):
             return ""
+        if scope.kind == "private" and str(current_sender) != scope.id:
+            return ""
         subjects = self._authorized_subjects(
             scope,
             str(current_sender),
