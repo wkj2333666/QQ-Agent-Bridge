@@ -452,7 +452,23 @@ def test_intent_specific_schema_rejects_malformed_output_without_mutation(
         "WALLET_PASSPHRASE=alpha beta gamma",
         "SSH_KEY_PASSPHRASE is alpha beta gamma",
         "SSH_PRIVATE_KEY_PASSPHRASE=alpha beta gamma",
+        "credential: alice:swordfish",
+        "credentials are alice:swordfish",
+        "auth credentials=alice:swordfish",
+        "authentication-credentials equals alice:swordfish",
+        "login credentials are alice:swordfish",
+        "service credential: alice:swordfish",
+        "account credentials: alice:swordfish",
+        "sign-in credentials: alice:swordfish",
+        "SERVICE_CREDENTIALS=alice:swordfish",
+        "DATABASE_CREDENTIAL=alice:swordfish",
+        "_AUTH_CREDENTIALS=alice:swordfish",
+        "__LOGIN_CREDENTIAL is alice:swordfish",
         "私钥：opaquevalue123456",
+        "登录凭据是 alice:swordfish",
+        "认证信息：alice:swordfish",
+        "身份凭据为 alice:swordfish",
+        "凭证等于 alice:swordfish",
         "recovery phrase is alpha beta gamma",
         "recovery-key: opaquevalue123456",
         "backup phrase are alpha beta gamma",
@@ -492,6 +508,28 @@ def test_remember_and_correct_reject_extended_credential_labels(
     assert "不能" in corrected.text
     items = db.list_items(GROUP, subject_id="member")
     assert [item.content for item in items] == ["safe value"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Login credentials should be rotated regularly",
+        "The handbook discusses authentication credentials",
+        "登录凭据需要定期更新",
+        "认证信息的管理规则已经发布",
+    ],
+)
+def test_remember_allows_unassigned_credential_label_discussion(
+    tmp_path: Path, content: str
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    service = MemoryCommandService(config(), db)
+
+    result = run(service.handle(event(), f"remember {content}"))
+
+    assert "已记住" in result.text
+    assert db.list_items(GROUP, subject_id="member")[0].content == content
 
 
 def test_forget_scrubs_credential_fixture_from_items_fts_and_revisions(tmp_path: Path) -> None:
