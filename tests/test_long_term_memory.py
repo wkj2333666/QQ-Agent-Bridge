@@ -922,6 +922,45 @@ def test_hard_delete_scrubs_revisions_and_fts(store: LongTermMemoryStore) -> Non
     assert revision[4]
 
 
+def test_direct_revision_cannot_downgrade_sensitive_item(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    source_id = store.collect(_source(GROUP_A, "sensitive", "user-a", "sensitive"))
+    assert source_id is not None
+    item = store.commit_review(
+        GROUP_A,
+        (source_id,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="private health fact",
+                sensitivity="sensitive",
+            ),
+        ),
+    )[0]
+
+    with pytest.raises(ValueError, match="cannot be downgraded"):
+        store.commit_review(
+            GROUP_A,
+            (),
+            (
+                MemoryProposal(
+                    operation="revise",
+                    item_id=item.id,
+                    content="benign replacement",
+                    sensitivity="normal",
+                ),
+            ),
+        )
+
+    unchanged = store.get_item(GROUP_A, item.id)
+    assert unchanged is not None
+    assert unchanged.content == "private health fact"
+    assert unchanged.sensitivity == "sensitive"
+
+
 def test_expiry_and_decay_are_bounded_and_scope_independent(
     store: LongTermMemoryStore,
 ) -> None:

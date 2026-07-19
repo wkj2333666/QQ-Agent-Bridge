@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from qq_agent_bridge.config import LongTermMemoryConfig
+from qq_agent_bridge.config import BridgeConfig, LongTermMemoryConfig
 from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
 from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope, MemorySource
+from qq_agent_bridge.memory_curation import MemoryActor, MemoryValidator
 
 
 GROUP = MemoryScope("group", "group-a")
@@ -181,6 +182,39 @@ def test_retrieval_filters_non_active_sensitive_expired_and_low_score_items(
     assert "VISIBLE" in text
     for hidden in ("CANDIDATE", "DORMANT", "SENSITIVE", "SECRET", "EXPIRED", "LOW-SCORE"):
         assert hidden not in text
+
+
+def test_classifier_escalated_sensitive_item_stays_out_of_ordinary_retrieval(
+    store: LongTermMemoryStore,
+) -> None:
+    cfg = BridgeConfig()
+    content = "我的手机号是13800138000"
+    source = MemorySource(
+        scope=GROUP,
+        message_id="sensitive-explicit",
+        sender_id="u1",
+        text=content,
+        message_timestamp=int(time.time()),
+        explicit=True,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        content=content,
+        sensitivity="normal",
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+    validation = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source,), (proposal,), actor=MemoryActor("u1", "member")
+    )
+    assert validation.rejected == ()
+    assert validation.accepted[0].sensitivity == "sensitive"
+    store.commit_review(GROUP, (), validation.accepted, trigger_class="explicit")
+
+    text = make_retriever(store).retrieve(GROUP, "u1", (), None, "手机号")
+
+    assert content not in text
 
 
 def test_retrieval_uses_fts_relevance_before_confidence_and_reinforcement(
