@@ -977,7 +977,6 @@ def test_low_confidence_duplicate_add_targets_fact_without_reinforcing_it(
             subject_id="123",
             content="Likes tea",
             confidence=0.8,
-            status="candidate",
             source_kind="self_statement",
         ),
     )
@@ -1010,6 +1009,123 @@ def test_low_confidence_duplicate_add_targets_fact_without_reinforcing_it(
     assert committed[0].id != existing.id
     assert committed[0].candidate_target_id == existing.id
     assert store.get_item(GROUP, existing.id) == before
+
+
+@pytest.mark.parametrize("candidate_kind", ["targetless", "fact-backed"])
+@pytest.mark.parametrize("first_operation", ["add", "mark_candidate"])
+@pytest.mark.parametrize("second_operation", ["add", "mark_candidate"])
+def test_repeated_low_confidence_candidate_permutations_survive_restart_without_chains(
+    tmp_path: Path,
+    cfg: BridgeConfig,
+    candidate_kind: str,
+    first_operation: str,
+    second_operation: str,
+) -> None:
+    path = tmp_path / "validator-candidate-restart.sqlite3"
+    store = LongTermMemoryStore(path)
+    store.initialize()
+    store.set_scope_enabled(GROUP, True)
+    fact = None
+    if candidate_kind == "fact-backed":
+        fact = seed_item(
+            store,
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="Likes tea",
+                confidence=0.9,
+                source_kind="self_statement",
+            ),
+            message_id="established-fact",
+        )
+    fts_before = store._conn.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall()
+
+    def proposal(operation: str, confidence: float) -> MemoryProposal:
+        return MemoryProposal(
+            operation=operation,
+            subject_kind="user",
+            subject_id="123",
+            content=" likes   TEA ",
+            confidence=confidence,
+            status="candidate" if operation == "mark_candidate" else "active",
+            source_kind="self_statement",
+        )
+
+    first_source = MemorySource(
+        scope=GROUP,
+        message_id="candidate-first",
+        sender_id="123",
+        text="Maybe I like tea",
+        message_timestamp=100,
+    )
+    first_source_id = store.collect(first_source)
+    assert first_source_id is not None
+    first_result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (first_source,), (proposal(first_operation, 0.45),), actor=None
+    )
+    assert first_result.rejected == ()
+    assert first_result.accepted[0].operation == "mark_candidate"
+    assert first_result.accepted[0].candidate_target_id == (
+        fact.id if fact is not None else None
+    )
+    first = store.commit_review(GROUP, (first_source_id,), first_result.accepted)[0]
+    store.close()
+
+    reopened = LongTermMemoryStore(path)
+    reopened.initialize()
+    second_source = MemorySource(
+        scope=GROUP,
+        message_id="candidate-second",
+        sender_id="123",
+        text="Maybe I still like tea",
+        message_timestamp=101,
+    )
+    second_source_id = reopened.collect(second_source)
+    assert second_source_id is not None
+    second_result = MemoryValidator(cfg, store=reopened).validate(
+        GROUP, (second_source,), (proposal(second_operation, 0.55),), actor=None
+    )
+
+    expected_target = fact.id if fact is not None else None
+    assert second_result.rejected == ()
+    assert second_result.accepted[0].operation == "mark_candidate"
+    assert second_result.accepted[0].candidate_target_id == expected_target
+    second = reopened.commit_review(
+        GROUP, (second_source_id,), second_result.accepted
+    )[0]
+
+    candidates = tuple(
+        item
+        for item in reopened.list_items(GROUP, include_expired=True)
+        if item.status == "candidate"
+    )
+    assert candidates == (second,)
+    assert second.id == first.id
+    assert second.candidate_target_id == expected_target
+    assert second.source_count == 2
+    assert second.base_confidence == pytest.approx(0.55)
+    assert reopened._conn.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall() == fts_before
+    assert reopened.pending_sources(GROUP, 10) == ()
+    review_rows = reopened._conn.execute(
+        "SELECT source_count, proposed_count, accepted_count, candidate_count, "
+        "rejected_count FROM review_runs ORDER BY id DESC LIMIT 2"
+    ).fetchall()
+    assert [tuple(row) for row in review_rows] == [
+        (1, 1, 1, 1, 0),
+        (1, 1, 1, 1, 0),
+    ]
+    assert [
+        row[0]
+        for row in reopened._conn.execute(
+            "SELECT operation FROM memory_revisions WHERE item_id = ? ORDER BY id",
+            (second.id,),
+        ).fetchall()
+    ] == ["candidate", "reinforce"]
+    reopened.close()
 
 
 @pytest.mark.parametrize("confidence", [0.9, 0.5], ids=["active", "candidate"])

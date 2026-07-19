@@ -838,7 +838,7 @@ class LongTermMemoryStore:
                 sensitivity=sensitivity,
                 candidate_target_id=None,
             )
-            if target_match is not None:
+            if target_match is not None and str(target_match["status"]) != "candidate":
                 candidate_target_id = str(target_match["id"])
         if candidate_target_id is not None:
             candidate_target = self._get_item_row(conn, scope, candidate_target_id)
