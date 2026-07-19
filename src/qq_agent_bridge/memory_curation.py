@@ -37,6 +37,7 @@ ALLOWED_SOURCE_KINDS = frozenset(
     }
 )
 STATEFUL_OPERATIONS = ALLOWED_OPERATIONS - {"add", "mark_candidate"}
+CONTENT_OPERATIONS = frozenset({"add", "mark_candidate", "revise", "contradict"})
 TARGET_METADATA_FIELDS = ("subject_kind", "subject_id", "category", "sensitivity")
 
 _SEMANTIC_COMMANDS = frozenset({"ask", "plan", "task"})
@@ -52,16 +53,24 @@ _INTERNAL_DIRECTIVE_RE = re.compile(
     r"<system\b|资源发送令牌\s*[：:])",
     re.IGNORECASE,
 )
+_ENGLISH_SECRET_LABEL = (
+    r"(?:api[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|token|"
+    r"password|passwd|secret|cookie|(?:recovery|backup)\s+codes?)"
+)
+_ENGLISH_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|[=:：])"
+_CHINESE_SECRET_LABEL = r"(?:密码|口令|令牌|恢复(?:代码|码)|备份(?:代码|码))"
+_CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(
-        r"(?i)\b(?:api[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|token|"
-        r"password|passwd|secret|cookie)\b\s*(?:is\b|equals\b|[=:：])\s*\S"
+        rf"\b{_ENGLISH_SECRET_LABEL}\b\s*{_ENGLISH_SECRET_ASSIGNMENT}\s*\S",
+        re.IGNORECASE,
     ),
-    re.compile(r"(?:密码|口令|令牌)\s*(?:是|为|等于|[:：=])\s*\S"),
-    re.compile(r"(?i)\b(?:recovery|backup)\s+codes?\s*[=:：]\s*\S+"),
+    re.compile(
+        rf"{_CHINESE_SECRET_LABEL}\s*{_CHINESE_SECRET_ASSIGNMENT}\s*\S"
+    ),
 )
 
 _PROPOSAL_FIELDS = frozenset(
@@ -258,16 +267,24 @@ class MemoryValidator:
         accepted: list[MemoryProposal] = []
         rejected: list[RejectedProposal] = []
         staged_items: dict[str, MemoryItem | None] = {}
+        staged_content: list[MemoryProposal] = []
         for index, proposal in enumerate(proposal_tuple):
             normalized, reason = self._validate_one(
-                scope, source_tuple, proposal, normalized_actor, staged_items
+                scope,
+                source_tuple,
+                proposal,
+                normalized_actor,
+                staged_items,
+                staged_content,
             )
             if reason is not None:
                 rejected.append(RejectedProposal(proposal, reason, index))
             else:
                 assert normalized is not None
                 accepted.append(normalized)
-                self._stage_operation(scope, normalized, staged_items)
+                self._stage_operation(
+                    scope, normalized, staged_items, staged_content
+                )
         return ValidationResult(tuple(accepted), tuple(rejected))
 
     @staticmethod
@@ -285,6 +302,7 @@ class MemoryValidator:
         proposal: MemoryProposal,
         actor: MemoryActor | None,
         staged_items: Mapping[str, MemoryItem | None],
+        staged_content: Sequence[MemoryProposal],
     ) -> tuple[MemoryProposal | None, str | None]:
         if proposal.operation not in ALLOWED_OPERATIONS:
             return None, "invalid_operation"
@@ -319,10 +337,20 @@ class MemoryValidator:
         if reason is not None:
             return None, reason
 
-        target = self._target(scope, proposal, staged_items)
         if proposal.operation in STATEFUL_OPERATIONS:
             if self.store is None:
                 return None, "target_resolver_required"
+            proposal, resolved_target, reason = self._resolve_operation_ids(
+                scope, proposal
+            )
+            if reason is not None:
+                return None, reason
+            assert proposal is not None and resolved_target is not None
+            target = (
+                staged_items[resolved_target.id]
+                if resolved_target.id in staged_items
+                else resolved_target
+            )
             if target is None:
                 return None, "target_not_found"
             reason = self._validate_target_transition(target, proposal)
@@ -371,9 +399,9 @@ class MemoryValidator:
             ):
                 return None, "sensitivity_consent_required"
         duplicate = None
-        if proposal.operation == "add":
+        if proposal.operation in CONTENT_OPERATIONS:
             duplicate, sensitivity_collision = self._duplicate(
-                scope, proposal, staged_items
+                scope, proposal, staged_items, staged_content
             )
             if sensitivity_collision:
                 return None, "sensitivity_collision"
@@ -424,6 +452,40 @@ class MemoryValidator:
                 return "actor_not_authorized"
         return None
 
+    def _resolve_operation_ids(
+        self,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+    ) -> tuple[MemoryProposal | None, MemoryItem | None, str | None]:
+        assert self.store is not None and proposal.item_id is not None
+        target = self.store.get_item(scope, proposal.item_id)
+        if target is None:
+            return None, None, "target_not_found"
+
+        related_ids = proposal.related_item_ids
+        if proposal.operation == "merge":
+            canonical_related: list[str] = []
+            for related_id in related_ids:
+                related = self.store.get_item(scope, related_id)
+                if related is None:
+                    return None, None, "invalid_related_target"
+                canonical_related.append(related.id)
+            if target.id in canonical_related or len(canonical_related) != len(
+                set(canonical_related)
+            ):
+                return None, None, "invalid_related_target"
+            related_ids = tuple(canonical_related)
+
+        return (
+            replace(
+                proposal,
+                item_id=target.id,
+                related_item_ids=related_ids,
+            ),
+            target,
+            None,
+        )
+
     def _target(
         self,
         scope: MemoryScope,
@@ -443,6 +505,7 @@ class MemoryValidator:
         scope: MemoryScope,
         proposal: MemoryProposal,
         staged_items: Mapping[str, MemoryItem | None],
+        staged_content: Sequence[MemoryProposal],
     ) -> tuple[MemoryItem | None, bool]:
         if (
             self.store is None
@@ -485,6 +548,19 @@ class MemoryValidator:
             if item_key[-1] != proposal_key[-1]:
                 return None, True
             duplicate = staged_item
+        for staged_proposal in staged_content:
+            staged_key = memory_identity_key(
+                subject_kind=staged_proposal.subject_kind,
+                subject_id=staged_proposal.subject_id,
+                category=staged_proposal.category,
+                content=staged_proposal.content,
+                sensitivity=staged_proposal.sensitivity,
+            )
+            if (
+                staged_key[:-1] == proposal_key[:-1]
+                and staged_key[-1] != proposal_key[-1]
+            ):
+                return None, True
         return duplicate, False
 
     def _valid_related_targets(
@@ -517,7 +593,10 @@ class MemoryValidator:
         scope: MemoryScope,
         proposal: MemoryProposal,
         staged_items: dict[str, MemoryItem | None],
+        staged_content: list[MemoryProposal],
     ) -> None:
+        if proposal.operation in {"add", "mark_candidate"}:
+            staged_content.append(proposal)
         if proposal.operation not in STATEFUL_OPERATIONS or proposal.item_id is None:
             return
         target = self._target(scope, proposal, staged_items)
@@ -530,6 +609,7 @@ class MemoryValidator:
                 staged_items[related_id] = None
         elif proposal.operation == "contradict":
             staged_items[target.id] = replace(target, status="contradicted")
+            staged_content.append(proposal)
         elif proposal.operation == "revise":
             staged_items[target.id] = replace(
                 target,
