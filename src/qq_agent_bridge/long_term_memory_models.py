@@ -100,7 +100,7 @@ class MemoryProposal:
     content: str | None = None
     confidence: float | None = None
     status: str | None = None
-    sensitivity: str = "normal"
+    sensitivity: str | None = None
     source_kind: str = "inferred"
     explicit_memory: bool = False
     decay_exempt: bool = False
