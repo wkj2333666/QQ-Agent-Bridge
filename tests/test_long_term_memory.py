@@ -332,6 +332,35 @@ def test_commit_review_is_atomic_and_consumes_only_selected_scoped_sources(
     assert store.status(GROUP_A).pending_count == 1
 
 
+def test_per_source_failure_deadlines_are_atomic(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    source_id = store.collect(_source(GROUP_A, "first", "user-a", "first"))
+    assert source_id is not None
+    run_count = store._conn.execute(  # noqa: SLF001 - verify transactional audit write
+        "SELECT COUNT(*) AS count FROM review_runs"
+    ).fetchone()["count"]
+
+    with pytest.raises(ValueError, match="exact scope"):
+        store.mark_review_failures(
+            GROUP_A,
+            ((source_id, 1_060), (source_id + 10_000, 1_600)),
+            error_class="malformed_output",
+            trigger_class="explicit",
+            now=1_000,
+        )
+
+    retained = store.pending_sources(GROUP_A, limit=10, now=2_000)
+    assert len(retained) == 1
+    assert retained[0].id == source_id
+    assert retained[0].attempt_count == 0
+    assert retained[0].next_attempt_at == 0
+    assert store._conn.execute(  # noqa: SLF001 - verify audit rollback
+        "SELECT COUNT(*) AS count FROM review_runs"
+    ).fetchone()["count"] == run_count
+
+
 def test_direct_revision_into_duplicate_reinforces_survivor_and_retires_target(
     store: LongTermMemoryStore,
 ) -> None:

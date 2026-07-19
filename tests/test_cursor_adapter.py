@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -583,6 +586,49 @@ def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
 
 
+def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap() -> None:
+    cfg = BridgeConfig(workspaces={"/private/curator": True})
+    cfg.agent.use_bwrap = True
+    cfg.agent.share_network = False
+    cfg.agent.force_task_tools = True
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+
+    cmd = adapter._build_cmd(
+        "curate memory", "/private/curator", "ask", model="auto"
+    )
+
+    assert Path(cmd[0]).name == "bwrap"
+    assert "--unshare-net" in cmd
+    assert "--share-net" not in cmd
+    assert _has_bind(
+        cmd,
+        "--ro-bind",
+        "/private/curator",
+        "/private/curator",
+    )
+    assert not _has_bind(
+        cmd,
+        "--bind",
+        "/private/curator",
+        "/private/curator",
+    )
+    assert cmd[cmd.index("--mode") + 1] == "ask"
+    assert cmd[cmd.index("--sandbox") + 1] == "enabled"
+    for forbidden in ("--force", "--trust", "--auto-review", "--approve-mcps"):
+        assert forbidden not in cmd
+
+
+@pytest.mark.parametrize("mode", ["plan", "task", "code"])
+def test_hardened_read_only_command_rejects_non_ask_modes(mode: str) -> None:
+    cfg = BridgeConfig(workspaces={"/private/curator": True})
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+
+    with pytest.raises(ValueError, match="hardened read-only"):
+        adapter._build_cmd("curate memory", "/private/curator", mode, model="auto")
+
+
 def test_non_bwrap_task_keeps_cursor_sandbox_enabled_without_force() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = False
@@ -1106,6 +1152,86 @@ def test_nonzero_subprocess_output_is_generic(tmp_path: Path) -> None:
     assert "cursor" not in lowered
     assert "agent" not in lowered
     assert "cli" not in lowered
+
+
+def test_normal_nonzero_subprocess_logging_preserves_output_by_default(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\nprintf 'ordinary diagnostic' >&2\nexit 9\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    adapter = CursorAdapter(cfg)
+
+    with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.cursor_adapter"):
+        result = asyncio.run(adapter.run("hello", str(tmp_path), "ask"))
+
+    assert result == "[error] 助手执行失败"
+    assert "ordinary diagnostic" in caplog.text
+
+
+def test_restricted_nonzero_subprocess_logs_only_failure_metadata(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_outputs = (
+        "QQ-EXACT: user launch code is Alpha Seven",
+        "launch code is Alpha Seven",
+        "qq exact user launch-code alpha seven",
+        "the private deployment credential uses the first Greek letter and seven",
+        "model says the user prefers concise answers",
+        "stdout contains a private memory candidate",
+    )
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        "printf 'stdout contains a private memory candidate'\n"
+        "printf '%s\\n' "
+        "'QQ-EXACT: user launch code is Alpha Seven' "
+        "'launch code is Alpha Seven' "
+        "'qq exact user launch-code alpha seven' "
+        "'the private deployment credential uses the first Greek letter and seven' "
+        "'model says the user prefers concise answers' >&2\n"
+        "exit 42\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.log_subprocess_output = False
+    adapter = CursorAdapter(cfg)
+
+    with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.cursor_adapter"):
+        result = asyncio.run(
+            adapter.run(
+                "QQ-derived prompt text",
+                str(tmp_path),
+                "ask",
+                model="private-model-name",
+            )
+        )
+
+    assert result == "[error] 助手执行失败"
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "agent process failed: error_class=process_exit exit_code=42"
+    ]
+    rendered = "\n".join(messages)
+    assert "private-model-name" not in rendered
+    assert "QQ-derived prompt text" not in rendered
+    for value in sensitive_outputs:
+        assert value not in rendered
 
 
 def test_nonzero_subprocess_reports_storage_exhaustion(tmp_path: Path) -> None:

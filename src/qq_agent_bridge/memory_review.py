@@ -507,20 +507,22 @@ class MemoryReviewCoordinator:
         trigger: str,
         now: int,
     ) -> CuratorOutcome:
-        attempt = max((source.attempt_count for source in sources), default=0) + 1
-        if attempt >= self.cfg.review.max_attempts:
-            delay = self.cfg.review.interval_seconds
-        else:
-            delay = min(
-                self.cfg.review.interval_seconds,
-                60 * (2 ** max(0, attempt - 1)),
+        source_deadlines = tuple(
+            (
+                source.id,
+                now + self._failure_delay(source.attempt_count + 1),
             )
-        next_attempt = now + max(1, int(delay))
-        self.store.mark_review_failure(
+            for source in sources
+            if source.id is not None
+        )
+        next_attempt = min(
+            (deadline for _source_id, deadline in source_deadlines),
+            default=now + max(1, int(self.cfg.review.interval_seconds)),
+        )
+        self.store.mark_review_failures(
             scope,
-            tuple(source.id for source in sources if source.id is not None),
+            source_deadlines,
             error_class=outcome.error or "mechanical_failure",
-            next_attempt_at=next_attempt,
             trigger_class=trigger,
             now=now,
         )
@@ -534,6 +536,16 @@ class MemoryReviewCoordinator:
         )
         self._log_review(scope, trigger, result)
         return result
+
+    def _failure_delay(self, attempt: int) -> int:
+        if attempt >= self.cfg.review.max_attempts:
+            delay = self.cfg.review.interval_seconds
+        else:
+            delay = min(
+                self.cfg.review.interval_seconds,
+                60 * (2 ** max(0, attempt - 1)),
+            )
+        return max(1, int(delay))
 
     async def _scheduler_loop(self) -> None:
         while self._running:
@@ -611,7 +623,7 @@ def build_memory_review_coordinator(
         agent,
         MemoryValidator(cfg, store=store),
         cfg.long_term_memory.review,
-        workspace=workspace,
+        workspace=agent.cfg.agent.default_workspace,
     )
     return MemoryReviewCoordinator(store, curator, cfg.long_term_memory, gate)
 
