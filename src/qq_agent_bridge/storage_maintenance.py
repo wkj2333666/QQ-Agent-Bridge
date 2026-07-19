@@ -135,6 +135,8 @@ class StorageMaintainer:
         self._loop_task: asyncio.Task[None] | None = None
         self._started = False
         self._stopping = False
+        self._protected_lock = threading.Lock()
+        self._protected_paths: set[Path] = set()
 
     @property
     def loop_task(self) -> asyncio.Task[None] | None:
@@ -176,6 +178,21 @@ class StorageMaintainer:
         roots, _skipped = self._resolve_roots()
         free = self._free_bytes(roots)
         return free is not None and free < self.cfg.storage_maintenance.min_free_bytes
+
+    def protect_path(self, path: Path | str) -> None:
+        protected = Path(os.path.abspath(Path(path).expanduser()))
+        with self._protected_lock:
+            self._protected_paths.add(protected)
+
+    def unprotect_path(self, path: Path | str) -> None:
+        protected = Path(os.path.abspath(Path(path).expanduser()))
+        with self._protected_lock:
+            self._protected_paths.discard(protected)
+
+    def is_protected(self, path: Path | str) -> bool:
+        protected = Path(os.path.abspath(Path(path).expanduser()))
+        with self._protected_lock:
+            return protected in self._protected_paths
 
     def request_pressure_check(self) -> None:
         if not self.cfg.storage_maintenance.enabled or not self.pressure_needed():
@@ -269,10 +286,11 @@ class StorageMaintainer:
                         await self.run(trigger)
                     except asyncio.CancelledError:
                         raise
-                    except Exception:  # noqa: BLE001 - maintenance must not kill the bridge
-                        logger.exception(
-                            "storage maintenance failed trigger=%s",
+                    except Exception as exc:  # noqa: BLE001 - maintenance must not kill the bridge
+                        logger.warning(
+                            "storage maintenance failed trigger=%s error=%s",
                             trigger,
+                            type(exc).__name__,
                         )
         finally:
             if self._loop_task is asyncio.current_task():
@@ -313,6 +331,8 @@ class StorageMaintainer:
 
     def delete_candidate(self, candidate: CleanupCandidate) -> tuple[int, int]:
         """Delete a still-identical candidate using root-relative file descriptors."""
+        if self.is_protected(candidate.path):
+            return (0, 0)
         root = self._resolve_roots()[0].get(candidate.area)
         if root is None or root.path != candidate.root or not candidate.relative_parts:
             return (0, 0)
@@ -335,7 +355,13 @@ class StorageMaintainer:
                 or stat.S_IFMT(current.st_mode) != stat.S_IFMT(candidate.mode)
             ):
                 return (0, 0)
-            removed, released, _complete = self._delete_entry(parent_fd, name)
+            if self.is_protected(candidate.path):
+                return (0, 0)
+            removed, released, _complete = self._delete_entry(
+                parent_fd,
+                name,
+                expected=(candidate.device, candidate.inode, candidate.mode),
+            )
             return (removed, released)
         except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
             return (0, 0)
@@ -616,6 +642,8 @@ class StorageMaintainer:
         output: list[CleanupCandidate],
         budget: _ScanBudget,
     ) -> None:
+        if self.is_protected(path):
+            return
         measured = self._measure(path, budget, count_root=False)
         if measured is None:
             budget.skipped += 1
@@ -695,10 +723,22 @@ class StorageMaintainer:
         except OSError:
             return []
 
-    def _delete_entry(self, parent_fd: int, name: str) -> tuple[int, int, bool]:
+    def _delete_entry(
+        self,
+        parent_fd: int,
+        name: str,
+        *,
+        expected: tuple[int, int, int] | None = None,
+    ) -> tuple[int, int, bool]:
         try:
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError:
+            return (0, 0, False)
+        if expected is not None and (
+            current.st_dev != expected[0]
+            or current.st_ino != expected[1]
+            or stat.S_IFMT(current.st_mode) != stat.S_IFMT(expected[2])
+        ):
             return (0, 0, False)
         if stat.S_ISLNK(current.st_mode):
             return (0, 0, False)
@@ -722,7 +762,8 @@ class StorageMaintainer:
                 return (0, 0, False)
             for child_name in os.listdir(child_fd):
                 child_removed, child_released, child_complete = self._delete_entry(
-                    child_fd, child_name
+                    child_fd,
+                    child_name,
                 )
                 removed += child_removed
                 released += child_released

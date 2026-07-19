@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from qq_agent_bridge.config import BridgeConfig
+from qq_agent_bridge.storage_gate import StorageActivityGate
 from qq_agent_bridge.storage_maintenance import StorageMaintainer
 from qq_agent_bridge.storage_maintenance import MaintenanceSummary
 
@@ -192,6 +193,50 @@ def test_delete_candidate_rejects_inode_replacement(tmp_path: Path) -> None:
 
     assert (removed, released) == (0, 0)
     assert target.read_bytes() == b"replacement"
+
+
+def test_delete_candidate_rechecks_identity_at_recursive_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    target = _write(Path(cfg.agent.trace_root) / "old.jsonl", b"old")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    candidate = maintainer.inventory(now=2_000_000.0).candidates["traces"][0]
+    real_stat = os.stat
+    checks = 0
+
+    def racing_stat(path, *args, **kwargs):
+        nonlocal checks
+        if path == target.name and kwargs.get("dir_fd") is not None:
+            checks += 1
+            if checks == 2:
+                target.unlink()
+                target.write_bytes(b"replacement")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr("qq_agent_bridge.storage_maintenance.os.stat", racing_stat)
+
+    removed, released = maintainer.delete_candidate(candidate)
+
+    assert (removed, released) == (0, 0)
+    assert target.read_bytes() == b"replacement"
+
+
+def test_protected_current_job_is_never_inventoried_or_deleted(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    job_dir = Path(cfg.agent.default_workspace) / cfg.resources.root / "outgoing" / "active"
+    _write(job_dir / "result.pdf", b"active")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    maintainer.protect_path(job_dir)
+
+    assert maintainer.is_protected(job_dir)
+    assert maintainer.inventory().candidates["resources"] == []
+
+    maintainer.unprotect_path(job_dir)
+    candidate = maintainer.inventory().candidates["resources"][0]
+    maintainer.protect_path(job_dir)
+    assert maintainer.delete_candidate(candidate) == (0, 0)
+    assert job_dir.exists()
 
 
 def test_normal_cleanup_applies_retention_then_oldest_first_cap(tmp_path: Path) -> None:
@@ -506,3 +551,40 @@ def test_pressure_check_only_uses_disk_usage(tmp_path: Path) -> None:
 
     assert maintainer.pressure_needed()
     assert 1 <= len(calls) <= 3
+
+
+def test_cancelled_run_waits_for_worker_exit_before_releasing_gate(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        gate = StorageActivityGate()
+        worker_started = asyncio.Event()
+        worker_stopped = asyncio.Event()
+
+        async def controlled_runner(_function, trigger, cancelled):
+            worker_started.set()
+            while not cancelled.is_set():
+                await asyncio.sleep(0)
+            worker_stopped.set()
+            return _summary(trigger)
+
+        maintainer = StorageMaintainer(
+            cfg,
+            gate,
+            home=home,
+            cwd=tmp_path,
+            thread_runner=controlled_runner,
+        )
+        task = asyncio.create_task(maintainer.run("periodic"))
+        await worker_started.wait()
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+
+        assert isinstance(result[0], asyncio.CancelledError)
+        assert worker_stopped.is_set()
+        async with asyncio.timeout(0.2):
+            async with gate.activity():
+                assert gate.active_count == 1
+
+    asyncio.run(go())

@@ -110,6 +110,47 @@ timeout, and exit events. Tracing is disabled by default, omits the original pro
 redacts secrets, and never sends logs to QQ. The directory uses `0700` and files use
 `0600`; remove local traces when they are no longer needed.
 
+## Automatic Storage Maintenance
+
+The bridge includes bounded in-process cleanup for three application-owned areas:
+
+- Agent sandbox state below `agent.sandbox_home`;
+- regular `*.jsonl` files directly below `agent.trace_root`;
+- dated received resources plus `outgoing` and `sending` job directories below `resources.root`.
+
+Maintenance runs once at startup, then every `interval_seconds` (default `21600`,
+six hours). A cheap free-space check after each job can request an earlier pressure
+run. Active jobs, proactive calls, schedule parsing, resource preparation, and
+artifact repair share an activity gate with maintenance, so cleanup never overlaps
+active job storage work.
+
+The balanced defaults are:
+
+| Area | Capacity | Retention |
+| --- | ---: | ---: |
+| Sandbox | `2147483648` bytes (2 GiB) | `1209600` seconds (14 days) |
+| Traces | `536870912` bytes (512 MiB) | `1209600` seconds (14 days) |
+| Received resources | part of `5368709120` bytes (5 GiB) | `604800` seconds (7 days) |
+| `outgoing` / `sending` | part of `5368709120` bytes (5 GiB) | `86400` seconds (24 hours) |
+
+Pressure cleanup starts when relevant free space falls below `5368709120` bytes
+(5 GiB). Scans and run time are bounded. Symbolic links, unknown entries, Cursor
+authentication/configuration, current job data, and the generated runtime skill
+bundle are never followed or selected. Failures are logged without resource names,
+prompts, or tokens and do not stop the bridge.
+
+Set `storage_maintenance.enabled: false` to disable all automatic maintenance.
+Setting an area's `max_bytes` to `0` disables its capacity cleanup; setting a
+retention value to `0` disables that age rule. Limits and intervals hot-reload,
+but changing `agent.sandbox_home`, `agent.trace_root`, the default workspace, or
+`resources.root` requires a bridge restart; the running process keeps its original
+validated roots until then.
+
+```yaml
+storage_maintenance:
+  enabled: false
+```
+
 ## Optional Local Speech Recognition
 
 The bridge can transcribe QQ voice resources with a local `whisper.cpp` binary.

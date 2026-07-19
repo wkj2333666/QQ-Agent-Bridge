@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_whisper_cpp.sh"
 CHECKER = ROOT / "scripts" / "check_whisper_cpp.sh"
 README = ROOT / "runtime" / "asr" / "README.md"
+PROJECT_READMES = (ROOT / "README.md", ROOT / "README.zh-CN.md")
 
 
 def read(path: Path) -> str:
@@ -21,6 +22,30 @@ def read(path: Path) -> str:
 
 WHISPER_CPP_COMMIT = "080bbbe85230f624f0b52127f1ae1218247989f9"
 MODEL_SHA256 = "c2085835d3f50733e2ff6e4b41ae8a2b8d8110461e18821b09a15c40c42d1cca"
+
+
+def test_project_readmes_document_bounded_storage_maintenance() -> None:
+    for path in PROJECT_READMES:
+        contents = read(path)
+        for required in (
+            "storage_maintenance",
+            "sandbox_home",
+            "trace_root",
+            "resources.root",
+            "21600",
+            "2147483648",
+            "536870912",
+            "5368709120",
+            "1209600",
+            "604800",
+            "86400",
+            "enabled: false",
+        ):
+            assert required in contents, f"{path.name} must document {required}"
+        lowered = contents.lower()
+        assert "startup" in lowered or "启动" in contents
+        assert "active job" in lowered or "活动任务" in contents
+        assert "restart" in lowered or "重启" in contents
 
 
 def write_executable(path: Path, contents: str) -> None:
