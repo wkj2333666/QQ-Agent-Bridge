@@ -238,7 +238,10 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_home = tmp_path / "home"
-    fake_home.mkdir()
+    fake_home.mkdir(mode=0o700)
+    auth_file = fake_home / ".config" / "cursor" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text('{"token":"curator-auth"}', encoding="utf-8")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     project_workspace = tmp_path / "project"
     runtime_skill = project_workspace / "skills" / "qq-agent-runtime" / "SKILL.md"
@@ -252,6 +255,8 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     cfg.agent.trace_enabled = True
     cfg.agent.max_runtime_seconds = 300
     cfg.agent.max_output_chars = 40_000
+    normal_sandbox_home = fake_home / ".local" / "state" / "qq-agent-bridge" / "agent-home"
+    cfg.agent.sandbox_home = str(normal_sandbox_home)
     cfg.workspaces = {"/writable/project": True}
     gate = StorageActivityGate()
 
@@ -268,16 +273,27 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     assert restricted.agent.log_subprocess_output is False
     assert restricted.agent.trace_enabled is False
     curator_workspace = Path(restricted.agent.default_workspace)
+    curator_home = Path(restricted.agent.sandbox_home)
     state_root = fake_home / ".local" / "state" / "qq-agent-bridge"
     assert curator_workspace.parent == state_root
+    assert curator_home.parent == state_root
     assert curator_workspace != project_workspace
+    assert curator_home != normal_sandbox_home
+    assert curator_home != curator_workspace
     assert tuple(curator_workspace.iterdir()) == ()
+    assert tuple(curator_home.iterdir()) == ()
+    assert curator_home.stat().st_mode & 0o777 == 0o700
     assert restricted.agent.max_runtime_seconds == cfg.long_term_memory.review.timeout_seconds
     assert restricted.agent.max_output_chars == MAX_CURATOR_OUTPUT_CHARS
     assert restricted.workspaces == {str(curator_workspace): True}
     assert restricted.resources.enabled is False
     assert cfg.agent.share_network is True
     assert cfg.agent.trace_enabled is True
+    assert cfg.agent.sandbox_home == str(normal_sandbox_home)
+
+    second = build_restricted_memory_agent(cfg, gate, project_workspace)
+    assert second.cfg.agent.sandbox_home != restricted.agent.sandbox_home
+    assert second.cfg.agent.default_workspace != restricted.agent.default_workspace
 
     cmd = adapter.delegate._build_cmd(  # noqa: SLF001 - inspect security boundary
         "curate memory",
@@ -293,13 +309,13 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
         cmd,
         "--ro-bind",
         str(curator_workspace),
-        str(curator_workspace),
+        "/workspace",
     )
     assert not _has_mount(
         cmd,
         "--bind",
         str(curator_workspace),
-        str(curator_workspace),
+        "/workspace",
     )
     assert str(project_workspace) not in rendered_cmd
     assert "qq-agent-runtime" not in rendered_cmd

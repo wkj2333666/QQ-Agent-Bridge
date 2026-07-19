@@ -130,7 +130,9 @@ def build_restricted_agent_adapter(
 ) -> GatedAgentAdapter:
     """Build an isolated ask-only adapter configuration for background analysis."""
     restricted = deepcopy(cfg)
-    resolved_workspace = str(_create_private_curator_workspace())
+    curator_workspace = _create_private_curator_path("curator-workspace-")
+    curator_home = _create_private_curator_path("curator-home-")
+    resolved_workspace = str(curator_workspace)
     restricted.workspaces = {resolved_workspace: True}
     restricted.agent.runtime = "cursor-cli"
     restricted.agent.command = {}
@@ -142,6 +144,7 @@ def build_restricted_agent_adapter(
     restricted.agent.force_task_tools = False
     restricted.agent.hardened_read_only = True
     restricted.agent.log_subprocess_output = False
+    restricted.agent.sandbox_home = str(curator_home)
     restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
     restricted.agent.max_output_chars = restricted.max_output_chars
     restricted.agent.trace_enabled = False
@@ -150,7 +153,7 @@ def build_restricted_agent_adapter(
     return GatedAgentAdapter(build_agent_adapter(restricted), gate)
 
 
-def _create_private_curator_workspace() -> Path:
+def _create_private_curator_path(prefix: str) -> Path:
     home = Path.home().resolve(strict=True)
     root = home / ".local" / "state" / "qq-agent-bridge"
     current = home
@@ -166,6 +169,6 @@ def _create_private_curator_workspace() -> Path:
         if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
             raise ValueError("private application state path is not safely owned")
     root.chmod(0o700)
-    workspace = Path(tempfile.mkdtemp(prefix="curator-workspace-", dir=root))
-    workspace.chmod(0o700)
-    return workspace
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    path.chmod(0o700)
+    return path
