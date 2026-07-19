@@ -94,7 +94,12 @@ class LongTermMemoryStore:
     def close(self) -> None:
         connection, self._connection = self._connection, None
         if connection is not None:
-            connection.close()
+            try:
+                connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except sqlite3.Error:
+                pass
+            finally:
+                connection.close()
 
     def is_scope_enabled(self, scope: MemoryScope) -> bool:
         row = self._conn.execute(

@@ -144,7 +144,12 @@ def test_collector_stores_group_culture_and_structured_provenance(
         group="g",
         mentioned_bot=True,
         segments=(ChatSegment(type="mention", qq="456"),),
-        reply=ChatReply(message_id="quoted", sender_id="789", text="旧消息"),
+        reply=ChatReply(
+            message_id="quoted",
+            sender_id="789",
+            text="旧消息",
+            raw_data={"source": "onebot-get-msg"},
+        ),
         timestamp=321,
     )
 

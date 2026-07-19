@@ -48,6 +48,33 @@ def test_project_readmes_document_bounded_storage_maintenance() -> None:
         assert "restart" in lowered or "重启" in contents
 
 
+def test_project_readmes_document_scoped_long_term_memory_operations_and_privacy() -> None:
+    for path in PROJECT_READMES:
+        contents = read(path)
+        lowered = contents.lower()
+        for required in (
+            "long_term_memory",
+            "default_scope_enabled",
+            "/memory enable",
+            "/memory disable",
+            "/memory remember",
+            "/memory review now",
+            "604800",
+            "2592000",
+            "0700",
+            "0600",
+            "database_path",
+        ):
+            assert required in contents, f"{path.name} must document {required}"
+        assert "plaintext" in lowered or "明文" in contents
+        assert "backup" in lowered or "备份" in contents
+        assert "opt-in" in lowered or "显式开启" in contents
+        assert "scope isolation" in lowered or "作用域隔离" in contents
+        assert "network disabled" in lowered or "禁用网络" in contents
+        assert "reload" in lowered or "热重载" in contents
+        assert "restart" in lowered or "重启" in contents
+
+
 def write_executable(path: Path, contents: str) -> None:
     path.write_text(textwrap.dedent(contents).lstrip(), encoding="utf-8")
     path.chmod(0o755)
