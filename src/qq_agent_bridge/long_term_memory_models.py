@@ -29,6 +29,27 @@ ALLOWED_OPERATIONS = frozenset(
 INDEXED_STATUSES = frozenset({"active", "dormant"})
 
 
+MemoryIdentityKey = tuple[str, str, str, str, str]
+
+
+def memory_identity_key(
+    *,
+    subject_kind: object,
+    subject_id: object,
+    category: object,
+    content: object,
+    sensitivity: object,
+) -> MemoryIdentityKey:
+    """Return the canonical duplicate identity shared by validation and storage."""
+    return (
+        str(subject_kind or "").strip(),
+        str(subject_id or "").strip(),
+        str(category or "preference").strip(),
+        " ".join(str(content or "").split()).casefold(),
+        str(sensitivity or "normal").strip(),
+    )
+
+
 @dataclass(frozen=True)
 class MemoryScope:
     kind: ScopeKind
@@ -172,10 +193,12 @@ class MemoryStoreStatus:
 
 __all__ = [
     "MemoryItem",
+    "MemoryIdentityKey",
     "MemoryProposal",
     "MemoryScope",
     "MemorySource",
     "MemoryStatusName",
     "MemoryStoreStatus",
     "ScopeKind",
+    "memory_identity_key",
 ]

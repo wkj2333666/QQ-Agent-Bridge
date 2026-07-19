@@ -16,6 +16,7 @@ from .long_term_memory_models import (
     MemoryProposal,
     MemoryScope,
     MemorySource,
+    memory_identity_key,
 )
 from .types import ChatEvent
 
@@ -57,9 +58,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(
         r"(?i)\b(?:api[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|token|"
-        r"password|passwd|secret|cookie)\b\s*(?:is\b|[=:：])\s*[^\s,;]{6,}"
+        r"password|passwd|secret|cookie)\b\s*(?:is\b|equals\b|[=:：])\s*\S"
     ),
-    re.compile(r"(?:密码|口令|令牌)\s*(?:是|为|[:：=])\s*\S{6,}"),
+    re.compile(r"(?:密码|口令|令牌)\s*(?:是|为|等于|[:：=])\s*\S"),
     re.compile(r"(?i)\b(?:recovery|backup)\s+codes?\s*[=:：]\s*\S+"),
 )
 
@@ -256,15 +257,17 @@ class MemoryValidator:
         normalized_actor = _normalize_actor(actor)
         accepted: list[MemoryProposal] = []
         rejected: list[RejectedProposal] = []
+        staged_items: dict[str, MemoryItem | None] = {}
         for index, proposal in enumerate(proposal_tuple):
             normalized, reason = self._validate_one(
-                scope, source_tuple, proposal, normalized_actor
+                scope, source_tuple, proposal, normalized_actor, staged_items
             )
             if reason is not None:
                 rejected.append(RejectedProposal(proposal, reason, index))
             else:
                 assert normalized is not None
                 accepted.append(normalized)
+                self._stage_operation(scope, normalized, staged_items)
         return ValidationResult(tuple(accepted), tuple(rejected))
 
     @staticmethod
@@ -281,6 +284,7 @@ class MemoryValidator:
         sources: tuple[MemorySource, ...],
         proposal: MemoryProposal,
         actor: MemoryActor | None,
+        staged_items: Mapping[str, MemoryItem | None],
     ) -> tuple[MemoryProposal | None, str | None]:
         if proposal.operation not in ALLOWED_OPERATIONS:
             return None, "invalid_operation"
@@ -315,7 +319,7 @@ class MemoryValidator:
         if reason is not None:
             return None, reason
 
-        target = self._target(scope, proposal)
+        target = self._target(scope, proposal, staged_items)
         if proposal.operation in STATEFUL_OPERATIONS:
             if self.store is None:
                 return None, "target_resolver_required"
@@ -328,7 +332,7 @@ class MemoryValidator:
                 return None, "target_metadata_mismatch"
             proposal = self._with_target_metadata(proposal, target)
             if proposal.operation == "merge" and not self._valid_related_targets(
-                scope, proposal, target
+                scope, proposal, target, staged_items
             ):
                 return None, "invalid_related_target"
         elif proposal.sensitivity is None:
@@ -366,16 +370,21 @@ class MemoryValidator:
                 actor is not None and actor.id != proposal.subject_id
             ):
                 return None, "sensitivity_consent_required"
-        proposal = self._candidate_if_ambiguous(proposal)
+        duplicate = None
         if proposal.operation == "add":
-            duplicate = self._duplicate(scope, proposal)
-            if duplicate is not None:
-                proposal = MemoryProposal.reinforce(
-                    duplicate.id,
-                    confidence=proposal.confidence,
-                    source_kind=proposal.source_kind,
-                    actor_class=proposal.actor_class,
-                )
+            duplicate, sensitivity_collision = self._duplicate(
+                scope, proposal, staged_items
+            )
+            if sensitivity_collision:
+                return None, "sensitivity_collision"
+        proposal = self._candidate_if_ambiguous(proposal)
+        if proposal.operation == "add" and duplicate is not None:
+            proposal = MemoryProposal.reinforce(
+                duplicate.id,
+                confidence=proposal.confidence,
+                source_kind=proposal.source_kind,
+                actor_class=proposal.actor_class,
+            )
         return proposal, None
 
     @staticmethod
@@ -415,45 +424,83 @@ class MemoryValidator:
                 return "actor_not_authorized"
         return None
 
-    def _target(self, scope: MemoryScope, proposal: MemoryProposal) -> MemoryItem | None:
-        if self.store is None or proposal.item_id is None:
+    def _target(
+        self,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+        staged_items: Mapping[str, MemoryItem | None],
+    ) -> MemoryItem | None:
+        if proposal.item_id is None:
+            return None
+        if proposal.item_id in staged_items:
+            return staged_items[proposal.item_id]
+        if self.store is None:
             return None
         return self.store.get_item(scope, proposal.item_id)
 
     def _duplicate(
-        self, scope: MemoryScope, proposal: MemoryProposal
-    ) -> MemoryItem | None:
+        self,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+        staged_items: Mapping[str, MemoryItem | None],
+    ) -> tuple[MemoryItem | None, bool]:
         if (
             self.store is None
             or proposal.subject_kind is None
             or proposal.subject_id is None
             or proposal.content is None
         ):
-            return None
-        content_key = _normalize_text(proposal.content).casefold()
+            return None, False
+        proposal_key = memory_identity_key(
+            subject_kind=proposal.subject_kind,
+            subject_id=proposal.subject_id,
+            category=proposal.category,
+            content=proposal.content,
+            sensitivity=proposal.sensitivity,
+        )
+        duplicate: MemoryItem | None = None
         for item in self.store.list_items(
             scope,
             subject_kind=proposal.subject_kind,
             subject_id=proposal.subject_id,
             statuses=("active", "candidate", "dormant"),
+            include_expired=True,
         ):
-            if (
-                item.category == proposal.category
-                and item.sensitivity == proposal.sensitivity
-                and _normalize_text(item.content).casefold() == content_key
-            ):
-                return item
-        return None
+            staged_item = staged_items.get(item.id, item)
+            if staged_item is None or staged_item.status not in {
+                "active",
+                "candidate",
+                "dormant",
+            }:
+                continue
+            item_key = memory_identity_key(
+                subject_kind=staged_item.subject_kind,
+                subject_id=staged_item.subject_id,
+                category=staged_item.category,
+                content=staged_item.content,
+                sensitivity=staged_item.sensitivity,
+            )
+            if item_key[:-1] != proposal_key[:-1]:
+                continue
+            if item_key[-1] != proposal_key[-1]:
+                return None, True
+            duplicate = staged_item
+        return duplicate, False
 
     def _valid_related_targets(
         self,
         scope: MemoryScope,
         proposal: MemoryProposal,
         target: MemoryItem,
+        staged_items: Mapping[str, MemoryItem | None],
     ) -> bool:
         assert self.store is not None
         for related_id in proposal.related_item_ids:
-            related = self.store.get_item(scope, related_id)
+            related = (
+                staged_items[related_id]
+                if related_id in staged_items
+                else self.store.get_item(scope, related_id)
+            )
             if related is None or related.id == target.id:
                 return False
             if (
@@ -464,6 +511,36 @@ class MemoryValidator:
             ):
                 return False
         return True
+
+    def _stage_operation(
+        self,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+        staged_items: dict[str, MemoryItem | None],
+    ) -> None:
+        if proposal.operation not in STATEFUL_OPERATIONS or proposal.item_id is None:
+            return
+        target = self._target(scope, proposal, staged_items)
+        if target is None:
+            return
+        if proposal.operation == "forget":
+            staged_items[target.id] = None
+        elif proposal.operation == "merge":
+            for related_id in proposal.related_item_ids:
+                staged_items[related_id] = None
+        elif proposal.operation == "contradict":
+            staged_items[target.id] = replace(target, status="contradicted")
+        elif proposal.operation == "revise":
+            staged_items[target.id] = replace(
+                target,
+                content=proposal.content or target.content,
+                status=proposal.status or target.status,
+            )
+        elif proposal.operation == "reinforce" and target.status in {
+            "candidate",
+            "dormant",
+        }:
+            staged_items[target.id] = replace(target, status="active")
 
     @staticmethod
     def _validate_target_transition(
