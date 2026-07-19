@@ -828,6 +828,147 @@ def test_reload_coordinator_failure_rolls_back_scope_choices_and_runtime(
     asyncio.run(go())
 
 
+def test_reload_scheduler_start_failure_rolls_back_entire_runtime_and_memory(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.long_term_memory.groups = {"group": True}
+        coordinator = FakeCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        await app._initialize_long_term_memory()
+        assert app.long_term_memory_store is not None
+        store = app.long_term_memory_store
+
+        class FailingScheduler:
+            def __init__(self) -> None:
+                self.cfg = cfg.scheduler
+                self.running = False
+
+            def reload_config(self, candidate: Any) -> None:
+                self.cfg = candidate
+
+            async def start(self) -> None:
+                if self.cfg.enabled:
+                    raise RuntimeError("injected scheduler start failure")
+                self.running = True
+
+            async def stop(self) -> None:
+                self.running = False
+
+        scheduler = FailingScheduler()
+        app.scheduler = scheduler  # type: ignore[assignment]
+        old_cfg = app.cfg
+        old_agent = app.agent
+        old_collector = app.long_term_memory_collector
+        old_proactive = app.proactive
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "scheduler": {"enabled": True},
+                    "storage_maintenance": {"enabled": False},
+                    "long_term_memory": {
+                        "enabled": True,
+                        "default_scope_enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                        "groups": {"group": False, "new-group": True},
+                        "users": {},
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        ok, message = await app._reload_config()
+
+        assert not ok and message.startswith("[error] 配置重载失败：")
+        assert app.cfg is old_cfg
+        assert app.agent is old_agent
+        assert app.long_term_memory_collector is old_collector
+        assert app.proactive is old_proactive
+        assert app.storage_maintainer.cfg is old_cfg
+        assert scheduler.cfg is old_cfg.scheduler
+        assert not scheduler.running
+        assert store.default_scope_enabled is False
+        assert store.is_scope_enabled(MemoryScope("group", "group"))
+        assert not store.is_scope_enabled(MemoryScope("group", "new-group"))
+        await app._shutdown_long_term_memory()
+
+    asyncio.run(go())
+
+
+def test_reload_proactive_stop_failure_rolls_back_scheduler_and_memory(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.long_term_memory.groups = {"group": True}
+        coordinator = FakeCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        await app._initialize_long_term_memory()
+        assert app.long_term_memory_store is not None
+        store = app.long_term_memory_store
+        old_cfg = app.cfg
+        old_collector = app.long_term_memory_collector
+        old_proactive = app.proactive
+
+        async def fail_stop() -> None:
+            raise RuntimeError("injected proactive stop failure")
+
+        old_proactive.stop = fail_stop  # type: ignore[method-assign]
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "scheduler": {"enabled": False},
+                    "storage_maintenance": {"enabled": False},
+                    "long_term_memory": {
+                        "enabled": True,
+                        "default_scope_enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                        "groups": {"group": False, "new-group": True},
+                        "users": {},
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        ok, message = await app._reload_config()
+
+        assert not ok and message.startswith("[error] 配置重载失败：")
+        assert app.cfg is old_cfg
+        assert app.long_term_memory_collector is old_collector
+        assert app.proactive is old_proactive
+        assert app.scheduler.cfg is old_cfg.scheduler
+        assert store.default_scope_enabled is False
+        assert store.is_scope_enabled(MemoryScope("group", "group"))
+        assert not store.is_scope_enabled(MemoryScope("group", "new-group"))
+        old_proactive.stop = lambda: asyncio.sleep(0)  # type: ignore[method-assign]
+        await app._shutdown_long_term_memory()
+
+    asyncio.run(go())
+
+
 def test_reload_global_disable_does_not_depend_on_interpreter_rebuild(
     tmp_path: Path,
     monkeypatch: Any,

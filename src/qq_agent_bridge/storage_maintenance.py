@@ -136,7 +136,8 @@ class StorageMaintainer:
         self._started = False
         self._stopping = False
         self._protected_lock = threading.Lock()
-        self._protected_paths: set[Path] = set()
+        self._protected_files: set[Path] = set()
+        self._protected_subtrees: set[Path] = set()
 
     @property
     def loop_task(self) -> asyncio.Task[None] | None:
@@ -179,24 +180,34 @@ class StorageMaintainer:
         free = self._free_bytes(roots)
         return free is not None and free < self.cfg.storage_maintenance.min_free_bytes
 
-    def protect_path(self, path: Path | str) -> None:
+    def protect_path(self, path: Path | str, *, subtree: bool = False) -> None:
         protected = self._absolute_path(path)
         with self._protected_lock:
-            self._protected_paths.add(protected)
+            target = self._protected_subtrees if subtree else self._protected_files
+            target.add(protected)
 
     def unprotect_path(self, path: Path | str) -> None:
         protected = self._absolute_path(path)
         with self._protected_lock:
-            self._protected_paths.discard(protected)
+            self._protected_files.discard(protected)
+            self._protected_subtrees.discard(protected)
 
     def is_protected(self, path: Path | str) -> bool:
         candidate = self._absolute_path(path)
         with self._protected_lock:
-            protected_paths = tuple(self._protected_paths)
+            protected_files = tuple(self._protected_files)
+            protected_subtrees = tuple(self._protected_subtrees)
         candidate_aliases = self._path_aliases(candidate)
+        if any(
+            self._candidate_contains_protected(candidate_alias, protected_alias)
+            for protected in protected_files
+            for candidate_alias in candidate_aliases
+            for protected_alias in self._path_aliases(protected)
+        ):
+            return True
         return any(
-            self._paths_overlap(candidate_alias, protected_alias)
-            for protected in protected_paths
+            self._subtree_overlaps(candidate_alias, protected_alias)
+            for protected in protected_subtrees
             for candidate_alias in candidate_aliases
             for protected_alias in self._path_aliases(protected)
         )
@@ -215,9 +226,16 @@ class StorageMaintainer:
         return (absolute,) if resolved == absolute else (absolute, resolved)
 
     @staticmethod
-    def _paths_overlap(left: Path, right: Path) -> bool:
+    def _candidate_contains_protected(candidate: Path, protected: Path) -> bool:
         try:
-            return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+            return protected.is_relative_to(candidate)
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _subtree_overlaps(candidate: Path, protected: Path) -> bool:
+        try:
+            return candidate.is_relative_to(protected) or protected.is_relative_to(candidate)
         except (OSError, ValueError):
             return False
 

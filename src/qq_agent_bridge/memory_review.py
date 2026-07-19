@@ -229,7 +229,8 @@ class MemoryReviewCoordinator:
         self._active_review_task: asyncio.Task[Any] | None = None
         self._review_tasks: set[asyncio.Task[Any]] = set()
         self._commit_started = False
-        self._cancellation_epoch = 0
+        self._background_epoch = 0
+        self._all_review_epoch = 0
         self._running = False
         self._next_periodic = 0.0
         self._next_maintenance = 0.0
@@ -262,7 +263,7 @@ class MemoryReviewCoordinator:
         self._running = False
         self._wake.set()
         self._maintenance_wake.set()
-        self.cancel_background_for_interactive()
+        self._cancel_all_reviews()
         active = self._active_review_task
         review_tasks = tuple(self._review_tasks)
         for task in review_tasks:
@@ -306,7 +307,7 @@ class MemoryReviewCoordinator:
         self.store.decay_grace_seconds = self.cfg.decay.grace_seconds
         self.store.dormant_threshold = self.cfg.decay.dormant_threshold
         if not self.cfg.enabled:
-            self.cancel_background_for_interactive()
+            self._cancel_all_reviews()
         agent_cfg = getattr(self.curator.agent, "cfg", None)
         if isinstance(agent_cfg, BridgeConfig):
             agent_cfg.max_runtime_seconds = self.cfg.review.timeout_seconds
@@ -319,9 +320,21 @@ class MemoryReviewCoordinator:
         self._maintenance_wake.set()
 
     def cancel_background_for_interactive(self) -> None:
-        self._cancellation_epoch += 1
         task = self._background_task
         if task is not None and not task.done() and not self._commit_started:
+            self._background_epoch += 1
+            task.cancel()
+
+    def _cancel_all_reviews(self) -> None:
+        self._all_review_epoch += 1
+        background = self._background_task
+        if background is not None and not background.done() and not self._commit_started:
+            self._background_epoch += 1
+            background.cancel()
+        current = asyncio.current_task()
+        for task in tuple(self._review_tasks):
+            if task is current or task.done() or self._commit_started:
+                continue
             task.cancel()
 
     async def review_now(
@@ -423,7 +436,8 @@ class MemoryReviewCoordinator:
             async with self._review_lock:
                 active_task = asyncio.current_task()
                 self._active_review_task = active_task
-                review_epoch = self._cancellation_epoch
+                all_review_epoch = self._all_review_epoch
+                background_epoch = self._background_epoch if trigger != "explicit" else None
                 try:
                     if not self.cfg.enabled or not self.store.is_scope_enabled(scope):
                         return CuratorOutcome(error="disabled")
@@ -449,7 +463,11 @@ class MemoryReviewCoordinator:
                         outcome = await self.curator.review(
                             scope, sources, existing, actor=actor
                         )
-                        if review_epoch != self._cancellation_epoch:
+                        cancelled = all_review_epoch != self._all_review_epoch or (
+                            background_epoch is not None
+                            and background_epoch != self._background_epoch
+                        )
+                        if cancelled:
                             return CuratorOutcome(
                                 accepted=outcome.accepted,
                                 rejected=outcome.rejected,

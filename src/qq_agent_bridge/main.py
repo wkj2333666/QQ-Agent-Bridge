@@ -987,8 +987,35 @@ class App:
             logger.warning("config reload staging failed error=%s", type(exc).__name__)
             return False, f"[error] 配置重载失败：{type(exc).__name__}"
 
+        old_cfg = self.cfg
+        old_schedule_path = self.schedule_database_path
+        new_schedule_path = self._schedule_database_path(cfg)
+        scheduler_was_running = self._scheduler_is_running()
+        schedule_note = ""
+        try:
+            self.scheduler.reload_config(cfg.scheduler)
+            if new_schedule_path != old_schedule_path:
+                await self.scheduler.stop()
+                schedule_note = " scheduler.database_path 变更需要重启。"
+            elif cfg.scheduler.enabled:
+                await self.scheduler.start()
+            else:
+                await self.scheduler.stop()
+            await self.proactive.stop()
+        except Exception as exc:  # noqa: BLE001 - roll back every live transition
+            await self._restore_scheduler_after_failed_reload(
+                old_cfg,
+                was_running=scheduler_was_running,
+            )
+            logger.warning("config reload transition failed error=%s", type(exc).__name__)
+            return False, f"[error] 配置重载失败：{type(exc).__name__}"
+
         memory_ok, memory_note = await self._reload_long_term_memory(cfg)
         if not memory_ok:
+            await self._restore_scheduler_after_failed_reload(
+                old_cfg,
+                was_running=scheduler_was_running,
+            )
             return False, f"[error] 配置重载失败：{memory_note}"
 
         self.cfg = cfg
@@ -1016,28 +1043,39 @@ class App:
         )
         if self.policy:
             self.policy.reload_config(cfg)
-        old_schedule_path = self.schedule_database_path
-        new_schedule_path = self._schedule_database_path(cfg)
         self.schedule_nl_parser = new_schedule_parser
-        self.scheduler.reload_config(cfg.scheduler)
-        schedule_note = ""
         if new_schedule_path != old_schedule_path:
             self._scheduler_restart_required = True
-            await self.scheduler.stop()
-            schedule_note = " scheduler.database_path 变更需要重启。"
         else:
             self._scheduler_restart_required = False
-            if cfg.scheduler.enabled:
-                await self.scheduler.start()
-            else:
-                await self.scheduler.stop()
-        await self.proactive.stop()
         self.proactive = new_proactive
         storage_note = " 存储根目录变更需要重启。" if storage_roots_changed else ""
         return True, (
             f"配置已重载。OneBot 连接参数变更需要重启。"
             f"{schedule_note}{storage_note}{memory_note}"
         ).strip()
+
+    def _scheduler_is_running(self) -> bool:
+        running = getattr(self.scheduler, "running", None)
+        if isinstance(running, bool):
+            return running
+        loop_task = getattr(self.scheduler, "_loop_task", None)
+        return loop_task is not None and not loop_task.done()
+
+    async def _restore_scheduler_after_failed_reload(
+        self,
+        cfg: BridgeConfig,
+        *,
+        was_running: bool,
+    ) -> None:
+        try:
+            self.scheduler.reload_config(cfg.scheduler)
+            if was_running:
+                await self.scheduler.start()
+            else:
+                await self.scheduler.stop()
+        except Exception as exc:  # noqa: BLE001 - preserve the original reload failure
+            logger.warning("scheduler reload rollback failed error=%s", type(exc).__name__)
 
     def _long_term_memory_path(self, cfg: BridgeConfig) -> Path:
         path = Path(cfg.long_term_memory.database_path).expanduser()
@@ -2089,7 +2127,7 @@ class App:
         protected_paths = (outbox, sending)
         self._protected_storage_paths[job.id] = protected_paths
         for path in protected_paths:
-            self.storage_maintainer.protect_path(path)
+            self.storage_maintainer.protect_path(path, subtree=True)
 
     def _safe_job_id(self, job_id: str) -> str:
         safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in job_id).strip(
