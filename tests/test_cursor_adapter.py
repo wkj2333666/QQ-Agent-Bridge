@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -586,13 +589,20 @@ def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
 
 
-def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap() -> None:
+def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = BridgeConfig(workspaces={"/private/curator": True})
     cfg.agent.use_bwrap = True
     cfg.agent.share_network = False
     cfg.agent.force_task_tools = True
     cfg.agent.hardened_read_only = True
     adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+    )
 
     cmd = adapter._build_cmd(
         "curate memory", "/private/curator", "ask", model="auto"
@@ -654,6 +664,11 @@ def test_hardened_read_only_mounts_only_the_resolved_cursor_runtime(
     cfg.agent.hardened_read_only = True
     adapter = CursorAdapter(cfg)
     monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+    )
 
     cmd = adapter._build_cmd("curate", str(workspace), "ask", model="auto")
 
@@ -679,6 +694,115 @@ def test_hardened_read_only_mounts_only_the_resolved_cursor_runtime(
     assert "/opt/qq-agent-curator/cursor/cursor-agent" in cmd
     assert cmd[cmd.index("PATH") + 1] == "/usr/local/bin:/usr/bin:/bin"
     assert "MAMBA_ROOT_PREFIX" not in cmd
+
+
+@pytest.mark.parametrize("owner", [0, os.getuid()])
+def test_hardened_runtime_accepts_root_or_current_user_owned_safe_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: int,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "trusted/runtime")
+    adapter = _hardened_adapter(binary, tmp_path)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=owner),
+        raising=False,
+    )
+
+    assert adapter._hardened_cursor_runtime(tmp_path / "workspace") == (  # noqa: SLF001
+        runtime,
+        binary,
+    )
+
+
+@pytest.mark.parametrize("foreign_target", ["parent", "artifact"])
+def test_hardened_runtime_rejects_foreign_owned_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_target: str,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "foreign/runtime")
+    adapter = _hardened_adapter(binary, tmp_path)
+    foreign_path = runtime.parent if foreign_target == "parent" else runtime / "index.js"
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    def fake_lstat(path: Path) -> SimpleNamespace:
+        owner = 424242 if path == foreign_path else os.getuid()
+        return _trusted_runtime_stat(path, owner=owner)
+
+    monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat, raising=False)
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_hardened_runtime_rejects_group_writable_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "writable/runtime")
+    adapter = _hardened_adapter(binary, tmp_path)
+    writable_parent = runtime.parent
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    def fake_lstat(path: Path) -> SimpleNamespace:
+        result = _trusted_runtime_stat(path, owner=os.getuid())
+        if path == writable_parent:
+            result.st_mode = stat.S_IFDIR | 0o770
+        return result
+
+    monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat, raising=False)
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_hardened_runtime_rejects_symlinked_required_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "symlink-artifact/runtime")
+    node = runtime / "node"
+    node.unlink()
+    real_node = runtime / "real-node"
+    real_node.write_text("runtime", encoding="utf-8")
+    real_node.chmod(0o755)
+    node.symlink_to(real_node.name)
+    adapter = _hardened_adapter(binary, tmp_path)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_hardened_runtime_rejects_symlinked_source_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runtime, _binary = _make_cursor_runtime(tmp_path / "real/runtime")
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(tmp_path / "real", target_is_directory=True)
+    linked_binary = linked_parent / "runtime/cursor-agent"
+    adapter = _hardened_adapter(linked_binary, tmp_path)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
 
 
 @pytest.mark.parametrize("mode", ["plan", "task", "code"])
@@ -874,6 +998,11 @@ def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
     cfg.agent.hardened_read_only = True
     adapter = CursorAdapter(cfg)
     monkeypatch.setattr(adapter, "_has_trusted_bwrap", lambda _workspace: True)
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_lstat",
+        lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+    )
 
     error = adapter._prepare_bwrap(str(workspace), "ask")  # noqa: SLF001
 
@@ -1529,3 +1658,36 @@ def _bind_index(cmd: list[str], flag: str, source: str, target: str) -> int:
         if item == flag and cmd[idx + 1] == source and cmd[idx + 2] == target:
             return idx
     raise AssertionError(f"{flag} {source} {target} not found in command")
+
+
+def _make_cursor_runtime(root: Path) -> tuple[Path, Path]:
+    root.mkdir(parents=True)
+    binary = root / "cursor-agent"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    node = root / "node"
+    node.write_text("runtime", encoding="utf-8")
+    node.chmod(0o755)
+    (root / "index.js").write_text("runtime", encoding="utf-8")
+    return root, binary
+
+
+def _hardened_adapter(binary: Path, tmp_path: Path) -> CursorAdapter:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.binary = str(binary)
+    cfg.agent.hardened_read_only = True
+    cfg.agent.use_bwrap = True
+    return CursorAdapter(cfg)
+
+
+def _trusted_runtime_stat(path: Path, *, owner: int) -> SimpleNamespace:
+    metadata = path.lstat()
+    permissions = 0o700 if stat.S_ISDIR(metadata.st_mode) else 0o600
+    if path.name in {"cursor-agent", "node"}:
+        permissions |= 0o100
+    return SimpleNamespace(
+        st_mode=stat.S_IFMT(metadata.st_mode) | permissions,
+        st_uid=owner,
+    )
