@@ -22,6 +22,7 @@ from qq_agent_bridge.memory_curation import (
     MemoryActor,
     MemoryCollector,
     MemoryValidator,
+    classify_memory_sensitivity,
     parse_curator_output,
 )
 from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource, ChatSegment
@@ -537,6 +538,13 @@ def test_validator_rejects_shared_secret_assignment_variants(
         "Authorization: Bearer abcdefgh123",
         "refresh_token=abcdefgh",
         "access-key: abcdefgh",
+        "OPENAI_API_KEY=opaquevalue123456",
+        "AWS_SECRET_ACCESS_KEY=opaquevalue654321",
+        "GITHUB_TOKEN=opaquevalue123456",
+        "ACME_OAUTH_ACCESS_TOKEN=opaquevalue123456",
+        "VENDOR_SESSION_TOKEN=opaquevalue123456",
+        "SERVICE_CLIENT_SECRET=opaquevalue123456",
+        "PROVIDER_REFRESH_TOKEN=opaquevalue123456",
     ],
 )
 def test_validator_rejects_extended_authentication_secret_labels(
@@ -595,6 +603,9 @@ def test_sensitive_personal_fact_requires_explicit_request_by_subject(
         "My spouse is Bob",
         "我的政治立场是自由主义",
         "My religion is Buddhism",
+        "13800138000",
+        "110101199001011234",
+        "6222020200000000",
     ],
 )
 def test_validator_conservatively_escalates_sensitive_personal_content(
@@ -618,6 +629,11 @@ def test_validator_conservatively_escalates_sensitive_personal_content(
 
     assert result.rejected == ()
     assert result.accepted[0].sensitivity == "sensitive"
+
+
+@pytest.mark.parametrize("content", ["013800138000", "138001380001"])
+def test_mobile_classifier_does_not_match_inside_longer_digit_run(content: str) -> None:
+    assert classify_memory_sensitivity(content) == "normal"
 
 
 def test_sensitive_classifier_still_requires_explicit_subject_consent(

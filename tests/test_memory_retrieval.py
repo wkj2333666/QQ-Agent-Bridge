@@ -217,6 +217,127 @@ def test_classifier_escalated_sensitive_item_stays_out_of_ordinary_retrieval(
     assert content not in text
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["13800138000", "110101199001011234", "6222020200000000"],
+    ids=["mobile", "mainland-id", "bank-card"],
+)
+def test_standalone_identifier_is_sensitive_and_excluded_from_retrieval(
+    store: LongTermMemoryStore, content: str
+) -> None:
+    cfg = BridgeConfig()
+    evidence = MemorySource(
+        scope=GROUP,
+        message_id=f"standalone-{content}",
+        sender_id="u1",
+        text=content,
+        message_timestamp=int(time.time()),
+        explicit=True,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        content=content,
+        sensitivity="normal",
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    validation = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), (proposal,), actor=MemoryActor("u1", "member")
+    )
+    assert validation.rejected == ()
+    assert validation.accepted[0].sensitivity == "sensitive"
+    store.commit_review(GROUP, (), validation.accepted, trigger_class="explicit")
+
+    assert content not in make_retriever(store).retrieve(GROUP, "u1", (), None, content)
+
+
+def test_sensitive_contradiction_replacement_stays_out_of_retrieval(
+    store: LongTermMemoryStore,
+) -> None:
+    cfg = BridgeConfig()
+    add_memory(
+        store,
+        GROUP,
+        subject_kind="user",
+        subject_id="u1",
+        content="普通事实",
+    )
+    original = store.list_items(GROUP, subject_id="u1")[0]
+    content = "我的病史包括糖尿病"
+    evidence = MemorySource(
+        scope=GROUP,
+        message_id="sensitive-contradiction",
+        sender_id="u1",
+        text=content,
+        message_timestamp=int(time.time()),
+        explicit=True,
+    )
+    proposal = MemoryProposal(
+        operation="contradict",
+        item_id=original.id,
+        content=content,
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    validation = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), (proposal,), actor=MemoryActor("u1", "member")
+    )
+    assert validation.rejected == ()
+    assert validation.accepted[0].sensitivity == "sensitive"
+    store.commit_review(GROUP, (), validation.accepted, trigger_class="explicit")
+
+    replacement = next(item for item in store.list_items(GROUP) if item.status == "active")
+    assert replacement.content == content
+    assert replacement.sensitivity == "sensitive"
+    assert content not in make_retriever(store).retrieve(GROUP, "u1", (), None, content)
+
+
+def test_benign_contradiction_of_sensitive_item_remains_sensitive(
+    store: LongTermMemoryStore,
+) -> None:
+    cfg = BridgeConfig()
+    add_memory(
+        store,
+        GROUP,
+        subject_kind="user",
+        subject_id="u1",
+        content="我的病史包括糖尿病",
+        sensitivity="sensitive",
+    )
+    original = store.list_items(GROUP, subject_id="u1")[0]
+    content = "现在只保留普通描述"
+    evidence = MemorySource(
+        scope=GROUP,
+        message_id="benign-contradiction",
+        sender_id="u1",
+        text=content,
+        message_timestamp=int(time.time()),
+        explicit=True,
+    )
+    proposal = MemoryProposal(
+        operation="contradict",
+        item_id=original.id,
+        content=content,
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    validation = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), (proposal,), actor=MemoryActor("u1", "member")
+    )
+    assert validation.rejected == ()
+    assert validation.accepted[0].sensitivity == "sensitive"
+    store.commit_review(GROUP, (), validation.accepted, trigger_class="explicit")
+
+    replacement = next(item for item in store.list_items(GROUP) if item.status == "active")
+    assert replacement.content == content
+    assert replacement.sensitivity == "sensitive"
+    assert content not in make_retriever(store).retrieve(GROUP, "u1", (), None, content)
+
+
 def test_retrieval_uses_fts_relevance_before_confidence_and_reinforcement(
     store: LongTermMemoryStore,
 ) -> None:

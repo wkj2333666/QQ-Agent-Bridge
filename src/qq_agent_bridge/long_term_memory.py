@@ -33,6 +33,16 @@ from .long_term_memory_models import (
 from .long_term_memory_schema import SCHEMA_VERSION, migrate
 
 
+_SENSITIVITY_PRIORITY = {"normal": 0, "sensitive": 1, "secret": 2}
+
+
+def _maximum_sensitivity(current: object, proposed: object | None) -> str:
+    values = (str(current), str(proposed or current))
+    if any(value not in _SENSITIVITY_PRIORITY for value in values):
+        raise ValueError("invalid memory sensitivity")
+    return max(values, key=_SENSITIVITY_PRIORITY.__getitem__)
+
+
 class LongTermMemoryStore:
     """SQLite memory store whose public reads and writes require an exact scope."""
 
@@ -929,13 +939,16 @@ class LongTermMemoryStore:
             )
             self._sync_fts(conn, item_id)
             if proposal.content:
+                sensitivity = _maximum_sensitivity(
+                    str(row["sensitivity"]), proposal.sensitivity
+                )
                 replacement = MemoryProposal.add(
                     subject_kind=str(row["subject_kind"]),
                     subject_id=str(row["subject_id"]),
                     category=str(row["category"]),
                     content=proposal.content,
                     confidence=(proposal.confidence if proposal.confidence is not None else 0.75),
-                    sensitivity=str(row["sensitivity"]),
+                    sensitivity=sensitivity,
                     source_kind=proposal.source_kind,
                     explicit_memory=proposal.explicit_memory,
                     decay_exempt=proposal.decay_exempt,

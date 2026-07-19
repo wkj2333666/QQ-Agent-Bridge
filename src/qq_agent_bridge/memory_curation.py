@@ -66,6 +66,11 @@ _CHINESE_SECRET_LABEL = (
     r"密码|口令|恢复(?:代码|码)|备份(?:代码|码))"
 )
 _CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
+_ENV_SECRET_SUFFIX = (
+    r"(?:api_key|secret_access_key|oauth(?:_access)?_token|session_(?:token|key)|"
+    r"client_(?:token|key|secret)|access_(?:token|key)|refresh_(?:token|key)|"
+    r"token|secret)"
+)
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]{12,}\b"),
@@ -80,6 +85,11 @@ _SECRET_PATTERNS = (
     ),
     re.compile(
         rf"{_CHINESE_SECRET_LABEL}\s*{_CHINESE_SECRET_ASSIGNMENT}\s*\S"
+    ),
+    re.compile(
+        rf"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+_)+{_ENV_SECRET_SUFFIX}"
+        rf"\s*[=:：]\s*\S",
+        re.IGNORECASE,
     ),
 )
 
@@ -114,11 +124,17 @@ _SENSITIVE_PATTERNS = (
         r"(?:number|address|id|account)?\s*(?:is|=|:)\s*\S+",
         re.IGNORECASE,
     ),
+    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
     # Legal identity and financial information.
     re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
     re.compile(
         r"\b(?:legal\s+name|passport\s+(?:number|no)|social\s+security\s+number|ssn)\b",
         re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![0-9A-Za-z])[1-9]\d{5}(?:18|19|20)\d{2}"
+        r"(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]"
+        r"(?![0-9A-Za-z])"
     ),
     re.compile(r"(?:银行卡(?:号|号码)?|银行账户|信用卡(?:号|号码)?|工资|收入|债务|负债|资产)"),
     re.compile(
@@ -126,6 +142,7 @@ _SENSITIVE_PATTERNS = (
         r"salary|income|debt|net\s+worth)\b",
         re.IGNORECASE,
     ),
+    re.compile(r"(?<!\d)\d{16,19}(?!\d)"),
     # Intimate relationships, politics, and religion.
     re.compile(r"(?:伴侣|配偶|男朋友|女朋友|婚姻|已婚|离婚|性取向|性生活)"),
     re.compile(
