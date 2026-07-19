@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,21 @@ def _write(path: Path, data: bytes = b"x") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path
+
+
+def _mtime(path: Path, value: float) -> Path:
+    os.utime(path, (value, value))
+    return path
+
+
+def _run(maintainer: StorageMaintainer, trigger: str = "periodic"):
+    import asyncio
+
+    async def inline(function, *args):
+        return function(*args)
+
+    maintainer.thread_runner = inline
+    return asyncio.run(maintainer.run(trigger))
 
 
 def _candidate_names(maintainer: StorageMaintainer) -> set[tuple[str, str, str]]:
@@ -175,3 +191,175 @@ def test_delete_candidate_rejects_inode_replacement(tmp_path: Path) -> None:
 
     assert (removed, released) == (0, 0)
     assert target.read_bytes() == b"replacement"
+
+
+def test_normal_cleanup_applies_retention_then_oldest_first_cap(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.traces.retention_seconds = 100
+    cfg.storage_maintenance.traces.max_bytes = 5
+    traces = Path(cfg.agent.trace_root)
+    old = _mtime(_write(traces / "old.jsonl", b"111"), 800)
+    first = _mtime(_write(traces / "first.jsonl", b"2222"), 950)
+    latest = _mtime(_write(traces / "latest.jsonl", b"33"), 990)
+
+    summary = _run(
+        StorageMaintainer(cfg, home=home, cwd=tmp_path, now=lambda: 1_000.0)
+    )
+
+    assert not old.exists()
+    assert not first.exists()
+    assert latest.exists()
+    assert summary.released_bytes == 7
+
+
+def test_resource_retention_distinguishes_received_and_transient(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.resources.retention_seconds = 700
+    cfg.storage_maintenance.resources.transient_retention_seconds = 100
+    cfg.storage_maintenance.resources.max_bytes = 0
+    root = Path(cfg.agent.default_workspace) / cfg.resources.root
+    received_old = _write(root / "2026-01-01" / "event" / "image.jpg")
+    outgoing_old = _write(root / "outgoing" / "old-job" / "result.pdf")
+    outgoing_new = _write(root / "outgoing" / "new-job" / "result.pdf")
+    for path, mtime in ((received_old.parents[1], 200), (outgoing_old.parent, 850), (outgoing_new.parent, 950)):
+        _mtime(path, mtime)
+
+    _run(StorageMaintainer(cfg, home=home, cwd=tmp_path, now=lambda: 1_000.0))
+
+    assert not received_old.exists()
+    assert not outgoing_old.exists()
+    assert outgoing_new.exists()
+
+
+def test_pressure_cleanup_uses_fixed_order_and_stops_at_threshold(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.min_free_bytes = 10
+    sandbox = Path(cfg.agent.sandbox_home)
+    cache = _write(sandbox / ".cache" / "cache-item" / "payload", b"123")
+    chat = _write(sandbox / ".cursor" / "chats" / "project" / "chat" / "state", b"456")
+    trace = _write(Path(cfg.agent.trace_root) / "trace.jsonl", b"789")
+
+    def disk_usage(_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=20 if not cache.exists() else 0)
+
+    summary = _run(
+        StorageMaintainer(
+            cfg,
+            home=home,
+            cwd=tmp_path,
+            now=lambda: 1_000.0,
+            disk_usage=disk_usage,
+        ),
+        "pressure",
+    )
+
+    assert not cache.exists()
+    assert chat.exists()
+    assert trace.exists()
+    assert summary.free_before == 0
+    assert summary.free_after == 20
+
+
+def test_cleanup_preserves_auth_unknown_entries_and_runtime_skill_bundle(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.min_free_bytes = 10
+    sandbox = Path(cfg.agent.sandbox_home)
+    protected = _write(sandbox / ".config" / "cursor" / "auth.json", b"secret")
+    cursor_config = _write(sandbox / ".cursor" / "cli-config.json", b"config")
+    unknown = _write(sandbox / "unknown.data", b"unknown")
+    root = Path(cfg.agent.default_workspace) / cfg.resources.root
+    runtime_skill = _write(root / "runtime-skills" / "skill.md", b"skill")
+    resource_unknown = _write(root / "misc" / "keep.txt", b"keep")
+
+    _run(
+        StorageMaintainer(
+            cfg,
+            home=home,
+            cwd=tmp_path,
+            disk_usage=lambda _path: SimpleNamespace(free=0),
+        ),
+        "pressure",
+    )
+
+    assert protected.exists()
+    assert cursor_config.exists()
+    assert unknown.exists()
+    assert runtime_skill.exists()
+    assert resource_unknown.exists()
+
+
+def test_cleanup_continues_after_individual_deletion_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.traces.retention_seconds = 1
+    cfg.storage_maintenance.traces.max_bytes = 0
+    traces = Path(cfg.agent.trace_root)
+    first = _mtime(_write(traces / "first.jsonl"), 1)
+    second = _mtime(_write(traces / "second.jsonl"), 2)
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path, now=lambda: 100.0)
+    original = maintainer.delete_candidate
+
+    def flaky(candidate):
+        if candidate.path == first:
+            return (0, 0)
+        return original(candidate)
+
+    monkeypatch.setattr(maintainer, "delete_candidate", flaky)
+    summary = _run(maintainer)
+
+    assert first.exists()
+    assert not second.exists()
+    assert summary.removed == 1
+
+
+def test_missing_roots_are_empty_not_errors(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    Path(cfg.agent.trace_root).rmdir()
+
+    summary = _run(StorageMaintainer(cfg, home=home, cwd=tmp_path))
+
+    assert summary.removed == 0
+    assert summary.skipped_areas == 0
+
+
+def test_storage_logs_do_not_include_candidate_names(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.traces.retention_seconds = 1
+    secret_name = "qq-user-secret-name.jsonl"
+    _mtime(_write(Path(cfg.agent.trace_root) / secret_name), 1)
+
+    with caplog.at_level("INFO", logger="qq_agent_bridge.storage_maintenance"):
+        _run(StorageMaintainer(cfg, home=home, cwd=tmp_path, now=lambda: 100.0))
+
+    assert "storage maintenance start trigger=periodic" in caplog.text
+    assert "storage maintenance done trigger=periodic" in caplog.text
+    assert secret_name not in caplog.text
+    assert str(tmp_path) not in caplog.text
+
+
+def test_unresolved_pressure_warning_is_rate_limited(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.min_free_bytes = 10
+    clock = [100.0]
+    maintainer = StorageMaintainer(
+        cfg,
+        home=home,
+        cwd=tmp_path,
+        monotonic=lambda: clock[0],
+        disk_usage=lambda _path: SimpleNamespace(free=0),
+    )
+
+    with caplog.at_level("WARNING", logger="qq_agent_bridge.storage_maintenance"):
+        _run(maintainer, "pressure")
+        _run(maintainer, "pressure")
+        clock[0] += 3_601
+        _run(maintainer, "pressure")
+
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert all("free_bytes=0" in record.getMessage() for record in warnings)

@@ -1,13 +1,18 @@
 """Bounded, symlink-safe maintenance of application-owned storage."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import threading
 import time
-from typing import Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from .config import BridgeConfig
 
@@ -17,6 +22,8 @@ RUN_BUDGET_SECONDS = 30.0
 DATED_RESOURCE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _AREAS = ("sandbox", "traces", "resources")
 _OPEN_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+logger = logging.getLogger(__name__)
+MaintenanceTrigger = Literal["startup", "periodic", "pressure"]
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,18 @@ class InventoryResult:
     roots: dict[str, ManagedRoot] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class MaintenanceSummary:
+    trigger: MaintenanceTrigger
+    elapsed_seconds: float
+    scanned: int
+    removed: int
+    released_bytes: int
+    skipped_areas: int
+    free_before: int | None
+    free_after: int | None
+
+
 @dataclass
 class _ScanBudget:
     monotonic: Callable[[], float]
@@ -92,13 +111,66 @@ class StorageMaintainer:
         *,
         home: Path | None = None,
         cwd: Path | None = None,
+        now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        disk_usage: Callable[[Path], object] = shutil.disk_usage,
+        thread_runner: Callable[..., Awaitable[Any]] = asyncio.to_thread,
     ) -> None:
         self.cfg = cfg
         self.gate = gate
         self.home = (home or Path.home()).absolute()
         self.cwd = (cwd or Path.cwd()).absolute()
+        self.now = now
         self.monotonic = monotonic
+        self.disk_usage = disk_usage
+        self.thread_runner = thread_runner
+        self._last_pressure_warning_at: float | None = None
+
+    async def run(self, trigger: MaintenanceTrigger) -> MaintenanceSummary:
+        """Run one bounded maintenance pass outside the event-loop thread."""
+        logger.info("storage maintenance start trigger=%s", trigger)
+        cancelled = threading.Event()
+        lease = self.gate.maintenance() if self.gate is not None else _null_lease()
+        async with lease:
+            worker = asyncio.create_task(self.thread_runner(self._run_sync, trigger, cancelled))
+            try:
+                summary = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled.set()
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    pass
+                raise
+        if (
+            trigger == "pressure"
+            and summary.free_after is not None
+            and summary.free_after < self.cfg.storage_maintenance.min_free_bytes
+        ):
+            warning_now = self.monotonic()
+            if (
+                self._last_pressure_warning_at is None
+                or warning_now - self._last_pressure_warning_at >= 3_600
+            ):
+                logger.warning(
+                    "storage pressure remains free_bytes=%d min_free_bytes=%d",
+                    summary.free_after,
+                    self.cfg.storage_maintenance.min_free_bytes,
+                )
+                self._last_pressure_warning_at = warning_now
+        logger.info(
+            "storage maintenance done trigger=%s scanned=%d removed=%d released_bytes=%d "
+            "skipped_areas=%d elapsed_ms=%d free_before=%s free_after=%s",
+            trigger,
+            summary.scanned,
+            summary.removed,
+            summary.released_bytes,
+            summary.skipped_areas,
+            round(summary.elapsed_seconds * 1000),
+            summary.free_before,
+            summary.free_after,
+        )
+        return summary
 
     def inventory(
         self,
@@ -166,6 +238,138 @@ class StorageMaintainer:
                 os.close(parent_fd)
             if root_fd >= 0:
                 os.close(root_fd)
+
+    def _run_sync(
+        self,
+        trigger: MaintenanceTrigger,
+        cancelled: threading.Event,
+    ) -> MaintenanceSummary:
+        started = self.monotonic()
+        deadline = started + RUN_BUDGET_SECONDS
+        inventory = self.inventory(now=self.now(), deadline=deadline)
+        free_before = self._free_bytes(inventory.roots)
+        removed = 0
+        released = 0
+
+        if trigger == "pressure":
+            ordered = sorted(
+                self._all_candidates(inventory),
+                key=lambda item: (self._pressure_rank(item), item.mtime, item.path.as_posix()),
+            )
+            for candidate in ordered:
+                if self._must_stop(cancelled, deadline):
+                    break
+                current_free = self._free_bytes(inventory.roots)
+                if current_free is not None and current_free >= self.cfg.storage_maintenance.min_free_bytes:
+                    break
+                count, size = self.delete_candidate(candidate)
+                removed += count
+                released += size
+        else:
+            for area in _AREAS:
+                candidates = sorted(
+                    inventory.candidates[area],
+                    key=lambda item: (item.mtime, item.path.as_posix()),
+                )
+                remaining = list(candidates)
+                for candidate in candidates:
+                    if self._must_stop(cancelled, deadline):
+                        break
+                    retention = self._retention_seconds(candidate)
+                    if retention <= 0 or self.now() - candidate.mtime <= retention:
+                        continue
+                    count, size = self.delete_candidate(candidate)
+                    removed += count
+                    released += size
+                    if self._candidate_is_gone(candidate):
+                        remaining.remove(candidate)
+
+                maximum = self._max_bytes(area)
+                remaining_size = sum(item.size for item in remaining)
+                if maximum > 0 and remaining_size > maximum:
+                    for candidate in remaining:
+                        if self._must_stop(cancelled, deadline) or remaining_size <= maximum:
+                            break
+                        count, size = self.delete_candidate(candidate)
+                        removed += count
+                        released += size
+                        if self._candidate_is_gone(candidate):
+                            remaining_size -= candidate.size
+
+        free_after = self._free_bytes(inventory.roots)
+        return MaintenanceSummary(
+            trigger=trigger,
+            elapsed_seconds=max(0.0, self.monotonic() - started),
+            scanned=inventory.stats.scanned,
+            removed=removed,
+            released_bytes=released,
+            skipped_areas=inventory.skipped_areas,
+            free_before=free_before,
+            free_after=free_after,
+        )
+
+    def _free_bytes(self, roots: dict[str, ManagedRoot]) -> int | None:
+        values: list[int] = []
+        for root in roots.values():
+            target = root.path
+            while not target.exists() and target != target.parent:
+                target = target.parent
+            try:
+                values.append(int(getattr(self.disk_usage(target), "free")))
+            except (OSError, TypeError, ValueError, AttributeError):
+                continue
+        return min(values) if values else None
+
+    @staticmethod
+    def _all_candidates(inventory: InventoryResult) -> list[CleanupCandidate]:
+        return [
+            candidate
+            for area in _AREAS
+            for candidate in inventory.candidates.get(area, ())
+        ]
+
+    @staticmethod
+    def _pressure_rank(candidate: CleanupCandidate) -> int:
+        if candidate.area == "sandbox" and candidate.kind == "cache":
+            return 0
+        if candidate.area == "sandbox":
+            return 1
+        if candidate.area == "traces":
+            return 2
+        if candidate.kind in {"outgoing", "sending"}:
+            return 3
+        return 4
+
+    def _retention_seconds(self, candidate: CleanupCandidate) -> int:
+        storage = self.cfg.storage_maintenance
+        if candidate.area == "sandbox":
+            return storage.sandbox.retention_seconds
+        if candidate.area == "traces":
+            return storage.traces.retention_seconds
+        if candidate.kind in {"outgoing", "sending"}:
+            return storage.resources.transient_retention_seconds
+        return storage.resources.retention_seconds
+
+    def _max_bytes(self, area: str) -> int:
+        storage = self.cfg.storage_maintenance
+        if area == "sandbox":
+            return storage.sandbox.max_bytes
+        if area == "traces":
+            return storage.traces.max_bytes
+        return storage.resources.max_bytes
+
+    def _must_stop(self, cancelled: threading.Event, deadline: float) -> bool:
+        return cancelled.is_set() or self.monotonic() >= deadline
+
+    @staticmethod
+    def _candidate_is_gone(candidate: CleanupCandidate) -> bool:
+        try:
+            candidate.path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
 
     def _resolve_roots(self) -> tuple[dict[str, ManagedRoot], int]:
         roots: dict[str, ManagedRoot] = {}
@@ -475,3 +679,8 @@ class StorageMaintainer:
             if stat.S_ISLNK(current_stat.st_mode):
                 return False
         return True
+
+
+@asynccontextmanager
+async def _null_lease():
+    yield
