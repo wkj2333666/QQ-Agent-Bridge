@@ -698,6 +698,64 @@ class LongTermMemoryStore:
             proposal.confidence if proposal.confidence is not None else 0.75
         )
         created_at = int(proposal.created_at if proposal.created_at is not None else now)
+        duplicate = conn.execute(
+            """
+            SELECT * FROM memory_items
+            WHERE scope_kind = ? AND scope_id = ?
+              AND subject_kind = ? AND subject_id = ? AND category = ?
+              AND lower(trim(content)) = lower(trim(?))
+              AND status IN ('active', 'candidate', 'dormant')
+            ORDER BY updated_at DESC, id
+            LIMIT 1
+            """,
+            (
+                scope.kind,
+                scope.id,
+                str(proposal.subject_kind),
+                str(proposal.subject_id),
+                category,
+                content,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            item_id = str(duplicate["id"])
+            duplicate_status = str(duplicate["status"])
+            reinforced_status = (
+                status
+                if status == "active" and duplicate_status in {"candidate", "dormant"}
+                else duplicate_status
+            )
+            conn.execute(
+                """
+                UPDATE memory_items
+                SET base_confidence = MAX(base_confidence, ?),
+                    effective_score = MAX(effective_score, ?), status = ?,
+                    source_count = source_count + 1, source_kind = ?,
+                    updated_at = ?, last_supported_at = ?, dormant_at = NULL,
+                    version = version + 1
+                WHERE id = ?
+                """,
+                (
+                    confidence,
+                    confidence,
+                    reinforced_status,
+                    proposal.source_kind,
+                    now,
+                    now,
+                    item_id,
+                ),
+            )
+            self._record_revision(
+                conn,
+                item_id=item_id,
+                operation="reinforce",
+                actor_class=proposal.actor_class,
+                before_summary=str(duplicate["content"]),
+                after_summary=content,
+                now=now,
+            )
+            self._sync_fts(conn, item_id)
+            return item_id
         item_id = uuid.uuid4().hex
         short_id = item_id[:12]
         conn.execute(
