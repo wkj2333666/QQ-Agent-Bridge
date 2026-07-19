@@ -83,6 +83,8 @@ class ProactiveSpeaker:
         self._last_bot_sent_at: dict[str, float] = {}
         self._last_proactive_sent_at: dict[str, float] = {}
         self._hourly_sent: dict[str, deque[float]] = {}
+        self._handoff_generation = 0
+        self._active_handoff: int | None = None
 
     def observe(self, ev: ChatEvent) -> None:
         if not self._should_collect(ev):
@@ -111,7 +113,7 @@ class ProactiveSpeaker:
         max_items = max(1, self.cfg.proactive.max_batch_messages)
         if len(batch) > max_items:
             del batch[: len(batch) - max_items]
-        if ev.chat_id not in self._timers:
+        if self._active_handoff is None and ev.chat_id not in self._timers:
             self._schedule_flush(ev.chat_id)
             self._debug(
                 "schedule",
@@ -170,27 +172,79 @@ class ProactiveSpeaker:
         return decision
 
     async def stop(self) -> None:
-        for task in list(self._timers.values()):
+        await self._stop_timers()
+
+    def begin_handoff(self) -> int:
+        """Freeze timer creation while keeping synchronous message intake available."""
+        if self._active_handoff is not None:
+            raise RuntimeError("proactive handoff already active")
+        self._handoff_generation += 1
+        self._active_handoff = self._handoff_generation
+        for task in tuple(self._timers.values()):
             task.cancel()
-        if self._timers:
-            await asyncio.gather(*self._timers.values(), return_exceptions=True)
+        return self._handoff_generation
+
+    async def rollback_handoff(self, generation: int) -> None:
+        """Resume every pending batch on the old runtime after a failed handoff."""
+        if self._active_handoff != generation:
+            return
+        await self._stop_timers()
+        if self._active_handoff != generation:
+            return
+        self._active_handoff = None
+        self._schedule_pending_batches()
+
+    def commit_handoff(self, generation: int, replacement: ProactiveSpeaker) -> None:
+        """Atomically move pending intake to the replacement runtime."""
+        if self._active_handoff != generation:
+            raise RuntimeError("stale proactive handoff")
+        if any(not task.done() for task in self._timers.values()):
+            raise RuntimeError("proactive handoff timers are still running")
+        pending = {
+            chat_id: tuple(messages)
+            for chat_id, messages in self._batches.items()
+            if messages
+        }
+        self._batches.clear()
         self._timers.clear()
+        self._active_handoff = None
+        replacement._accept_handoff(pending)
 
-    def transition_timer_snapshot(self) -> tuple[str, ...]:
-        """Capture live pending flushes so a failed runtime handoff can restore them."""
-        return tuple(chat_id for chat_id, task in self._timers.items() if not task.done())
+    async def _stop_timers(self) -> None:
+        while True:
+            tasks = tuple(task for task in self._timers.values() if not task.done())
+            if not tasks:
+                for chat_id, task in tuple(self._timers.items()):
+                    if task.done():
+                        self._timers.pop(chat_id, None)
+                return
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for chat_id, task in tuple(self._timers.items()):
+                if task in tasks and self._timers.get(chat_id) is task:
+                    self._timers.pop(chat_id, None)
 
-    def restore_transition_timers(self, chat_ids: tuple[str, ...]) -> None:
-        """Idempotently restore only flushes that existed before a failed handoff."""
-        for chat_id in chat_ids:
-            if not self._batches.get(chat_id):
-                continue
-            current = self._timers.get(chat_id)
-            if current is not None and not current.done():
-                continue
-            if current is not None:
-                self._timers.pop(chat_id, None)
-            self._schedule_flush(chat_id)
+    def _schedule_pending_batches(self) -> None:
+        for chat_id, messages in tuple(self._batches.items()):
+            if messages and chat_id not in self._timers:
+                self._schedule_flush(chat_id)
+
+    def _accept_handoff(
+        self,
+        pending: dict[str, tuple[_QueuedMessage, ...]],
+    ) -> None:
+        if self._active_handoff is not None:
+            raise RuntimeError("replacement proactive runtime is draining")
+        max_items = max(1, self.cfg.proactive.max_batch_messages)
+        for chat_id, messages in pending.items():
+            batch = self._batches.setdefault(chat_id, [])
+            batch.extend(messages)
+            if len(batch) > max_items:
+                del batch[: len(batch) - max_items]
+            for message in messages:
+                self._mark_seen(message.id)
+        self._schedule_pending_batches()
 
     def _should_collect(self, ev: ChatEvent) -> bool:
         cfg = self.cfg.proactive
