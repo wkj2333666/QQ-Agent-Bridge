@@ -568,7 +568,7 @@ class LongTermMemoryStore:
             return [item_id]
         if proposal.operation == "revise":
             content = self._content(proposal.content)
-            category = proposal.category or str(row["category"])
+            category = str(row["category"])
             self._require_category(category)
             confidence = self._confidence(
                 proposal.confidence
@@ -593,7 +593,7 @@ class LongTermMemoryStore:
                     confidence,
                     confidence,
                     status,
-                    proposal.sensitivity,
+                    str(row["sensitivity"]),
                     proposal.source_kind,
                     now,
                     now,
@@ -635,12 +635,12 @@ class LongTermMemoryStore:
             self._sync_fts(conn, item_id)
             if proposal.content:
                 replacement = MemoryProposal.add(
-                    subject_kind=proposal.subject_kind or str(row["subject_kind"]),
-                    subject_id=proposal.subject_id or str(row["subject_id"]),
-                    category=proposal.category or str(row["category"]),
+                    subject_kind=str(row["subject_kind"]),
+                    subject_id=str(row["subject_id"]),
+                    category=str(row["category"]),
                     content=proposal.content,
                     confidence=(proposal.confidence if proposal.confidence is not None else 0.75),
-                    sensitivity=proposal.sensitivity,
+                    sensitivity=str(row["sensitivity"]),
                     source_kind=proposal.source_kind,
                     explicit_memory=proposal.explicit_memory,
                     decay_exempt=proposal.decay_exempt,
@@ -780,7 +780,7 @@ class LongTermMemoryStore:
                 confidence,
                 confidence,
                 status,
-                proposal.sensitivity,
+                proposal.sensitivity or "normal",
                 proposal.source_kind,
                 int(proposal.explicit_memory),
                 int(proposal.decay_exempt),

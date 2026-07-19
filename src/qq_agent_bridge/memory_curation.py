@@ -35,6 +35,8 @@ ALLOWED_SOURCE_KINDS = frozenset(
         "owner_confirmed",
     }
 )
+STATEFUL_OPERATIONS = ALLOWED_OPERATIONS - {"add", "mark_candidate"}
+TARGET_METADATA_FIELDS = ("subject_kind", "subject_id", "category", "sensitivity")
 
 _SEMANTIC_COMMANDS = frozenset({"ask", "plan", "task"})
 _DANGEROUS_COMMAND_RE = re.compile(
@@ -54,8 +56,8 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(
-        r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|"
-        r"secret|cookie)\s*[=:：]\s*[^\s,;]{6,}"
+        r"(?i)\b(?:api[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|token|"
+        r"password|passwd|secret|cookie)\b\s*(?:is\b|[=:：])\s*[^\s,;]{6,}"
     ),
     re.compile(r"(?:密码|口令|令牌)\s*(?:是|为|[:：=])\s*\S{6,}"),
     re.compile(r"(?i)\b(?:recovery|backup)\s+codes?\s*[=:：]\s*\S+"),
@@ -286,7 +288,10 @@ class MemoryValidator:
             return None, "invalid_category"
         if proposal.status is not None and proposal.status not in ALLOWED_STATUSES:
             return None, "invalid_status"
-        if proposal.sensitivity not in ALLOWED_SENSITIVITIES:
+        if (
+            proposal.sensitivity is not None
+            and proposal.sensitivity not in ALLOWED_SENSITIVITIES
+        ):
             return None, "invalid_sensitivity"
         if proposal.source_kind not in ALLOWED_SOURCE_KINDS:
             return None, "invalid_source_kind"
@@ -311,17 +316,26 @@ class MemoryValidator:
             return None, reason
 
         target = self._target(scope, proposal)
-        if self.store is not None and proposal.operation not in {"add", "mark_candidate"}:
+        if proposal.operation in STATEFUL_OPERATIONS:
+            if self.store is None:
+                return None, "target_resolver_required"
             if target is None:
                 return None, "target_not_found"
             reason = self._validate_target_transition(target, proposal)
             if reason is not None:
                 return None, reason
-            proposal = self._inherit_target(proposal, target)
+            if self._target_metadata_mismatch(proposal, target):
+                return None, "target_metadata_mismatch"
+            proposal = self._with_target_metadata(proposal, target)
             if proposal.operation == "merge" and not self._valid_related_targets(
                 scope, proposal, target
             ):
                 return None, "invalid_related_target"
+        elif proposal.sensitivity is None:
+            proposal = replace(proposal, sensitivity="normal")
+
+        if proposal.sensitivity == "secret":
+            return None, "secret_content"
 
         reason = self._validate_subject(scope, sources, proposal, actor)
         if reason is not None:
@@ -466,17 +480,25 @@ class MemoryValidator:
         return None
 
     @staticmethod
-    def _inherit_target(proposal: MemoryProposal, target: MemoryItem) -> MemoryProposal:
+    def _target_metadata_mismatch(
+        proposal: MemoryProposal, target: MemoryItem
+    ) -> bool:
+        return any(
+            getattr(proposal, field) is not None
+            and getattr(proposal, field) != getattr(target, field)
+            for field in TARGET_METADATA_FIELDS
+        )
+
+    @staticmethod
+    def _with_target_metadata(
+        proposal: MemoryProposal, target: MemoryItem
+    ) -> MemoryProposal:
         return replace(
             proposal,
-            subject_kind=proposal.subject_kind or target.subject_kind,
-            subject_id=proposal.subject_id or target.subject_id,
-            category=proposal.category or target.category,
-            sensitivity=(
-                target.sensitivity
-                if proposal.sensitivity == "normal" and target.sensitivity != "normal"
-                else proposal.sensitivity
-            ),
+            subject_kind=target.subject_kind,
+            subject_id=target.subject_id,
+            category=target.category,
+            sensitivity=target.sensitivity,
         )
 
     @staticmethod
@@ -498,6 +520,13 @@ class MemoryValidator:
                 return "invalid_subject_category"
             if actor is not None and actor.role == "member":
                 return "actor_not_authorized"
+            if not any(
+                source.scope == scope
+                and bool(str(source.sender_id).strip())
+                and bool(_normalize_text(source.text))
+                for source in sources
+            ):
+                return "source_evidence_required"
             return None
 
         if scope.kind == "private":
@@ -599,7 +628,7 @@ def _parse_proposal(value: object) -> MemoryProposal:
         content=value.get("content"),
         confidence=value.get("confidence"),
         status=value.get("status"),
-        sensitivity=value.get("sensitivity", "normal"),
+        sensitivity=value.get("sensitivity"),
         source_kind=value.get("source_kind", "inferred"),
         explicit_memory=value.get("explicit_memory", False),
         decay_exempt=value.get("decay_exempt", False),
