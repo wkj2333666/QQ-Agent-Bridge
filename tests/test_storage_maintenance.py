@@ -9,15 +9,16 @@ import pytest
 
 from qq_agent_bridge.config import BridgeConfig
 from qq_agent_bridge.storage_maintenance import StorageMaintainer
+from qq_agent_bridge.storage_maintenance import MaintenanceSummary
 
 
 def make_storage_cfg(tmp_path: Path) -> tuple[BridgeConfig, Path]:
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     traces = tmp_path / "traces"
-    home.mkdir()
-    workspace.mkdir()
-    traces.mkdir()
+    home.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    traces.mkdir(parents=True)
 
     cfg = BridgeConfig()
     cfg.agent.default_workspace = str(workspace)
@@ -363,3 +364,145 @@ def test_unresolved_pressure_warning_is_rate_limited(
     warnings = [record for record in caplog.records if record.levelname == "WARNING"]
     assert len(warnings) == 2
     assert all("free_bytes=0" in record.getMessage() for record in warnings)
+
+
+def _summary(trigger: str) -> MaintenanceSummary:
+    return MaintenanceSummary(trigger, 0.0, 0, 0, 0, 0, 100, 100)
+
+
+def test_start_runs_startup_cleanup_before_returning(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+        calls: list[str] = []
+
+        async def fake_run(trigger):
+            calls.append(trigger)
+            return _summary(trigger)
+
+        maintainer.run = fake_run
+        await maintainer.start()
+        assert calls == ["startup"]
+        assert maintainer.loop_task is not None
+        await maintainer.stop()
+        assert maintainer.loop_task is None
+
+    asyncio.run(go())
+
+
+def test_periodic_loop_runs_after_configured_interval(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        cfg.storage_maintenance.interval_seconds = 0.01
+        maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+        periodic = asyncio.Event()
+
+        async def fake_run(trigger):
+            if trigger == "periodic":
+                periodic.set()
+            return _summary(trigger)
+
+        maintainer.run = fake_run
+        await maintainer.start()
+        await asyncio.wait_for(periodic.wait(), 0.5)
+        await maintainer.stop()
+
+    asyncio.run(go())
+
+
+def test_repeated_pressure_requests_coalesce(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+        pressure_done = asyncio.Event()
+        calls: list[str] = []
+
+        async def fake_run(trigger):
+            calls.append(trigger)
+            if trigger == "pressure":
+                pressure_done.set()
+            return _summary(trigger)
+
+        maintainer.run = fake_run
+        maintainer.pressure_needed = lambda: True
+        await maintainer.start()
+        maintainer.request_pressure_check()
+        maintainer.request_pressure_check()
+        maintainer.request_pressure_check()
+        await asyncio.wait_for(pressure_done.wait(), 0.5)
+        await asyncio.sleep(0)
+        await maintainer.stop()
+        assert calls.count("pressure") == 1
+
+    asyncio.run(go())
+
+
+def test_reload_updates_policy_but_preserves_managed_roots(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+        original_roots = maintainer.inventory().roots
+        updated, _ = make_storage_cfg(tmp_path / "new")
+        updated.storage_maintenance.interval_seconds = 123
+        updated.storage_maintenance.traces.max_bytes = 99
+
+        restart_required = maintainer.reload_config(updated)
+
+        assert restart_required
+        assert maintainer.cfg.storage_maintenance.traces.max_bytes == 99
+        assert maintainer.inventory().roots == original_roots
+        assert maintainer.wake_event.is_set()
+
+    asyncio.run(go())
+
+
+def test_disabled_maintenance_does_not_run_or_create_loop(tmp_path: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        cfg, home = make_storage_cfg(tmp_path)
+        cfg.storage_maintenance.enabled = False
+        maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+        calls: list[str] = []
+
+        async def fake_run(trigger):
+            calls.append(trigger)
+            return _summary(trigger)
+
+        maintainer.run = fake_run
+        await maintainer.start()
+        maintainer.request_pressure_check()
+        await asyncio.sleep(0)
+        assert calls == []
+        assert maintainer.loop_task is None
+        await maintainer.stop()
+
+    asyncio.run(go())
+
+
+def test_pressure_check_only_uses_disk_usage(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    cfg.storage_maintenance.min_free_bytes = 10
+    calls: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        calls.append(path)
+        return SimpleNamespace(free=0)
+
+    maintainer = StorageMaintainer(
+        cfg,
+        home=home,
+        cwd=tmp_path,
+        disk_usage=disk_usage,
+    )
+
+    assert maintainer.pressure_needed()
+    assert 1 <= len(calls) <= 3

@@ -125,6 +125,79 @@ class StorageMaintainer:
         self.disk_usage = disk_usage
         self.thread_runner = thread_runner
         self._last_pressure_warning_at: float | None = None
+        self._workspace_setting = cfg.agent.default_workspace
+        self._sandbox_setting = cfg.agent.sandbox_home
+        self._trace_setting = cfg.agent.trace_root
+        self._resource_setting = cfg.resources.root
+        self._wake_event = asyncio.Event()
+        self._pressure_requested = False
+        self._run_lock = asyncio.Lock()
+        self._loop_task: asyncio.Task[None] | None = None
+        self._started = False
+        self._stopping = False
+
+    @property
+    def loop_task(self) -> asyncio.Task[None] | None:
+        return self._loop_task
+
+    @property
+    def wake_event(self) -> asyncio.Event:
+        return self._wake_event
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._stopping = False
+        if not self.cfg.storage_maintenance.enabled:
+            return
+        async with self._run_lock:
+            await self.run("startup")
+        if not self._stopping and self.cfg.storage_maintenance.enabled:
+            self._loop_task = asyncio.create_task(
+                self._maintenance_loop(),
+                name="storage-maintenance",
+            )
+
+    async def stop(self) -> None:
+        self._stopping = True
+        self._started = False
+        self._wake_event.set()
+        task = self._loop_task
+        self._loop_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._pressure_requested = False
+
+    def pressure_needed(self) -> bool:
+        if not self.cfg.storage_maintenance.enabled:
+            return False
+        roots, _skipped = self._resolve_roots()
+        free = self._free_bytes(roots)
+        return free is not None and free < self.cfg.storage_maintenance.min_free_bytes
+
+    def request_pressure_check(self) -> None:
+        if not self.cfg.storage_maintenance.enabled or not self.pressure_needed():
+            return
+        self._pressure_requested = True
+        self._wake_event.set()
+
+    def reload_config(self, cfg: BridgeConfig) -> bool:
+        roots_changed = self._root_signature(cfg) != self._root_signature_from_snapshot()
+        self.cfg = cfg
+        self._wake_event.set()
+        if (
+            self._started
+            and cfg.storage_maintenance.enabled
+            and (self._loop_task is None or self._loop_task.done())
+        ):
+            self._stopping = False
+            self._loop_task = asyncio.create_task(
+                self._maintenance_loop(),
+                name="storage-maintenance",
+            )
+        return roots_changed
 
     async def run(self, trigger: MaintenanceTrigger) -> MaintenanceSummary:
         """Run one bounded maintenance pass outside the event-loop thread."""
@@ -171,6 +244,39 @@ class StorageMaintainer:
             summary.free_after,
         )
         return summary
+
+    async def _maintenance_loop(self) -> None:
+        try:
+            while not self._stopping:
+                interval = max(0.001, float(self.cfg.storage_maintenance.interval_seconds))
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+                except TimeoutError:
+                    trigger: MaintenanceTrigger = "periodic"
+                else:
+                    self._wake_event.clear()
+                    if self._stopping or not self.cfg.storage_maintenance.enabled:
+                        return
+                    if not self._pressure_requested:
+                        continue
+                    self._pressure_requested = False
+                    trigger = "pressure"
+
+                async with self._run_lock:
+                    if self._stopping or not self.cfg.storage_maintenance.enabled:
+                        return
+                    try:
+                        await self.run(trigger)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 - maintenance must not kill the bridge
+                        logger.exception(
+                            "storage maintenance failed trigger=%s",
+                            trigger,
+                        )
+        finally:
+            if self._loop_task is asyncio.current_task():
+                self._loop_task = None
 
     def inventory(
         self,
@@ -374,10 +480,10 @@ class StorageMaintainer:
     def _resolve_roots(self) -> tuple[dict[str, ManagedRoot], int]:
         roots: dict[str, ManagedRoot] = {}
         skipped = 0
-        workspace = self._configured_path(self.cfg.agent.default_workspace, self.cwd)
+        workspace = self._configured_path(self._workspace_setting, self.cwd)
 
         sandbox_boundary = self.home / ".local" / "state" / "qq-agent-bridge"
-        sandbox = self._configured_path(self.cfg.agent.sandbox_home, workspace)
+        sandbox = self._configured_path(self._sandbox_setting, workspace)
         if self._strict_child(sandbox, sandbox_boundary) and self._safe_existing_chain(
             sandbox, self.home
         ):
@@ -385,7 +491,7 @@ class StorageMaintainer:
         else:
             skipped += 1
 
-        traces = self._configured_path(self.cfg.agent.trace_root, self.cwd)
+        traces = self._configured_path(self._trace_setting, self.cwd)
         if (
             traces != workspace
             and not self._is_relative_to(traces, workspace)
@@ -395,7 +501,7 @@ class StorageMaintainer:
         else:
             skipped += 1
 
-        resources = self._configured_path(self.cfg.resources.root, workspace)
+        resources = self._configured_path(self._resource_setting, workspace)
         if self._strict_child(resources, workspace) and self._safe_existing_chain(
             resources, workspace
         ):
@@ -403,6 +509,23 @@ class StorageMaintainer:
         else:
             skipped += 1
         return roots, skipped
+
+    @staticmethod
+    def _root_signature(cfg: BridgeConfig) -> tuple[str, str, str, str]:
+        return (
+            cfg.agent.default_workspace,
+            cfg.agent.sandbox_home,
+            cfg.agent.trace_root,
+            cfg.resources.root,
+        )
+
+    def _root_signature_from_snapshot(self) -> tuple[str, str, str, str]:
+        return (
+            self._workspace_setting,
+            self._sandbox_setting,
+            self._trace_setting,
+            self._resource_setting,
+        )
 
     def _inventory_sandbox(
         self,
