@@ -38,7 +38,7 @@ class AgentConfig:
     share_network: bool = False
     bwrap_binary: str = "bwrap"
     force_task_tools: bool = True
-    sandbox_home: str = "/tmp/qq-agent-bridge/agent-home"
+    sandbox_home: str = "~/.local/state/qq-agent-bridge/agent-home"
     chat_model: str = "auto"
     task_model: str = "composer"
     env_allowlist: list[str] = field(default_factory=lambda: ["PATH", "HOME", "USER"])
