@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -832,6 +833,185 @@ def test_validator_normalizes_duplicate_revision_to_audited_survivor_merge(
     assert remaining[0].status == "active"
 
 
+@pytest.mark.parametrize("target_status", ["active", "candidate", "dormant"])
+@pytest.mark.parametrize("target_id_attr", ["id", "short_id"])
+def test_low_confidence_self_duplicate_revision_is_isolated_candidate(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    target_status: str,
+    target_id_attr: str,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            confidence=0.8,
+            status=target_status,
+            source_kind="self_statement",
+        ),
+    )
+    before = store.get_item(GROUP, target.id)
+    assert before is not None
+    with sqlite3.connect(store.path) as conn:
+        fts_before = conn.execute(
+            "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+        ).fetchall()
+    collected = source(text="I might still like tea")
+    source_id = store.collect(collected)
+    assert source_id is not None
+    proposal = MemoryProposal(
+        operation="revise",
+        item_id=getattr(target, target_id_attr),
+        content="  LIKES   TEA ",
+        confidence=0.5,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (collected,), (proposal,), actor=None
+    )
+
+    assert result.rejected == ()
+    assert len(result.accepted) == 1
+    isolated = result.accepted[0]
+    assert isolated.operation == "mark_candidate"
+    assert isolated.item_id is None
+    assert isolated.related_item_ids == ()
+    assert isolated.candidate_target_id == target.id
+    committed = store.commit_review(GROUP, (source_id,), result.accepted)
+    assert len(committed) == 1
+    assert committed[0].id != target.id
+    assert committed[0].candidate_target_id == target.id
+    assert committed[0].status == "candidate"
+    assert store.get_item(GROUP, target.id) == before
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+        ).fetchall() == fts_before
+
+
+@pytest.mark.parametrize("operation", ["revise", "contradict"])
+def test_low_confidence_distinct_duplicate_change_preserves_every_existing_row(
+    store: LongTermMemoryStore, cfg: BridgeConfig, operation: str
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            confidence=0.9,
+            source_kind="self_statement",
+        ),
+    )
+    duplicate = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes coffee",
+            confidence=0.6,
+            status="dormant",
+            source_kind="inferred",
+        ),
+        message_id="low-duplicate-survivor",
+    )
+    before = {item.id: item for item in store.list_items(GROUP, include_expired=True)}
+    with sqlite3.connect(store.path) as conn:
+        fts_before = conn.execute(
+            "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+        ).fetchall()
+        revisions_before = conn.execute(
+            "SELECT item_id, operation, before_summary, after_summary "
+            "FROM memory_revisions ORDER BY id"
+        ).fetchall()
+    collected = source(text="I might like coffee now")
+    source_id = store.collect(collected)
+    assert source_id is not None
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (collected,),
+        (
+            MemoryProposal(
+                operation=operation,
+                item_id=target.short_id,
+                content="likes COFFEE",
+                confidence=0.5,
+                source_kind="self_statement",
+            ),
+        ),
+        actor=None,
+    )
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].candidate_target_id == target.id
+    committed = store.commit_review(GROUP, (source_id,), result.accepted)
+    assert len(committed) == 1
+    assert committed[0].candidate_target_id == target.id
+    assert committed[0].id not in {target.id, duplicate.id}
+    after = {item.id: item for item in store.list_items(GROUP, include_expired=True)}
+    assert {item_id: after[item_id] for item_id in before} == before
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+        ).fetchall() == fts_before
+        existing_revisions_after = conn.execute(
+            "SELECT item_id, operation, before_summary, after_summary "
+            "FROM memory_revisions WHERE item_id IN (?, ?) ORDER BY id",
+            (target.id, duplicate.id),
+        ).fetchall()
+    assert existing_revisions_after == revisions_before
+
+
+def test_low_confidence_duplicate_add_targets_fact_without_reinforcing_it(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    existing = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            confidence=0.8,
+            status="candidate",
+            source_kind="self_statement",
+        ),
+    )
+    before = store.get_item(GROUP, existing.id)
+    assert before is not None
+    collected = source(text="Maybe I like tea")
+    source_id = store.collect(collected)
+    assert source_id is not None
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (collected,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="likes TEA",
+                confidence=0.5,
+                source_kind="self_statement",
+            ),
+        ),
+        actor=None,
+    )
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].candidate_target_id == existing.id
+    committed = store.commit_review(GROUP, (source_id,), result.accepted)
+    assert len(committed) == 1
+    assert committed[0].id != existing.id
+    assert committed[0].candidate_target_id == existing.id
+    assert store.get_item(GROUP, existing.id) == before
+
+
 @pytest.mark.parametrize("confidence", [0.9, 0.5], ids=["active", "candidate"])
 @pytest.mark.parametrize("expires_at", [None, 1], ids=["current", "expired"])
 def test_validator_rejects_cross_sensitivity_content_collision(
@@ -1575,6 +1755,67 @@ def test_duplicate_revision_retires_alias_target_from_later_staged_operations(
     assert [item.id for item in store.list_items(GROUP, include_expired=True)] == [
         survivor.id
     ]
+
+
+@pytest.mark.parametrize(
+    ("revision_id_attr", "sibling_id_attr"),
+    [("id", "short_id"), ("short_id", "id")],
+    ids=["full-to-short", "short-to-full"],
+)
+def test_low_confidence_duplicate_revision_keeps_alias_target_for_staged_sibling(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    revision_id_attr: str,
+    sibling_id_attr: str,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            source_kind="self_statement",
+        ),
+    )
+    seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes coffee",
+            status="dormant",
+            source_kind="self_statement",
+        ),
+        message_id="low-staged-duplicate",
+    )
+    collected = source(text="I might like coffee")
+    revision = MemoryProposal(
+        operation="revise",
+        item_id=getattr(target, revision_id_attr),
+        content="likes coffee",
+        confidence=0.5,
+        source_kind="self_statement",
+    )
+    sibling = MemoryProposal.reinforce(
+        getattr(target, sibling_id_attr),
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (collected,),
+        (revision, sibling),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.rejected == ()
+    assert [proposal.operation for proposal in result.accepted] == [
+        "mark_candidate",
+        "reinforce",
+    ]
+    assert result.accepted[0].candidate_target_id == target.id
+    assert result.accepted[1].item_id == target.id
 
 
 @pytest.mark.parametrize(

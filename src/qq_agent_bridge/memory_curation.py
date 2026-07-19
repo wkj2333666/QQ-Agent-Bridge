@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 from .config import BridgeConfig, LongTermMemoryConfig
 from .long_term_memory import LongTermMemoryStore
 from .long_term_memory_models import (
+    ACTIVE_CONFIDENCE_THRESHOLD,
     ALLOWED_CATEGORIES,
     ALLOWED_OPERATIONS,
     ALLOWED_STATUSES,
@@ -24,8 +25,6 @@ from .types import ChatEvent
 MAX_SOURCE_TEXT_CHARS = 2_000
 MAX_MEMORY_CONTENT_CHARS = 500
 MAX_PROPOSALS_PER_REVIEW = 20
-ACTIVE_CONFIDENCE_THRESHOLD = 0.70
-
 ALLOWED_SENSITIVITIES = frozenset({"normal", "sensitive", "secret"})
 ALLOWED_SOURCE_KINDS = frozenset(
     {
@@ -399,8 +398,20 @@ class MemoryValidator:
                 actor is not None and actor.id != proposal.subject_id
             ):
                 return None, "sensitivity_consent_required"
+        proposal = self._candidate_if_ambiguous(proposal)
         duplicate = None
         if proposal.operation in CONTENT_OPERATIONS:
+            duplicate, sensitivity_collision = self._duplicate(
+                scope, proposal, staged_items, staged_content
+            )
+            if sensitivity_collision:
+                return None, "sensitivity_collision"
+        if (
+            proposal.operation == "mark_candidate"
+            and proposal.candidate_target_id is None
+            and duplicate is not None
+        ):
+            proposal = replace(proposal, candidate_target_id=duplicate.id)
             duplicate, sensitivity_collision = self._duplicate(
                 scope, proposal, staged_items, staged_content
             )
@@ -428,7 +439,6 @@ class MemoryValidator:
                     source_kind=proposal.source_kind,
                     actor_class=proposal.actor_class,
                 )
-        proposal = self._candidate_if_ambiguous(proposal)
         if proposal.operation == "add" and duplicate is not None:
             proposal = MemoryProposal.reinforce(
                 duplicate.id,
@@ -442,6 +452,8 @@ class MemoryValidator:
     def _validate_operation_shape(
         proposal: MemoryProposal, actor: MemoryActor | None
     ) -> str | None:
+        if proposal.candidate_target_id is not None:
+            return "invalid_operation_fields"
         operation = proposal.operation
         if operation in {"add", "mark_candidate"}:
             if not proposal.subject_kind or not proposal.subject_id or not proposal.content:
@@ -570,6 +582,8 @@ class MemoryValidator:
                 continue
             if item_key[-1] != proposal_key[-1]:
                 return None, True
+            if staged_item.candidate_target_id != proposal.candidate_target_id:
+                continue
             duplicate = staged_item
         for staged_proposal in staged_content:
             staged_key = memory_identity_key(
@@ -772,7 +786,8 @@ class MemoryValidator:
                 proposal,
                 operation="mark_candidate",
                 item_id=None,
-                related_item_ids=(proposal.item_id,) if proposal.item_id else (),
+                related_item_ids=(),
+                candidate_target_id=proposal.item_id,
                 status="candidate",
             )
         return proposal
