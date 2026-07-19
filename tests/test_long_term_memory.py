@@ -610,6 +610,105 @@ def test_repeated_candidate_proposal_reinforces_only_candidate_after_restart(
     reopened.close()
 
 
+@pytest.mark.parametrize("candidate_kind", ["targetless", "fact-backed"])
+@pytest.mark.parametrize("first_operation", ["add", "mark_candidate"])
+@pytest.mark.parametrize("second_operation", ["add", "mark_candidate"])
+def test_direct_repeated_low_confidence_candidate_permutations_do_not_chain(
+    tmp_path: Path,
+    candidate_kind: str,
+    first_operation: str,
+    second_operation: str,
+) -> None:
+    path = tmp_path / "direct-candidate-restart.sqlite3"
+    store = LongTermMemoryStore(path)
+    store.initialize()
+    store.set_scope_enabled(GROUP_A, True)
+    fact = None
+    if candidate_kind == "fact-backed":
+        fact_source = store.collect(
+            _source(GROUP_A, "established-fact", "user-a", "Likes tea")
+        )
+        assert fact_source is not None
+        fact = store.commit_review(
+            GROUP_A,
+            (fact_source,),
+            (
+                MemoryProposal.add(
+                    subject_kind="user",
+                    subject_id="user-a",
+                    content="Likes tea",
+                    confidence=0.9,
+                ),
+            ),
+        )[0]
+    assert store._connection is not None
+    fts_before = store._connection.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall()
+
+    def proposal(operation: str, confidence: float) -> MemoryProposal:
+        return MemoryProposal(
+            operation=operation,
+            subject_kind="user",
+            subject_id="user-a",
+            content=" likes   TEA ",
+            confidence=confidence,
+            status="candidate" if operation == "mark_candidate" else "active",
+        )
+
+    first_source = store.collect(
+        _source(GROUP_A, "candidate-first", "user-a", "Maybe I like tea")
+    )
+    assert first_source is not None
+    first = store.commit_review(
+        GROUP_A, (first_source,), (proposal(first_operation, 0.45),)
+    )[0]
+    store.close()
+
+    reopened = LongTermMemoryStore(path)
+    reopened.initialize()
+    second_source = reopened.collect(
+        _source(GROUP_A, "candidate-second", "user-a", "Maybe I still like tea")
+    )
+    assert second_source is not None
+    second = reopened.commit_review(
+        GROUP_A, (second_source,), (proposal(second_operation, 0.55),)
+    )[0]
+
+    expected_target = fact.id if fact is not None else None
+    candidates = tuple(
+        item
+        for item in reopened.list_items(GROUP_A, include_expired=True)
+        if item.status == "candidate"
+    )
+    assert candidates == (second,)
+    assert second.id == first.id
+    assert second.candidate_target_id == expected_target
+    assert second.source_count == 2
+    assert second.base_confidence == pytest.approx(0.55)
+    assert reopened._connection is not None
+    assert reopened._connection.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall() == fts_before
+    assert reopened.pending_sources(GROUP_A, 10) == ()
+    review_rows = reopened._connection.execute(
+        "SELECT source_count, proposed_count, accepted_count, candidate_count, "
+        "rejected_count FROM review_runs ORDER BY id DESC LIMIT 2"
+    ).fetchall()
+    assert [tuple(row) for row in review_rows] == [
+        (1, 1, 1, 1, 0),
+        (1, 1, 1, 1, 0),
+    ]
+    assert [
+        row[0]
+        for row in reopened._connection.execute(
+            "SELECT operation FROM memory_revisions WHERE item_id = ? ORDER BY id",
+            (second.id,),
+        ).fetchall()
+    ] == ["candidate", "reinforce"]
+    reopened.close()
+
+
 def test_hard_delete_nulls_candidate_target_without_cross_scope_effects(
     store: LongTermMemoryStore,
 ) -> None:

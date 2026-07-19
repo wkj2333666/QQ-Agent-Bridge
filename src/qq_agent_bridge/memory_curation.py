@@ -410,6 +410,7 @@ class MemoryValidator:
             proposal.operation == "mark_candidate"
             and proposal.candidate_target_id is None
             and duplicate is not None
+            and duplicate.status != "candidate"
         ):
             proposal = replace(proposal, candidate_target_id=duplicate.id)
             duplicate, sensitivity_collision = self._duplicate(
