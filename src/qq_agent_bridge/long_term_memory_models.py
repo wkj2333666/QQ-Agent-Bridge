@@ -27,6 +27,7 @@ ALLOWED_OPERATIONS = frozenset(
     {"add", "revise", "reinforce", "contradict", "merge", "mark_candidate", "forget"}
 )
 INDEXED_STATUSES = frozenset({"active", "dormant"})
+ACTIVE_CONFIDENCE_THRESHOLD = 0.70
 
 
 MemoryIdentityKey = tuple[str, str, str, str, str]
@@ -98,6 +99,7 @@ class MemoryItem:
     effective_score: float
     status: MemoryStatusName
     sensitivity: str
+    candidate_target_id: str | None
     source_kind: str
     source_count: int
     explicit_memory: bool
@@ -115,6 +117,7 @@ class MemoryProposal:
     operation: str
     item_id: str | None = None
     related_item_ids: tuple[str, ...] = ()
+    candidate_target_id: str | None = None
     subject_kind: str | None = None
     subject_id: str | None = None
     category: str | None = None
@@ -192,6 +195,7 @@ class MemoryStoreStatus:
 
 
 __all__ = [
+    "ACTIVE_CONFIDENCE_THRESHOLD",
     "MemoryItem",
     "MemoryIdentityKey",
     "MemoryProposal",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -14,6 +15,7 @@ from typing import Iterable, Iterator, Sequence
 import uuid
 
 from .long_term_memory_models import (
+    ACTIVE_CONFIDENCE_THRESHOLD,
     ALLOWED_CATEGORIES,
     ALLOWED_OPERATIONS,
     ALLOWED_STATUSES,
@@ -172,13 +174,16 @@ class LongTermMemoryStore:
     ) -> tuple[MemoryItem, ...]:
         unique_source_ids = tuple(dict.fromkeys(int(value) for value in source_ids))
         committed_ids: list[str] = []
+        normalized_operations: list[MemoryProposal] = []
         now = int(time.time())
         with self._transaction() as conn:
             if not self._is_scope_enabled_conn(conn, scope):
                 raise RuntimeError("memory scope was disabled before review commit")
             self._require_scoped_sources(conn, scope, unique_source_ids)
             for operation in operations:
-                committed_ids.extend(self._apply_operation(conn, scope, operation, now))
+                normalized = self._isolate_ambiguous_content(conn, scope, operation)
+                normalized_operations.append(normalized)
+                committed_ids.extend(self._apply_operation(conn, scope, normalized, now))
             if unique_source_ids:
                 placeholders = ",".join("?" for _ in unique_source_ids)
                 conn.execute(
@@ -204,7 +209,7 @@ class LongTermMemoryStore:
                     len(operations),
                     sum(
                         op.operation == "mark_candidate" or op.status == "candidate"
-                        for op in operations
+                        for op in normalized_operations
                     ),
                     now,
                     now,
@@ -525,6 +530,7 @@ class LongTermMemoryStore:
     ) -> list[str]:
         if proposal.operation not in ALLOWED_OPERATIONS:
             raise ValueError(f"unsupported memory operation: {proposal.operation}")
+        proposal = self._isolate_ambiguous_content(conn, scope, proposal)
         if proposal.operation in {"add", "mark_candidate"}:
             return [self._insert_item(conn, scope, proposal, now)]
         if not proposal.item_id:
@@ -756,6 +762,43 @@ class LongTermMemoryStore:
             return [item_id]
         raise AssertionError("all allowed operations are handled")
 
+    def _isolate_ambiguous_content(
+        self,
+        conn: sqlite3.Connection,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+    ) -> MemoryProposal:
+        if proposal.operation not in {"add", "mark_candidate", "revise", "contradict"}:
+            return proposal
+        confidence = 0.75 if proposal.confidence is None else float(proposal.confidence)
+        if confidence >= ACTIVE_CONFIDENCE_THRESHOLD:
+            return proposal
+        if proposal.operation in {"add", "mark_candidate"}:
+            return replace(proposal, operation="mark_candidate", status="candidate")
+
+        if not proposal.item_id:
+            return proposal
+        target = self._get_item_row(conn, scope, proposal.item_id)
+        if target is None:
+            raise ValueError("memory operation target does not exist in scope")
+        return MemoryProposal(
+            operation="mark_candidate",
+            candidate_target_id=str(target["id"]),
+            subject_kind=str(target["subject_kind"]),
+            subject_id=str(target["subject_id"]),
+            category=str(target["category"]),
+            content=proposal.content,
+            confidence=proposal.confidence,
+            status="candidate",
+            sensitivity=str(target["sensitivity"]),
+            source_kind=proposal.source_kind,
+            explicit_memory=proposal.explicit_memory,
+            decay_exempt=proposal.decay_exempt,
+            expires_at=proposal.expires_at,
+            created_at=proposal.created_at,
+            actor_class=proposal.actor_class,
+        )
+
     def _insert_item(
         self,
         conn: sqlite3.Connection,
@@ -781,6 +824,34 @@ class LongTermMemoryStore:
         )
         created_at = int(proposal.created_at if proposal.created_at is not None else now)
         sensitivity = proposal.sensitivity or "normal"
+        candidate_target_id = proposal.candidate_target_id
+        if status != "candidate" and candidate_target_id is not None:
+            raise ValueError("only candidate memories may target another item")
+        if status == "candidate" and candidate_target_id is None:
+            target_match = self._find_duplicate_or_raise_collision(
+                conn,
+                scope,
+                subject_kind=proposal.subject_kind,
+                subject_id=proposal.subject_id,
+                category=category,
+                content=content,
+                sensitivity=sensitivity,
+                candidate_target_id=None,
+            )
+            if target_match is not None:
+                candidate_target_id = str(target_match["id"])
+        if candidate_target_id is not None:
+            candidate_target = self._get_item_row(conn, scope, candidate_target_id)
+            if candidate_target is None:
+                raise ValueError("candidate target does not exist in scope")
+            if (
+                str(candidate_target["subject_kind"]) != str(proposal.subject_kind)
+                or str(candidate_target["subject_id"]) != str(proposal.subject_id)
+                or str(candidate_target["category"]) != category
+                or str(candidate_target["sensitivity"]) != sensitivity
+            ):
+                raise ValueError("candidate target metadata does not match proposal")
+            candidate_target_id = str(candidate_target["id"])
         duplicate = self._find_duplicate_or_raise_collision(
             conn,
             scope,
@@ -789,6 +860,7 @@ class LongTermMemoryStore:
             category=category,
             content=content,
             sensitivity=sensitivity,
+            candidate_target_id=candidate_target_id,
         )
         if duplicate is not None:
             item_id = str(duplicate["id"])
@@ -836,10 +908,10 @@ class LongTermMemoryStore:
             INSERT INTO memory_items(
                 id, short_id, scope_kind, scope_id, subject_kind, subject_id,
                 category, content, base_confidence, effective_score, status,
-                sensitivity, source_kind, source_count, explicit_memory,
+                sensitivity, candidate_target_id, source_kind, source_count, explicit_memory,
                 decay_exempt, created_at, updated_at, last_supported_at,
                 expires_at, dormant_at, version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 item_id,
@@ -854,6 +926,7 @@ class LongTermMemoryStore:
                 confidence,
                 status,
                 sensitivity,
+                candidate_target_id,
                 proposal.source_kind,
                 int(proposal.explicit_memory),
                 int(proposal.decay_exempt),
@@ -886,6 +959,7 @@ class LongTermMemoryStore:
         category: object,
         content: object,
         sensitivity: object,
+        candidate_target_id: str | None = None,
         exclude_item_id: str | None = None,
     ) -> sqlite3.Row | None:
         proposal_key = memory_identity_key(
@@ -926,6 +1000,8 @@ class LongTermMemoryStore:
                 continue
             if row_key[-1] != proposal_key[-1]:
                 raise ValueError("memory sensitivity collision")
+            if row["candidate_target_id"] != candidate_target_id:
+                continue
             if duplicate is None:
                 duplicate = row
         return duplicate
@@ -1136,6 +1212,11 @@ class LongTermMemoryStore:
             effective_score=float(row["effective_score"]),
             status=str(row["status"]),  # type: ignore[arg-type]
             sensitivity=str(row["sensitivity"]),
+            candidate_target_id=(
+                str(row["candidate_target_id"])
+                if row["candidate_target_id"] is not None
+                else None
+            ),
             source_kind=str(row["source_kind"]),
             source_count=int(row["source_count"]),
             explicit_memory=bool(row["explicit_memory"]),

@@ -56,8 +56,65 @@ def test_public_module_reexports_domain_models() -> None:
 def test_schema_and_migration_helpers_are_in_focused_internal_module() -> None:
     schema_module = importlib.import_module("qq_agent_bridge.long_term_memory_schema")
 
-    assert schema_module.SCHEMA_VERSION == 1
+    assert schema_module.SCHEMA_VERSION == 2
     assert callable(schema_module.migrate)
+
+
+def test_v1_migration_adds_candidate_target_and_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE memory_items (
+                id TEXT PRIMARY KEY,
+                short_id TEXT NOT NULL UNIQUE,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                subject_kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                base_confidence REAL NOT NULL,
+                effective_score REAL NOT NULL,
+                status TEXT NOT NULL,
+                sensitivity TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_count INTEGER NOT NULL DEFAULT 1,
+                explicit_memory INTEGER NOT NULL DEFAULT 0,
+                decay_exempt INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_supported_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                dormant_at INTEGER,
+                version INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO memory_items VALUES (
+                'legacy-item', 'legacy-short', 'group', 'group-a', 'user',
+                'user-a', 'preference', 'Legacy fact', 0.8, 0.8, 'active',
+                'normal', 'self_statement', 1, 0, 0, 1, 1, 1, NULL, NULL, 1
+            );
+            PRAGMA user_version = 1;
+            """
+        )
+
+    first = LongTermMemoryStore(path)
+    first.initialize()
+    migrated = first.get_item(GROUP_A, "legacy-item")
+    assert migrated is not None
+    assert migrated.candidate_target_id is None
+    assert first._connection is not None
+    columns = {
+        row[1] for row in first._connection.execute("PRAGMA table_info(memory_items)")
+    }
+    assert "candidate_target_id" in columns
+    assert first._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    first.close()
+
+    reopened = LongTermMemoryStore(path)
+    reopened.initialize()
+    assert reopened.get_item(GROUP_A, "legacy-item") == migrated
+    reopened.close()
 
 
 @pytest.fixture
@@ -417,6 +474,219 @@ def test_direct_self_duplicate_revision_is_a_reinforcement(
     assert operations == ["add", "reinforce"]
 
 
+@pytest.mark.parametrize("operation", ["add", "revise", "contradict"])
+def test_direct_low_confidence_content_operation_isolates_candidate_and_fts(
+    store: LongTermMemoryStore, operation: str
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(_source(GROUP_A, "target-low", "user-a", "Tea"))
+    duplicate_source = store.collect(
+        _source(GROUP_A, "duplicate-low", "user-a", "Coffee")
+    )
+    assert target_source is not None and duplicate_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (target_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user", subject_id="user-a", content="Tea", confidence=0.9
+            ),
+        ),
+    )[0]
+    duplicate = store.commit_review(
+        GROUP_A,
+        (duplicate_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="Coffee",
+                confidence=0.8,
+                status="dormant",
+            ),
+        ),
+    )[0]
+    before = {item.id: item for item in store.list_items(GROUP_A, include_expired=True)}
+    assert store._connection is not None
+    fts_before = store._connection.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall()
+    source_id = store.collect(
+        _source(GROUP_A, f"uncertain-{operation}", "user-a", "Maybe coffee")
+    )
+    assert source_id is not None
+    proposal = (
+        MemoryProposal.add(
+            subject_kind="user", subject_id="user-a", content="Coffee", confidence=0.5
+        )
+        if operation == "add"
+        else MemoryProposal(
+            operation=operation,
+            item_id=target.short_id,
+            content="Coffee",
+            confidence=0.5,
+        )
+    )
+
+    committed = store.commit_review(GROUP_A, (source_id,), (proposal,))
+
+    candidate = committed[0]
+    expected_target = duplicate.id if operation == "add" else target.id
+    assert candidate.status == "candidate"
+    assert candidate.candidate_target_id == expected_target
+    assert candidate.id not in before
+    after = {item.id: item for item in store.list_items(GROUP_A, include_expired=True)}
+    assert {item_id: after[item_id] for item_id in before} == before
+    assert store._connection.execute(
+        "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+    ).fetchall() == fts_before
+    assert store._connection.execute(
+        "SELECT candidate_count FROM review_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0] == 1
+
+
+def test_repeated_candidate_proposal_reinforces_only_candidate_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "candidate-restart.sqlite3"
+    store = LongTermMemoryStore(path)
+    store.initialize()
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(_source(GROUP_A, "restart-target", "user-a", "Tea"))
+    assert target_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (target_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user", subject_id="user-a", content="Tea", confidence=0.9
+            ),
+        ),
+    )[0]
+    target_before = store.get_item(GROUP_A, target.id)
+    first_source = store.collect(
+        _source(GROUP_A, "restart-first", "user-a", "Maybe still tea")
+    )
+    assert first_source is not None
+    first = store.commit_review(
+        GROUP_A,
+        (first_source,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=target.short_id,
+                content=" tea ",
+                confidence=0.45,
+            ),
+        ),
+    )[0]
+    store.close()
+
+    reopened = LongTermMemoryStore(path)
+    reopened.initialize()
+    second_source = reopened.collect(
+        _source(GROUP_A, "restart-second", "user-a", "Maybe still tea again")
+    )
+    assert second_source is not None
+    second = reopened.commit_review(
+        GROUP_A,
+        (second_source,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=target.id,
+                content="TEA",
+                confidence=0.55,
+            ),
+        ),
+    )[0]
+
+    assert second.id == first.id
+    assert second.candidate_target_id == target.id
+    assert second.status == "candidate"
+    assert second.source_count == 2
+    assert second.base_confidence == pytest.approx(0.55)
+    assert reopened.get_item(GROUP_A, target.id) == target_before
+    reopened.close()
+
+
+def test_hard_delete_nulls_candidate_target_without_cross_scope_effects(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    store.set_scope_enabled(GROUP_B, True)
+    target_source = store.collect(_source(GROUP_A, "delete-target", "user-a", "Tea"))
+    assert target_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (target_source,),
+        (MemoryProposal.add(subject_kind="user", subject_id="user-a", content="Tea"),),
+    )[0]
+    candidate_source = store.collect(
+        _source(GROUP_A, "delete-candidate", "user-a", "Maybe coffee")
+    )
+    assert candidate_source is not None
+    candidate = store.commit_review(
+        GROUP_A,
+        (candidate_source,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=target.id,
+                content="Coffee",
+                confidence=0.5,
+            ),
+        ),
+    )[0]
+
+    assert store.hard_delete(GROUP_B, target.id) is False
+    assert store.get_item(GROUP_A, candidate.id) == candidate
+    assert store.hard_delete(GROUP_A, target.id) is True
+    detached = store.get_item(GROUP_A, candidate.id)
+    assert detached is not None
+    assert detached.content == "Coffee"
+    assert detached.status == "candidate"
+    assert detached.candidate_target_id is None
+
+
+def test_candidate_target_must_resolve_in_exact_scope(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    store.set_scope_enabled(GROUP_B, True)
+    foreign_source = store.collect(_source(GROUP_B, "foreign-target", "user-a", "Tea"))
+    assert foreign_source is not None
+    foreign = store.commit_review(
+        GROUP_B,
+        (foreign_source,),
+        (MemoryProposal.add(subject_kind="user", subject_id="user-a", content="Tea"),),
+    )[0]
+    local_source = store.collect(
+        _source(GROUP_A, "cross-scope-candidate", "user-a", "Maybe coffee")
+    )
+    assert local_source is not None
+
+    with pytest.raises(ValueError, match="candidate target does not exist in scope"):
+        store.commit_review(
+            GROUP_A,
+            (local_source,),
+            (
+                MemoryProposal(
+                    operation="mark_candidate",
+                    candidate_target_id=foreign.short_id,
+                    subject_kind="user",
+                    subject_id="user-a",
+                    content="Coffee",
+                    confidence=0.5,
+                    status="candidate",
+                ),
+            ),
+        )
+
+    assert [source.id for source in store.pending_sources(GROUP_A, 10)] == [local_source]
+    assert store.list_items(GROUP_A, include_expired=True) == ()
+
+
 def test_duplicate_revision_rolls_back_rows_fts_revisions_and_source_consumption(
     store: LongTermMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,14 +818,14 @@ def test_expiry_and_decay_are_bounded_and_scope_independent(
                 subject_id="user-a",
                 category="recurring_topic",
                 content="An aging topic",
-                confidence=0.41,
+                confidence=0.70,
                 created_at=1,
             )
         ],
     )[0]
     assert item.status == "active"
 
-    assert store.apply_decay(3_000_000) == 1
+    assert store.apply_decay(5_000_000) == 1
     decayed = store.get_item(GROUP_A, item.id)
     assert decayed is not None
     assert decayed.status == "dormant"

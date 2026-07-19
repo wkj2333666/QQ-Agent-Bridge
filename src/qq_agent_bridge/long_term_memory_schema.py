@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_DDL = f"""
 CREATE TABLE IF NOT EXISTS memory_scopes (
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
         'candidate', 'active', 'dormant', 'contradicted', 'rejected'
     )),
     sensitivity TEXT NOT NULL,
+    candidate_target_id TEXT REFERENCES memory_items(id) ON DELETE SET NULL,
     source_kind TEXT NOT NULL,
     source_count INTEGER NOT NULL DEFAULT 1,
     explicit_memory INTEGER NOT NULL DEFAULT 0
@@ -79,6 +80,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status
     ON memory_items(scope_kind, scope_id, status, effective_score);
 CREATE INDEX IF NOT EXISTS idx_memory_items_subject
     ON memory_items(scope_kind, scope_id, subject_kind, subject_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_items_candidate_target
+    ON memory_items(scope_kind, scope_id, candidate_target_id);
 
 CREATE TABLE IF NOT EXISTS memory_revisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +123,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 PRAGMA user_version = {SCHEMA_VERSION};
 """
 
+MIGRATION_1_TO_2 = """
+ALTER TABLE memory_items ADD COLUMN candidate_target_id TEXT
+    REFERENCES memory_items(id) ON DELETE SET NULL;
+"""
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     """Migrate an initialized connection to the supported schema version."""
@@ -129,7 +137,10 @@ def migrate(conn: sqlite3.Connection) -> None:
             f"memory database schema {version} is newer than supported {SCHEMA_VERSION}"
         )
     try:
-        conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA_DDL}\nCOMMIT;")
+        migration_sql = MIGRATION_1_TO_2 if version == 1 else ""
+        conn.executescript(
+            f"BEGIN IMMEDIATE;\n{migration_sql}\n{SCHEMA_DDL}\nCOMMIT;"
+        )
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
