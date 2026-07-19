@@ -606,7 +606,12 @@ def test_bwrap_mounts_cursor_runtime_read_only_and_workspace_writable() -> None:
     cmd = adapter._build_cmd("hello", "/tmp", "code", model=None)
 
     assert _has_bind(cmd, "--bind", "/tmp", "/tmp")
-    assert _has_bind(cmd, "--bind", "/tmp/qq-agent-bridge/agent-home", str(home))
+    assert _has_bind(
+        cmd,
+        "--bind",
+        str(home / ".local/state/qq-agent-bridge/agent-home"),
+        str(home),
+    )
     assert _has_bind(cmd, "--ro-bind", str(home / ".local/bin"), str(home / ".local/bin"))
     assert _has_bind(
         cmd,
@@ -672,7 +677,12 @@ def test_bwrap_mounts_home_before_cursor_runtime() -> None:
 
     cmd = adapter._build_cmd("hello", "/tmp", "task", model=None)
 
-    home_bind = _bind_index(cmd, "--bind", "/tmp/qq-agent-bridge/agent-home", str(home))
+    home_bind = _bind_index(
+        cmd,
+        "--bind",
+        str(home / ".local/state/qq-agent-bridge/agent-home"),
+        str(home),
+    )
     local_bin_bind = _bind_index(
         cmd,
         "--ro-bind",
@@ -708,6 +718,101 @@ def test_bwrap_prepare_copies_cursor_state_to_sandbox_home(tmp_path: Path, monke
     assert (sandbox_home / ".config" / "cursor" / "auth.json").read_text(encoding="utf-8") == '{"token":"secret"}'
     assert oct(sandbox_home.stat().st_mode & 0o777) == "0o700"
     assert oct((sandbox_home / ".config" / "cursor" / "auth.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_bwrap_accepts_private_persistent_sandbox_home(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    fake_home = tmp_path / "real-home"
+    fake_home.mkdir(mode=0o700)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))  # type: ignore[attr-defined]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox_home = fake_home / ".local/state/qq-agent-bridge/agent-home"
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(sandbox_home)
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    error = adapter._prepare_bwrap(str(workspace), "task")  # noqa: SLF001
+
+    assert error is None
+    assert sandbox_home.is_dir()
+    assert oct(sandbox_home.stat().st_mode & 0o777) == "0o700"
+
+
+def test_bwrap_rejects_writable_parent_in_persistent_sandbox_home(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    fake_home = tmp_path / "real-home"
+    fake_home.mkdir(mode=0o700)
+    unsafe = fake_home / "unsafe"
+    unsafe.mkdir(mode=0o777)
+    unsafe.chmod(0o777)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))  # type: ignore[attr-defined]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(unsafe / "agent-home")
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    error = adapter._prepare_bwrap(str(workspace), "task")  # noqa: SLF001
+
+    assert error == "[error] 助手沙箱未配置"
+
+
+def test_bwrap_rejects_symlink_in_persistent_sandbox_home(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    fake_home = tmp_path / "real-home"
+    fake_home.mkdir(mode=0o700)
+    target = fake_home / "target"
+    target.mkdir(mode=0o700)
+    (fake_home / "linked").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))  # type: ignore[attr-defined]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(fake_home / "linked/agent-home")
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    error = adapter._prepare_bwrap(str(workspace), "task")  # noqa: SLF001
+
+    assert error == "[error] 助手沙箱未配置"
+
+
+def test_bwrap_rejects_sensitive_home_subdirectory(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    fake_home = tmp_path / "real-home"
+    fake_home.mkdir(mode=0o700)
+    sensitive = fake_home / ".ssh"
+    sensitive.mkdir(mode=0o700)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))  # type: ignore[attr-defined]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(sensitive)
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    error = adapter._prepare_bwrap(str(workspace), "task")  # noqa: SLF001
+
+    assert error == "[error] 助手沙箱未配置"
+
+
+def test_bwrap_rejects_tmp_root_as_sandbox_home(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = "/tmp"
+    adapter = CursorAdapter(cfg)
+
+    error = adapter._prepare_bwrap(str(workspace), "task")  # noqa: SLF001
+
+    assert error == "[error] 助手沙箱未配置"
 
 
 def test_bwrap_rejects_sandbox_home_inside_workspace(tmp_path: Path, monkeypatch: object) -> None:
@@ -991,6 +1096,7 @@ def test_nonzero_subprocess_output_is_generic(tmp_path: Path) -> None:
     cfg.agent.binary = str(fake_cli)
     cfg.agent.env_runner = ""
     cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
     adapter = CursorAdapter(cfg)
 
     result = asyncio.run(adapter.run("hello", str(tmp_path), "ask"))
@@ -1000,6 +1106,26 @@ def test_nonzero_subprocess_output_is_generic(tmp_path: Path) -> None:
     assert "cursor" not in lowered
     assert "agent" not in lowered
     assert "cli" not in lowered
+
+
+def test_nonzero_subprocess_reports_storage_exhaustion(tmp_path: Path) -> None:
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\nprintf 'Error: ENOSPC: no space left on device, write' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask"))
+
+    assert result == "[error] 助手存储空间不足，请联系管理员清理运行缓存"
 
 
 def test_explicit_model_usage_limit_falls_back_to_auto(tmp_path: Path) -> None:
@@ -1018,6 +1144,8 @@ def test_explicit_model_usage_limit_falls_back_to_auto(tmp_path: Path) -> None:
     cfg.agent.binary = str(fake_cli)
     cfg.agent.env_runner = ""
     cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.force_task_tools = False
     adapter = CursorAdapter(cfg)
 
     result = asyncio.run(adapter.run("read image", str(tmp_path), "task", model="composer"))
@@ -1041,6 +1169,8 @@ def test_explicit_model_out_of_usage_falls_back_to_auto(tmp_path: Path) -> None:
     cfg.agent.binary = str(fake_cli)
     cfg.agent.env_runner = ""
     cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.force_task_tools = False
     adapter = CursorAdapter(cfg)
 
     result = asyncio.run(adapter.run("summarize video", str(tmp_path), "task", model="composer"))

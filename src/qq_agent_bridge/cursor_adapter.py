@@ -78,6 +78,11 @@ class CursorAdapter:
             )
         )
 
+    @staticmethod
+    def _is_storage_exhaustion_error(text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        return "enospc" in normalized or "no space left on device" in normalized
+
     def _build_cmd(
         self,
         prompt: str,
@@ -245,9 +250,20 @@ class CursorAdapter:
     def _ensure_private_sandbox_home(self, sandbox_home: Path, workspace: Path) -> None:
         if not sandbox_home.is_absolute():
             raise ValueError("sandbox home must be absolute")
-        if self._is_relative_to(sandbox_home, workspace) or not self._is_tmp_path(sandbox_home):
-            raise ValueError("sandbox home must be a private tmp path outside workspace")
-        self._ensure_private_dir_chain(sandbox_home)
+        if self._is_relative_to(sandbox_home, workspace):
+            raise ValueError("sandbox home must stay outside workspace")
+        if self._is_tmp_path(sandbox_home):
+            if sandbox_home == Path("/tmp"):
+                raise ValueError("sandbox home must not expose the shared tmp root")
+            self._ensure_private_dir_chain(sandbox_home)
+            return
+        home = Path.home().resolve(strict=False)
+        persistent_root = home / ".local/state/qq-agent-bridge"
+        if sandbox_home == persistent_root or not self._is_relative_to(
+            sandbox_home, persistent_root
+        ):
+            raise ValueError("sandbox home must use the dedicated application state root")
+        self._ensure_private_user_dir_chain(sandbox_home, home)
 
     def _ensure_private_dir_chain(self, target: Path) -> None:
         target.relative_to(Path("/tmp"))
@@ -255,6 +271,30 @@ class CursorAdapter:
         for part in target.relative_to(Path("/tmp")).parts:
             current = current / part
             self._ensure_private_dir(current)
+
+    def _ensure_private_user_dir_chain(self, target: Path, home: Path) -> None:
+        target.relative_to(home)
+        self._validate_private_parent(home)
+        current = home
+        for part in target.relative_to(home).parts:
+            current = current / part
+            try:
+                st = current.lstat()
+            except FileNotFoundError:
+                current.mkdir(mode=0o700)
+                st = current.lstat()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise ValueError("private path component is not a directory")
+            if st.st_uid != os.getuid() or st.st_mode & 0o022:
+                raise ValueError("private path component is not safely owned")
+        target.chmod(0o700)
+
+    def _validate_private_parent(self, path: Path) -> None:
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError("private path parent is not a directory")
+        if st.st_uid != os.getuid() or st.st_mode & 0o022:
+            raise ValueError("private path parent is not safely owned")
 
     def _ensure_private_child_dir(self, sandbox_home: Path, relative: Path) -> None:
         current = sandbox_home
@@ -459,6 +499,8 @@ class CursorAdapter:
                         trace_id=fallback_trace_id,
                         redact_extra=redact_extra,
                     )
+                if self._is_storage_exhaustion_error(cleaned):
+                    return "[error] 助手存储空间不足，请联系管理员清理运行缓存"
                 return "[error] 助手执行失败"
             return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"
         except asyncio.TimeoutError:

@@ -189,7 +189,9 @@ agent:
   share_network: true  # required for web search; keep false for offline tasks
   bwrap_binary: "bwrap"
   force_task_tools: true
-  sandbox_home: "/tmp/qq-agent-bridge/agent-home"
+  # Persistent disk-backed state outside the Agent workspace. Keep it under this app state root;
+  # do not move it to a small tmpfs such as /tmp on long-running deployments.
+  sandbox_home: "~/.local/state/qq-agent-bridge/agent-home"
   chat_model: "auto"                  # fast route for short QQ replies
   task_model: "composer"              # stronger tool-using route for QQ tasks
   max_concurrent_jobs: 2
