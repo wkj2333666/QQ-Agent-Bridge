@@ -433,8 +433,60 @@ def test_reviews_are_serialized_one_at_a_time(
             await asyncio.sleep(0)
         assert agent.max_active == 1
         agent.release.set()
-        await asyncio.gather(first, second)
+        first_outcome, second_outcome = await asyncio.gather(first, second)
         assert agent.max_active == 1
+        assert first_outcome.error is None
+        assert second_outcome.error == "no_sources"
+
+    asyncio.run(go())
+
+
+def test_interactive_background_cancel_does_not_cancel_explicit_review(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        collect_source(store, message_id="m1")
+        agent = FakeAgent()
+        agent.release = asyncio.Event()
+        coordinator = make_coordinator(store, agent, cfg, tmp_path)
+        explicit = asyncio.create_task(coordinator.review_now(GROUP, actor=OWNER))
+        while not agent.calls:
+            await asyncio.sleep(0)
+
+        coordinator.cancel_background_for_interactive()
+        agent.release.set()
+        outcome = await explicit
+
+        assert outcome.error is None
+        assert store.status(GROUP).pending_count == 0
+
+    asyncio.run(go())
+
+
+def test_global_disable_fences_running_explicit_review(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        collect_source(store, message_id="m1")
+        agent = FakeAgent()
+        agent.release = asyncio.Event()
+        coordinator = make_coordinator(store, agent, cfg, tmp_path)
+        explicit = asyncio.create_task(coordinator.review_now(GROUP, actor=OWNER))
+        while not agent.calls:
+            await asyncio.sleep(0)
+
+        disabled = deepcopy(cfg.long_term_memory)
+        disabled.enabled = False
+        coordinator.reload(disabled)
+        agent.release.set()
+        outcome = await explicit
+
+        assert outcome.error in {"cancelled", "disabled"}
+        assert store.status(GROUP).pending_count == 1
 
     asyncio.run(go())
 

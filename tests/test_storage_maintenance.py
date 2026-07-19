@@ -227,16 +227,57 @@ def test_protected_current_job_is_never_inventoried_or_deleted(tmp_path: Path) -
     job_dir = Path(cfg.agent.default_workspace) / cfg.resources.root / "outgoing" / "active"
     _write(job_dir / "result.pdf", b"active")
     maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
-    maintainer.protect_path(job_dir)
+    maintainer.protect_path(job_dir, subtree=True)
 
     assert maintainer.is_protected(job_dir)
     assert maintainer.inventory().candidates["resources"] == []
 
     maintainer.unprotect_path(job_dir)
     candidate = maintainer.inventory().candidates["resources"][0]
-    maintainer.protect_path(job_dir)
+    maintainer.protect_path(job_dir, subtree=True)
     assert maintainer.delete_candidate(candidate) == (0, 0)
     assert job_dir.exists()
+
+
+def test_durable_file_parent_does_not_protect_unrelated_resource_descendants(
+    tmp_path: Path,
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    resources = Path(cfg.agent.default_workspace) / cfg.resources.root
+    database = _write(resources / "memory.sqlite3", b"durable")
+    ordinary = _write(resources / "outgoing" / "ordinary-job" / "result.pdf")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    for path in (
+        database.parent,
+        database,
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+    ):
+        maintainer.protect_path(path)
+
+    candidates = maintainer.inventory(now=2_000_000.0).candidates["resources"]
+
+    assert any(candidate.path == ordinary.parent for candidate in candidates)
+    assert maintainer.is_protected(resources)
+    assert not maintainer.is_protected(ordinary.parent)
+
+
+def test_protected_subtree_blocks_descendants_but_not_unrelated_siblings(
+    tmp_path: Path,
+) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    resources = Path(cfg.agent.default_workspace) / cfg.resources.root
+    active = _write(resources / "outgoing" / "active" / "nested" / "result.pdf")
+    sibling = _write(resources / "outgoing" / "ordinary" / "result.pdf")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    maintainer.protect_path(active.parents[1], subtree=True)
+
+    candidates = maintainer.inventory(now=2_000_000.0).candidates["resources"]
+
+    assert maintainer.is_protected(active)
+    assert not maintainer.is_protected(sibling.parent)
+    assert all(candidate.path != active.parents[1] for candidate in candidates)
+    assert any(candidate.path == sibling.parent for candidate in candidates)
 
 
 def test_inventory_rejects_ancestor_containing_protected_database(tmp_path: Path) -> None:
