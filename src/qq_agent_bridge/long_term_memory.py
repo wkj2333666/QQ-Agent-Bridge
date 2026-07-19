@@ -25,6 +25,7 @@ from .long_term_memory_models import (
     MemoryStatusName,
     MemoryStoreStatus,
     ScopeKind,
+    memory_identity_key,
 )
 from .long_term_memory_schema import SCHEMA_VERSION, migrate
 
@@ -698,15 +699,22 @@ class LongTermMemoryStore:
             proposal.confidence if proposal.confidence is not None else 0.75
         )
         created_at = int(proposal.created_at if proposal.created_at is not None else now)
-        duplicate = conn.execute(
+        sensitivity = proposal.sensitivity or "normal"
+        proposal_key = memory_identity_key(
+            subject_kind=proposal.subject_kind,
+            subject_id=proposal.subject_id,
+            category=category,
+            content=content,
+            sensitivity=sensitivity,
+        )
+        duplicate = None
+        duplicate_rows = conn.execute(
             """
             SELECT * FROM memory_items
             WHERE scope_kind = ? AND scope_id = ?
               AND subject_kind = ? AND subject_id = ? AND category = ?
-              AND lower(trim(content)) = lower(trim(?))
               AND status IN ('active', 'candidate', 'dormant')
             ORDER BY updated_at DESC, id
-            LIMIT 1
             """,
             (
                 scope.kind,
@@ -714,9 +722,22 @@ class LongTermMemoryStore:
                 str(proposal.subject_kind),
                 str(proposal.subject_id),
                 category,
-                content,
             ),
-        ).fetchone()
+        ).fetchall()
+        for row in duplicate_rows:
+            row_key = memory_identity_key(
+                subject_kind=row["subject_kind"],
+                subject_id=row["subject_id"],
+                category=row["category"],
+                content=row["content"],
+                sensitivity=row["sensitivity"],
+            )
+            if row_key[:-1] != proposal_key[:-1]:
+                continue
+            if row_key[-1] != proposal_key[-1]:
+                raise ValueError("memory sensitivity collision")
+            if duplicate is None:
+                duplicate = row
         if duplicate is not None:
             item_id = str(duplicate["id"])
             duplicate_status = str(duplicate["status"])
@@ -780,7 +801,7 @@ class LongTermMemoryStore:
                 confidence,
                 confidence,
                 status,
-                proposal.sensitivity or "normal",
+                sensitivity,
                 proposal.source_kind,
                 int(proposal.explicit_memory),
                 int(proposal.decay_exempt),
