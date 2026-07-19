@@ -42,6 +42,8 @@ from .schedule_parser import (
 from .schedule_store import ScheduleStore
 from .scheduler import Schedule, ScheduleExecutionResult, ScheduleRun, Scheduler
 from .self_knowledge import build_help_reply, build_prompt_self_knowledge, maybe_self_reply
+from .storage_gate import GatedAgentAdapter, StorageActivityGate
+from .storage_maintenance import StorageMaintainer
 from .types import ChatEvent, ParsedCommand
 from .workspace_search import WorkspaceSearch
 from .whisper_runner import WhisperRunner
@@ -98,8 +100,11 @@ class App:
             cfg.bot.self_id,
             cfg.bot.mention_name,
         )
+        self.storage_gate = StorageActivityGate()
         self.agent = build_agent_adapter(cfg)
         self.cursor = self.agent  # compatibility alias for older tests/extensions
+        self.gated_agent = GatedAgentAdapter(self.agent, self.storage_gate)
+        self.storage_maintainer = StorageMaintainer(cfg, self.storage_gate)
         self.search = WorkspaceSearch(cfg)
         self.resources = self._build_resource_manager(cfg)
         self.memory = ConversationMemory(cfg.memory.max_messages, cfg.memory.max_chars)
@@ -129,7 +134,7 @@ class App:
         self.schedule_database_path = self._schedule_database_path(cfg)
         self._scheduler_restart_required = False
         self.schedule_store = ScheduleStore(self.schedule_database_path)
-        self.schedule_nl_parser = NaturalLanguageScheduleParser(cfg, self.agent)
+        self.schedule_nl_parser = NaturalLanguageScheduleParser(cfg, self.gated_agent)
         self.scheduler = Scheduler(
             cfg.scheduler,
             self.schedule_store,
@@ -138,7 +143,7 @@ class App:
         )
         self.proactive = ProactiveSpeaker(
             cfg,
-            self.agent,
+            self.gated_agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
             remember=self._remember_proactive_exchange,
@@ -499,7 +504,7 @@ class App:
         )
         repair_task = asyncio.create_task(
             run_agent(
-                self.agent,
+                self.gated_agent,
                 prompt,
                 self.cfg.agent.default_workspace,
                 "task",
@@ -584,6 +589,8 @@ class App:
             await self._cleanup_policy()
         except Exception:  # noqa: BLE001 - cleanup must not mask the original job outcome
             logger.exception("job cleanup failed job=%s", job.id)
+        finally:
+            self.storage_maintainer.request_pressure_check()
 
     async def _reply_when_done_inner(self, job: Job) -> None:
         if not job.task:
@@ -787,8 +794,10 @@ class App:
             return False, f"[error] 配置重载失败：{type(exc).__name__}"
 
         self.cfg = cfg
+        storage_roots_changed = self.storage_maintainer.reload_config(cfg)
         self.agent = build_agent_adapter(cfg)
         self.cursor = self.agent
+        self.gated_agent = GatedAgentAdapter(self.agent, self.storage_gate)
         self.search = WorkspaceSearch(cfg)
         self.resources = self._build_resource_manager(cfg)
         self.memory.max_messages = cfg.memory.max_messages
@@ -810,7 +819,7 @@ class App:
             self.policy.reload_config(cfg)
         old_schedule_path = self.schedule_database_path
         new_schedule_path = self._schedule_database_path(cfg)
-        self.schedule_nl_parser = NaturalLanguageScheduleParser(cfg, self.agent)
+        self.schedule_nl_parser = NaturalLanguageScheduleParser(cfg, self.gated_agent)
         self.scheduler.reload_config(cfg.scheduler)
         schedule_note = ""
         if new_schedule_path != old_schedule_path:
@@ -826,12 +835,15 @@ class App:
         await self.proactive.stop()
         self.proactive = ProactiveSpeaker(
             cfg,
-            self.agent,
+            self.gated_agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
             remember=self._remember_proactive_exchange,
         )
-        return True, f"配置已重载。OneBot 连接参数变更需要重启。{schedule_note}".strip()
+        storage_note = " 存储根目录变更需要重启。" if storage_roots_changed else ""
+        return True, (
+            f"配置已重载。OneBot 连接参数变更需要重启。{schedule_note}{storage_note}"
+        ).strip()
 
     def _chunk(self, text: str, size: int = 900) -> list[str]:
         # functional chunk
@@ -1696,6 +1708,13 @@ class App:
             self.policy = Policy(self.cfg, self._agent_runner)
             if self.cfg.scheduler.enabled:
                 self.scheduler.initialize()
+        try:
+            await self.storage_maintainer.start()
+        except Exception as exc:  # noqa: BLE001 - maintenance cannot block bridge startup
+            logger.warning(
+                "storage maintenance startup failed error=%s",
+                type(exc).__name__,
+            )
         await self.adapter.start(self._handle)
         if not self.echo_only:
             await self.scheduler.start()
@@ -1704,7 +1723,10 @@ class App:
         except asyncio.CancelledError:
             pass
         finally:
-            await self.scheduler.stop()
+            try:
+                await self.scheduler.stop()
+            except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
+                logger.warning("scheduler shutdown failed error=%s", type(exc).__name__)
             for task in list(self._reply_tasks):
                 task.cancel()
             for task in list(self._heartbeat_tasks):
@@ -1715,17 +1737,34 @@ class App:
                 await asyncio.gather(*self._reply_tasks, return_exceptions=True)
             if self._heartbeat_tasks:
                 await asyncio.gather(*self._heartbeat_tasks, return_exceptions=True)
-            await self._drain_artifact_repair_tasks()
+            try:
+                await self._drain_artifact_repair_tasks()
+            except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
+                logger.warning("artifact repair shutdown failed error=%s", type(exc).__name__)
             if self._schedule_parse_heartbeats:
                 await asyncio.gather(
                     *self._schedule_parse_heartbeats.values(),
                     return_exceptions=True,
                 )
             self._schedule_parse_heartbeats.clear()
-            await self.proactive.stop()
-            await self.adapter.stop()
+            try:
+                await self.proactive.stop()
+            except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
+                logger.warning("proactive shutdown failed error=%s", type(exc).__name__)
+            try:
+                await self.storage_maintainer.stop()
+            except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
+                logger.warning("storage maintenance shutdown failed error=%s", type(exc).__name__)
+            try:
+                await self.adapter.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown is already best effort
+                logger.warning("onebot shutdown failed error=%s", type(exc).__name__)
 
     async def _agent_runner(self, job: Job) -> str:
+        async with self.storage_gate.activity():
+            return await self._agent_runner_inner(job)
+
+    async def _agent_runner_inner(self, job: Job) -> str:
         cmd = job.cmd
         args = job.args
         ev = job.event

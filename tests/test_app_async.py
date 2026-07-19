@@ -20,6 +20,7 @@ from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Job, Policy  # type: ignore
 from qq_agent_bridge.redactor import strip_ansi  # type: ignore
 from qq_agent_bridge.resources import PreparedResource  # type: ignore
+from qq_agent_bridge.storage_gate import GatedAgentAdapter  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource  # type: ignore
 
 
@@ -142,6 +143,7 @@ def make_cfg() -> BridgeConfig:
         dangerous_requires_confirm=True,
     )
     cfg.agent.default_workspace = "/tmp"
+    cfg.storage_maintenance.enabled = False
     return cfg
 
 
@@ -3808,7 +3810,7 @@ def test_artifact_repair_reuses_task_runtime_and_remaining_budget(
 
         assert len(calls) == 1
         agent, prompt, workspace, mode, model, progress, trace_id = calls[0]
-        assert agent is app.agent
+        assert agent is app.gated_agent
         assert workspace == str(tmp_path)
         assert (mode, model, trace_id) == ("task", "repair-model", "artifact-runtime-job-artifact-repair")
         assert progress is None
@@ -4238,4 +4240,196 @@ def test_search_output_does_not_trigger_resource_sending(tmp_path: Path) -> None
         assert adapter.sent_files == []
         assert adapter.sent_images == []
 
+    asyncio.run(go())
+
+
+def test_storage_maintenance_starts_before_onebot_and_stops_after_work() -> None:
+    class LifecycleAdapter(FakeAdapter):
+        async def start(self, _handler: Any) -> None:
+            order.append("onebot-start")
+            started.set()
+
+        async def stop(self) -> None:
+            order.append("onebot-stop")
+
+    async def go() -> None:
+        nonlocal started
+        cfg = make_cfg()
+        cfg.storage_maintenance.enabled = True
+        app = App(cfg)
+        app.adapter = LifecycleAdapter()  # type: ignore[assignment]
+
+        async def maintenance_start() -> None:
+            order.append("maintenance-start")
+
+        async def maintenance_stop() -> None:
+            order.append("maintenance-stop")
+
+        app.storage_maintainer.start = maintenance_start
+        app.storage_maintainer.stop = maintenance_stop
+        task = asyncio.create_task(app.run())
+        await asyncio.wait_for(started.wait(), 0.5)
+        task.cancel()
+        await asyncio.wait_for(task, 0.5)
+
+        assert order[:2] == ["maintenance-start", "onebot-start"]
+        assert order[-2:] == ["maintenance-stop", "onebot-stop"]
+
+    order: list[str] = []
+    started = asyncio.Event()
+    asyncio.run(go())
+
+
+def test_agent_runner_activity_blocks_storage_maintenance() -> None:
+    async def go() -> None:
+        app = App(make_cfg())
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        maintenance_entered = asyncio.Event()
+
+        async def inner(_job: Job) -> str:
+            entered.set()
+            await release.wait()
+            return "done"
+
+        app._agent_runner_inner = inner  # type: ignore[method-assign]
+        job = Job(id="storage-job", cmd="ask", args="hi", event=make_ev("/ask hi"))
+        runner = asyncio.create_task(app._agent_runner(job))
+        await entered.wait()
+
+        async def maintain() -> None:
+            async with app.storage_gate.maintenance():
+                maintenance_entered.set()
+
+        maintenance = asyncio.create_task(maintain())
+        await asyncio.sleep(0)
+        assert not maintenance_entered.is_set()
+        release.set()
+        assert await runner == "done"
+        await asyncio.wait_for(maintenance_entered.wait(), 0.5)
+        await maintenance
+
+    asyncio.run(go())
+
+
+def test_agent_subsystems_use_gated_adapter() -> None:
+    app = App(make_cfg())
+
+    assert isinstance(app.gated_agent, GatedAgentAdapter)
+    assert app.gated_agent.delegate is app.agent
+    assert app.proactive.agent is app.gated_agent
+    assert app.schedule_nl_parser.agent is app.gated_agent
+
+
+def test_reply_cleanup_requests_only_pressure_check() -> None:
+    async def go() -> None:
+        app = App(make_cfg())
+        calls: list[str] = []
+        app.storage_maintainer.request_pressure_check = lambda: calls.append("pressure")
+        job = Job(id="cleanup-job", cmd="ask", args="hi", event=make_ev("/ask hi"))
+
+        await app._cleanup_reply_job(job)
+
+        assert calls == ["pressure"]
+
+    asyncio.run(go())
+
+
+def test_reload_reports_storage_root_change(tmp_path: Path) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.agent.sandbox_home = str(
+            tmp_path / "home" / ".local" / "state" / "qq-agent-bridge" / "old-home"
+        )
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {
+                        "default_workspace": "/tmp",
+                        "sandbox_home": str(
+                            tmp_path
+                            / "home"
+                            / ".local"
+                            / "state"
+                            / "qq-agent-bridge"
+                            / "new-home"
+                        ),
+                    },
+                    "storage_maintenance": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        app = App(cfg, config_path=config_path)
+
+        ok, message = await app._reload_config()
+
+        assert ok
+        assert "存储根目录变更需要重启" in message
+
+    asyncio.run(go())
+
+
+def test_maintenance_start_failure_does_not_block_onebot_start() -> None:
+    class LifecycleAdapter(FakeAdapter):
+        async def start(self, _handler: Any) -> None:
+            started.set()
+
+        async def stop(self) -> None:
+            stopped.set()
+
+    async def go() -> None:
+        app = App(make_cfg())
+        app.adapter = LifecycleAdapter()  # type: ignore[assignment]
+
+        async def broken_start() -> None:
+            raise RuntimeError("maintenance failed")
+
+        app.storage_maintainer.start = broken_start
+        task = asyncio.create_task(app.run())
+        await asyncio.wait_for(started.wait(), 0.5)
+        task.cancel()
+        await asyncio.wait_for(task, 0.5)
+        assert stopped.is_set()
+
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    asyncio.run(go())
+
+
+def test_shutdown_stops_maintenance_even_when_proactive_stop_fails() -> None:
+    class LifecycleAdapter(FakeAdapter):
+        async def start(self, _handler: Any) -> None:
+            started.set()
+
+        async def stop(self) -> None:
+            adapter_stopped.set()
+
+    async def go() -> None:
+        app = App(make_cfg())
+        app.adapter = LifecycleAdapter()  # type: ignore[assignment]
+        app.storage_maintainer.start = async_noop
+        app.storage_maintainer.stop = maintenance_stop
+
+        async def broken_proactive_stop() -> None:
+            raise RuntimeError("proactive stop failed")
+
+        app.proactive.stop = broken_proactive_stop
+        task = asyncio.create_task(app.run())
+        await asyncio.wait_for(started.wait(), 0.5)
+        task.cancel()
+        await asyncio.wait_for(task, 0.5)
+        assert maintenance_stopped.is_set()
+        assert adapter_stopped.is_set()
+
+    async def async_noop() -> None:
+        return None
+
+    async def maintenance_stop() -> None:
+        maintenance_stopped.set()
+
+    started = asyncio.Event()
+    maintenance_stopped = asyncio.Event()
+    adapter_stopped = asyncio.Event()
     asyncio.run(go())
