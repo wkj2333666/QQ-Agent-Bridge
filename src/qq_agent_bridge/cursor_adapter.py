@@ -22,6 +22,7 @@ from .redactor import redact, strip_ansi
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str], Awaitable[None]]
 _HARDENED_HOME = Path("/home/curator")
+_HARDENED_CURSOR_RUNTIME = Path("/opt/qq-agent-curator/cursor")
 _MAX_CURSOR_AUTH_BYTES = 1024 * 1024
 _HARDENED_CLI_CONFIG = {
     "permissions": {
@@ -138,7 +139,11 @@ class CursorAdapter:
             raise ValueError(f"unsupported cursor mode: {mode}")
         cursor_cmd.append(prompt)
         inner_cmd = cursor_cmd
-        if self.env_runner and self.cfg.agent.env_name:
+        if (
+            not self.cfg.agent.hardened_read_only
+            and self.env_runner
+            and self.cfg.agent.env_name
+        ):
             inner_cmd = [self.env_runner, "run", "-n", self.cfg.agent.env_name, *cursor_cmd]
         if self.cfg.agent.use_bwrap:
             return self._build_bwrap_cmd(inner_cmd, workspace, mode)
@@ -151,13 +156,18 @@ class CursorAdapter:
         exposed_workspace = (
             Path("/workspace") if self.cfg.agent.hardened_read_only else workspace_path
         )
+        hardened_runtime: tuple[Path, Path] | None = None
         if self.cfg.agent.hardened_read_only:
+            runtime_root, runtime_binary = self._hardened_cursor_runtime(workspace_path)
+            hardened_binary = _HARDENED_CURSOR_RUNTIME / runtime_binary.relative_to(
+                runtime_root
+            )
+            hardened_runtime = (runtime_root, hardened_binary)
             inner_cmd = self._rewrite_hardened_paths(
                 inner_cmd,
-                home,
-                exposed_home,
                 workspace_path,
                 exposed_workspace,
+                hardened_binary,
             )
         sandbox_home = self._sandbox_home(workspace_path)
         cmd: list[str] = [self.bwrap]
@@ -188,13 +198,32 @@ class CursorAdapter:
                 str(exposed_home),
             ]
         )
+        if hardened_runtime is not None:
+            runtime_root, _runtime_binary = hardened_runtime
+            cmd.extend(
+                [
+                    "--dir",
+                    "/opt",
+                    "--dir",
+                    "/opt/qq-agent-curator",
+                    "--ro-bind",
+                    str(runtime_root),
+                    str(_HARDENED_CURSOR_RUNTIME),
+                ]
+            )
         workspace_flag = "--bind" if mode == "code" else "--ro-bind"
         cmd.extend([workspace_flag, str(workspace_path), str(exposed_workspace)])
         if mode == "task":
             for src, dst in self._task_rw_binds(workspace_path):
                 cmd.extend(["--bind", src, dst])
-        for src, dst in self._cursor_ro_binds(home, exposed_home):
-            cmd.extend(["--ro-bind", src, dst])
+        if not self.cfg.agent.hardened_read_only:
+            for src, dst in self._cursor_ro_binds(home, exposed_home):
+                cmd.extend(["--ro-bind", src, dst])
+        path = (
+            "/usr/local/bin:/usr/bin:/bin"
+            if self.cfg.agent.hardened_read_only
+            else f"{exposed_home}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        )
         cmd.extend(
             [
                 "--chdir",
@@ -204,13 +233,18 @@ class CursorAdapter:
                 str(exposed_home),
                 "--setenv",
                 "PATH",
-                f"{exposed_home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
-                "--setenv",
-                "MAMBA_ROOT_PREFIX",
-                f"{exposed_home}/.local/share/mamba",
-                *inner_cmd,
+                path,
             ]
         )
+        if not self.cfg.agent.hardened_read_only:
+            cmd.extend(
+                [
+                    "--setenv",
+                    "MAMBA_ROOT_PREFIX",
+                    f"{exposed_home}/.local/share/mamba",
+                ]
+            )
+        cmd.extend(inner_cmd)
         return cmd
 
     def _system_ro_binds(self) -> list[tuple[str, str]]:
@@ -241,22 +275,13 @@ class CursorAdapter:
     def _rewrite_hardened_paths(
         self,
         inner_cmd: list[str],
-        home: Path,
-        exposed_home: Path,
         workspace: Path,
         exposed_workspace: Path,
+        hardened_binary: Path,
     ) -> list[str]:
-        replacements: dict[str, str] = {}
-        for executable in (self.env_runner, self.binary):
-            if not executable:
-                continue
-            path = Path(executable)
-            try:
-                relative = path.relative_to(home)
-            except ValueError:
-                continue
-            replacements[executable] = str(exposed_home / relative)
-        rewritten = [replacements.get(part, part) for part in inner_cmd]
+        rewritten = [
+            str(hardened_binary) if part == self.binary else part for part in inner_cmd
+        ]
         try:
             workspace_index = rewritten.index("--workspace") + 1
         except ValueError:
@@ -264,6 +289,23 @@ class CursorAdapter:
         if workspace_index < len(rewritten) and rewritten[workspace_index] == str(workspace):
             rewritten[workspace_index] = str(exposed_workspace)
         return rewritten
+
+    def _hardened_cursor_runtime(self, workspace: Path) -> tuple[Path, Path]:
+        binary = Path(self.binary).expanduser().resolve(strict=True)
+        runtime_root = binary.parent
+        required = (binary, runtime_root / "node", runtime_root / "index.js")
+        if self._is_tmp_path(runtime_root) or self._is_relative_to(runtime_root, workspace):
+            raise ValueError("hardened cursor runtime is not trusted")
+        root_stat = runtime_root.stat()
+        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_mode & 0o022:
+            raise ValueError("hardened cursor runtime is not trusted")
+        for artifact in required:
+            artifact_stat = artifact.stat()
+            if not stat.S_ISREG(artifact_stat.st_mode) or artifact_stat.st_mode & 0o022:
+                raise ValueError("hardened cursor runtime is not trusted")
+        if not os.access(binary, os.X_OK) or not os.access(runtime_root / "node", os.X_OK):
+            raise ValueError("hardened cursor runtime is unavailable")
+        return runtime_root, binary
 
     def _sandbox_home(self, workspace: Path) -> Path:
         configured = Path(self.cfg.agent.sandbox_home).expanduser()
@@ -285,6 +327,7 @@ class CursorAdapter:
             if mode == "task":
                 self._ensure_workspace_child_dir(self._task_outgoing_dir(workspace_path), workspace_path)
             if self.cfg.agent.hardened_read_only:
+                self._hardened_cursor_runtime(workspace_path)
                 self._prepare_hardened_cursor_state(sandbox_home)
             else:
                 self._seed_cursor_state(sandbox_home)
