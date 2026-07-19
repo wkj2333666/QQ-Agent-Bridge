@@ -991,6 +991,7 @@ class App:
         old_schedule_path = self.schedule_database_path
         new_schedule_path = self._schedule_database_path(cfg)
         scheduler_was_running = self._scheduler_is_running()
+        proactive_timer_snapshot = self.proactive.transition_timer_snapshot()
         schedule_note = ""
         try:
             self.scheduler.reload_config(cfg.scheduler)
@@ -1002,19 +1003,31 @@ class App:
             else:
                 await self.scheduler.stop()
             await self.proactive.stop()
-        except Exception as exc:  # noqa: BLE001 - roll back every live transition
-            await self._restore_scheduler_after_failed_reload(
+        except BaseException as exc:  # cancellation must also restore the old runtime
+            await self._rollback_reload_transitions(
                 old_cfg,
                 was_running=scheduler_was_running,
+                proactive_timer_snapshot=proactive_timer_snapshot,
             )
+            if not isinstance(exc, Exception):
+                raise
             logger.warning("config reload transition failed error=%s", type(exc).__name__)
             return False, f"[error] 配置重载失败：{type(exc).__name__}"
 
-        memory_ok, memory_note = await self._reload_long_term_memory(cfg)
-        if not memory_ok:
-            await self._restore_scheduler_after_failed_reload(
+        try:
+            memory_ok, memory_note = await self._reload_long_term_memory(cfg)
+        except BaseException:
+            await self._rollback_reload_transitions(
                 old_cfg,
                 was_running=scheduler_was_running,
+                proactive_timer_snapshot=proactive_timer_snapshot,
+            )
+            raise
+        if not memory_ok:
+            await self._rollback_reload_transitions(
+                old_cfg,
+                was_running=scheduler_was_running,
+                proactive_timer_snapshot=proactive_timer_snapshot,
             )
             return False, f"[error] 配置重载失败：{memory_note}"
 
@@ -1062,6 +1075,19 @@ class App:
         loop_task = getattr(self.scheduler, "_loop_task", None)
         return loop_task is not None and not loop_task.done()
 
+    async def _rollback_reload_transitions(
+        self,
+        cfg: BridgeConfig,
+        *,
+        was_running: bool,
+        proactive_timer_snapshot: tuple[str, ...],
+    ) -> None:
+        self.proactive.restore_transition_timers(proactive_timer_snapshot)
+        await self._restore_scheduler_after_failed_reload(
+            cfg,
+            was_running=was_running,
+        )
+
     async def _restore_scheduler_after_failed_reload(
         self,
         cfg: BridgeConfig,
@@ -1070,10 +1096,9 @@ class App:
     ) -> None:
         try:
             self.scheduler.reload_config(cfg.scheduler)
+            await self.scheduler.stop()
             if was_running:
                 await self.scheduler.start()
-            else:
-                await self.scheduler.stop()
         except Exception as exc:  # noqa: BLE001 - preserve the original reload failure
             logger.warning("scheduler reload rollback failed error=%s", type(exc).__name__)
 
