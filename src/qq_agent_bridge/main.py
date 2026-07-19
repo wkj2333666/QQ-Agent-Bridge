@@ -174,6 +174,7 @@ class App:
             long_term_context=self._retrieve_long_term_context,
             remember=self._remember_proactive_exchange,
         )
+        self._reload_lock = asyncio.Lock()
 
     async def _handle(self, ev: ChatEvent) -> None:
         if self._is_self_event(ev):
@@ -963,6 +964,10 @@ class App:
         )
 
     async def _reload_config(self) -> tuple[bool, str]:
+        async with self._reload_lock:
+            return await self._reload_config_locked()
+
+    async def _reload_config_locked(self) -> tuple[bool, str]:
         try:
             cfg = BridgeConfig.load(self.config_path)
         except Exception as exc:  # noqa: BLE001
@@ -991,7 +996,7 @@ class App:
         old_schedule_path = self.schedule_database_path
         new_schedule_path = self._schedule_database_path(cfg)
         scheduler_was_running = self._scheduler_is_running()
-        proactive_timer_snapshot = self.proactive.transition_timer_snapshot()
+        proactive_handoff = self.proactive.begin_handoff()
         schedule_note = ""
         try:
             self.scheduler.reload_config(cfg.scheduler)
@@ -1007,7 +1012,7 @@ class App:
             await self._rollback_reload_transitions(
                 old_cfg,
                 was_running=scheduler_was_running,
-                proactive_timer_snapshot=proactive_timer_snapshot,
+                proactive_handoff=proactive_handoff,
             )
             if not isinstance(exc, Exception):
                 raise
@@ -1020,14 +1025,14 @@ class App:
             await self._rollback_reload_transitions(
                 old_cfg,
                 was_running=scheduler_was_running,
-                proactive_timer_snapshot=proactive_timer_snapshot,
+                proactive_handoff=proactive_handoff,
             )
             raise
         if not memory_ok:
             await self._rollback_reload_transitions(
                 old_cfg,
                 was_running=scheduler_was_running,
-                proactive_timer_snapshot=proactive_timer_snapshot,
+                proactive_handoff=proactive_handoff,
             )
             return False, f"[error] 配置重载失败：{memory_note}"
 
@@ -1061,6 +1066,7 @@ class App:
             self._scheduler_restart_required = True
         else:
             self._scheduler_restart_required = False
+        self.proactive.commit_handoff(proactive_handoff, new_proactive)
         self.proactive = new_proactive
         storage_note = " 存储根目录变更需要重启。" if storage_roots_changed else ""
         return True, (
@@ -1080,9 +1086,9 @@ class App:
         cfg: BridgeConfig,
         *,
         was_running: bool,
-        proactive_timer_snapshot: tuple[str, ...],
+        proactive_handoff: int,
     ) -> None:
-        self.proactive.restore_transition_timers(proactive_timer_snapshot)
+        await self.proactive.rollback_handoff(proactive_handoff)
         await self._restore_scheduler_after_failed_reload(
             cfg,
             was_running=was_running,
