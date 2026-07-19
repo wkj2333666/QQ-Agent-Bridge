@@ -605,13 +605,13 @@ def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap() -> None:
         cmd,
         "--ro-bind",
         "/private/curator",
-        "/private/curator",
+        "/workspace",
     )
     assert not _has_bind(
         cmd,
         "--bind",
         "/private/curator",
-        "/private/curator",
+        "/workspace",
     )
     assert cmd[cmd.index("--mode") + 1] == "ask"
     assert cmd[cmd.index("--sandbox") + 1] == "enabled"
@@ -764,6 +764,136 @@ def test_bwrap_prepare_copies_cursor_state_to_sandbox_home(tmp_path: Path, monke
     assert (sandbox_home / ".config" / "cursor" / "auth.json").read_text(encoding="utf-8") == '{"token":"secret"}'
     assert oct(sandbox_home.stat().st_mode & 0o777) == "0o700"
     assert oct((sandbox_home / ".config" / "cursor" / "auth.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "HOSTILE-NORMAL-CURSOR-STATE-9c36"
+    fake_home = tmp_path / "real-home"
+    fake_home.mkdir(mode=0o700)
+    normal_cursor = fake_home / ".cursor"
+    normal_cursor.mkdir()
+    (normal_cursor / "cli-config.json").write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["Shell(*)", marker]},
+                "mcpServers": {"hostile": marker},
+                "autoReview": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (normal_cursor / "agent-cli-state.json").write_text(
+        json.dumps({"plugins": [marker], "toolApprovals": {marker: True}}),
+        encoding="utf-8",
+    )
+    (normal_cursor / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"hostile": {"command": marker}}}),
+        encoding="utf-8",
+    )
+    (normal_cursor / "plugins").mkdir()
+    (normal_cursor / "plugins" / marker).write_text(marker, encoding="utf-8")
+    auth_file = fake_home / ".config" / "cursor" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text('{"token":"minimal-auth"}', encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    state_root = fake_home / ".local" / "state" / "qq-agent-bridge"
+    workspace = state_root / "curator-workspace-test"
+    workspace.mkdir(parents=True, mode=0o700)
+    normal_sandbox_home = state_root / "agent-home"
+    normal_sandbox_home.mkdir(mode=0o700)
+    (normal_sandbox_home / "normal-marker").write_text(marker, encoding="utf-8")
+    hardened_home = state_root / "curator-home-test"
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(hardened_home)
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_has_trusted_bwrap", lambda _workspace: True)
+
+    error = adapter._prepare_bwrap(str(workspace), "ask")  # noqa: SLF001
+
+    assert error is None
+    assert (hardened_home / ".config" / "cursor" / "auth.json").read_text(
+        encoding="utf-8"
+    ) == '{"token":"minimal-auth"}'
+    assert (
+        hardened_home / ".config" / "cursor" / "auth.json"
+    ).stat().st_mode & 0o777 == 0o600
+    cli_policy = json.loads((hardened_home / ".cursor" / "cli-config.json").read_text())
+    cli_state = json.loads((hardened_home / ".cursor" / "agent-cli-state.json").read_text())
+    mcp_policy = json.loads((hardened_home / ".cursor" / "mcp.json").read_text())
+    assert cli_policy == {
+        "permissions": {
+            "allow": [],
+            "deny": ["Shell(*)", "Write(*)"],
+        }
+    }
+    assert cli_state == {
+        "autoReview": False,
+        "plugins": {},
+        "toolApprovals": {},
+    }
+    assert mcp_policy == {"mcpServers": {}}
+    assert not (hardened_home / ".cursor" / "projects").exists()
+    assert marker not in "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in hardened_home.rglob("*")
+        if path.is_file()
+    )
+
+    cmd = adapter._build_cmd("curate", str(workspace), "ask", model="auto")  # noqa: SLF001
+    rendered = "\0".join(cmd)
+    assert marker not in rendered
+    assert str(normal_sandbox_home) not in rendered
+    assert _has_bind(cmd, "--bind", str(hardened_home), "/home/curator")
+    assert not any(
+        Path(target).is_relative_to(fake_home)
+        for flag, _source, target in _mounts(cmd)
+        if flag in {"--bind", "--ro-bind"}
+    )
+    assert cmd[cmd.index("--workspace") + 1] == "/workspace"
+    assert cmd[cmd.index("--chdir") + 1] == "/workspace"
+
+    (hardened_home / ".cursor" / "cli-config.json").write_text(marker, encoding="utf-8")
+    (hardened_home / ".cursor" / "projects" / "persisted").mkdir(parents=True)
+    (hardened_home / ".cursor" / "projects" / "persisted" / "state").write_text(
+        marker, encoding="utf-8"
+    )
+    assert adapter._prepare_bwrap(str(workspace), "ask") is None  # noqa: SLF001
+    assert (
+        json.loads((hardened_home / ".cursor" / "cli-config.json").read_text())
+        == cli_policy
+    )
+    assert not (hardened_home / ".cursor" / "projects").exists()
+
+
+def test_hardened_prepare_fails_closed_without_safe_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "MISSING-HARDENED-AUTH-MARKER"
+    fake_home = tmp_path / marker
+    fake_home.mkdir(mode=0o700)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    workspace = fake_home / ".local" / "state" / "qq-agent-bridge" / "workspace"
+    workspace.mkdir(parents=True, mode=0o700)
+    hardened_home = workspace.parent / "curator-home"
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(hardened_home)
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_has_trusted_bwrap", lambda _workspace: True)
+
+    with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.cursor_adapter"):
+        error = adapter._prepare_bwrap(str(workspace), "ask")  # noqa: SLF001
+
+    assert error == "[error] 助手沙箱未配置"
+    assert marker not in caplog.text
+    assert not hardened_home.exists() or tuple(hardened_home.iterdir()) == ()
 
 
 def test_bwrap_accepts_private_persistent_sandbox_home(
@@ -1318,6 +1448,14 @@ def _has_bind(cmd: list[str], flag: str, source: str, target: str) -> bool:
         if item == flag and cmd[idx + 1] == source and cmd[idx + 2] == target:
             return True
     return False
+
+
+def _mounts(cmd: list[str]) -> list[tuple[str, str, str]]:
+    mounts: list[tuple[str, str, str]] = []
+    for index, part in enumerate(cmd[:-2]):
+        if part in {"--bind", "--ro-bind"}:
+            mounts.append((part, cmd[index + 1], cmd[index + 2]))
+    return mounts
 
 
 def _rw_bind_sources(cmd: list[str]) -> list[str]:

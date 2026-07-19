@@ -21,6 +21,20 @@ from .redactor import redact, strip_ansi
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str], Awaitable[None]]
+_HARDENED_HOME = Path("/home/curator")
+_MAX_CURSOR_AUTH_BYTES = 1024 * 1024
+_HARDENED_CLI_CONFIG = {
+    "permissions": {
+        "allow": [],
+        "deny": ["Shell(*)", "Write(*)"],
+    }
+}
+_HARDENED_AGENT_STATE = {
+    "autoReview": False,
+    "plugins": {},
+    "toolApprovals": {},
+}
+_HARDENED_MCP_CONFIG = {"mcpServers": {}}
 
 _OUTGOING_DIRECTIVE_RE = re.compile(
     r"^\s*QQBOT_SEND_(?:IMAGE|FILE|VOICE|AUDIO)\s*:\s*.+?\s*$",
@@ -132,7 +146,19 @@ class CursorAdapter:
 
     def _build_bwrap_cmd(self, inner_cmd: list[str], workspace: str, mode: str) -> list[str]:
         home = Path.home()
+        exposed_home = _HARDENED_HOME if self.cfg.agent.hardened_read_only else home
         workspace_path = Path(workspace).expanduser().resolve(strict=False)
+        exposed_workspace = (
+            Path("/workspace") if self.cfg.agent.hardened_read_only else workspace_path
+        )
+        if self.cfg.agent.hardened_read_only:
+            inner_cmd = self._rewrite_hardened_paths(
+                inner_cmd,
+                home,
+                exposed_home,
+                workspace_path,
+                exposed_workspace,
+            )
         sandbox_home = self._sandbox_home(workspace_path)
         cmd: list[str] = [self.bwrap]
 
@@ -159,29 +185,29 @@ class CursorAdapter:
                 "/tmp",
                 "--bind",
                 str(sandbox_home),
-                str(home),
+                str(exposed_home),
             ]
         )
         workspace_flag = "--bind" if mode == "code" else "--ro-bind"
-        cmd.extend([workspace_flag, str(workspace_path), str(workspace_path)])
+        cmd.extend([workspace_flag, str(workspace_path), str(exposed_workspace)])
         if mode == "task":
             for src, dst in self._task_rw_binds(workspace_path):
                 cmd.extend(["--bind", src, dst])
-        for src, dst in self._cursor_ro_binds(home):
+        for src, dst in self._cursor_ro_binds(home, exposed_home):
             cmd.extend(["--ro-bind", src, dst])
         cmd.extend(
             [
                 "--chdir",
-                str(workspace_path),
+                str(exposed_workspace),
                 "--setenv",
                 "HOME",
-                str(home),
+                str(exposed_home),
                 "--setenv",
                 "PATH",
-                f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                f"{exposed_home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
                 "--setenv",
                 "MAMBA_ROOT_PREFIX",
-                f"{home}/.local/share/mamba",
+                f"{exposed_home}/.local/share/mamba",
                 *inner_cmd,
             ]
         )
@@ -198,7 +224,7 @@ class CursorAdapter:
         ]
         return [(path, path) for path in candidates if Path(path).exists()]
 
-    def _cursor_ro_binds(self, home: Path) -> list[tuple[str, str]]:
+    def _cursor_ro_binds(self, home: Path, exposed_home: Path) -> list[tuple[str, str]]:
         candidates = [
             home / ".local/bin",
             home / ".local/share/cursor-agent",
@@ -206,7 +232,38 @@ class CursorAdapter:
             home / ".mambarc",
             home / ".condarc",
         ]
-        return [(str(path), str(path)) for path in candidates if path.exists()]
+        return [
+            (str(path), str(exposed_home / path.relative_to(home)))
+            for path in candidates
+            if path.exists()
+        ]
+
+    def _rewrite_hardened_paths(
+        self,
+        inner_cmd: list[str],
+        home: Path,
+        exposed_home: Path,
+        workspace: Path,
+        exposed_workspace: Path,
+    ) -> list[str]:
+        replacements: dict[str, str] = {}
+        for executable in (self.env_runner, self.binary):
+            if not executable:
+                continue
+            path = Path(executable)
+            try:
+                relative = path.relative_to(home)
+            except ValueError:
+                continue
+            replacements[executable] = str(exposed_home / relative)
+        rewritten = [replacements.get(part, part) for part in inner_cmd]
+        try:
+            workspace_index = rewritten.index("--workspace") + 1
+        except ValueError:
+            return rewritten
+        if workspace_index < len(rewritten) and rewritten[workspace_index] == str(workspace):
+            rewritten[workspace_index] = str(exposed_workspace)
+        return rewritten
 
     def _sandbox_home(self, workspace: Path) -> Path:
         configured = Path(self.cfg.agent.sandbox_home).expanduser()
@@ -227,8 +284,11 @@ class CursorAdapter:
             self._ensure_private_sandbox_home(sandbox_home, workspace_path)
             if mode == "task":
                 self._ensure_workspace_child_dir(self._task_outgoing_dir(workspace_path), workspace_path)
-            self._seed_cursor_state(sandbox_home)
-            self._seed_workspace_trust(sandbox_home, workspace_path)
+            if self.cfg.agent.hardened_read_only:
+                self._prepare_hardened_cursor_state(sandbox_home)
+            else:
+                self._seed_cursor_state(sandbox_home)
+                self._seed_workspace_trust(sandbox_home, workspace_path)
         except OSError as exc:
             logger.warning("sandbox preparation failed: %s", type(exc).__name__)
             return "[error] 助手沙箱未配置"
@@ -366,6 +426,75 @@ class CursorAdapter:
             target = sandbox_home / relative
             self._ensure_private_child_dir(sandbox_home, relative.parent)
             self._write_private_file(target, source.read_bytes())
+
+    def _prepare_hardened_cursor_state(self, sandbox_home: Path) -> None:
+        auth_payload = self._read_cursor_auth()
+        self._reset_private_home(sandbox_home)
+        files = (
+            (Path(".cursor/cli-config.json"), self._json_bytes(_HARDENED_CLI_CONFIG)),
+            (Path(".cursor/agent-cli-state.json"), self._json_bytes(_HARDENED_AGENT_STATE)),
+            (Path(".cursor/mcp.json"), self._json_bytes(_HARDENED_MCP_CONFIG)),
+            (Path(".config/cursor/auth.json"), auth_payload),
+        )
+        for relative, payload in files:
+            self._ensure_private_child_dir(sandbox_home, relative.parent)
+            self._write_private_file(sandbox_home / relative, payload)
+
+    def _read_cursor_auth(self) -> bytes:
+        home = Path.home()
+        relative = Path(".config/cursor/auth.json")
+        current = home
+        for part in relative.parts[:-1]:
+            current = current / part
+            st = current.lstat()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise ValueError("cursor authentication path is unsafe")
+            if st.st_uid != os.getuid():
+                raise ValueError("cursor authentication path is not owned")
+        source = home / relative
+        source_stat = source.lstat()
+        if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+            raise ValueError("cursor authentication artifact is unsafe")
+        if source_stat.st_uid != os.getuid() or source_stat.st_size > _MAX_CURSOR_AUTH_BYTES:
+            raise ValueError("cursor authentication artifact is unavailable")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(source, flags)
+        try:
+            opened_stat = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or opened_stat.st_uid != os.getuid()
+                or opened_stat.st_ino != source_stat.st_ino
+                or opened_stat.st_dev != source_stat.st_dev
+            ):
+                raise ValueError("cursor authentication artifact changed")
+            chunks: list[bytes] = []
+            remaining = _MAX_CURSOR_AUTH_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+        finally:
+            os.close(fd)
+        if not payload or len(payload) > _MAX_CURSOR_AUTH_BYTES:
+            raise ValueError("cursor authentication artifact is unavailable")
+        return payload
+
+    def _reset_private_home(self, sandbox_home: Path) -> None:
+        for child in sandbox_home.iterdir():
+            metadata = child.lstat()
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+    def _json_bytes(self, payload: dict[str, Any]) -> bytes:
+        return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     def _seed_workspace_trust(self, sandbox_home: Path, workspace: Path) -> None:
         project_dir = sandbox_home / ".cursor/projects" / self._cursor_project_dir_name(workspace)
@@ -819,7 +948,7 @@ class CustomCommandAdapter(CursorAdapter):
     def _stream_text_from_line(self, line: str) -> str:
         return line
 
-    def _cursor_ro_binds(self, home: Path) -> list[tuple[str, str]]:
+    def _cursor_ro_binds(self, home: Path, exposed_home: Path) -> list[tuple[str, str]]:
         return []
 
     def _seed_cursor_state(self, sandbox_home: Path) -> None:
