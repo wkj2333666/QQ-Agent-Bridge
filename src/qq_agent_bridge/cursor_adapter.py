@@ -291,21 +291,48 @@ class CursorAdapter:
         return rewritten
 
     def _hardened_cursor_runtime(self, workspace: Path) -> tuple[Path, Path]:
-        binary = Path(self.binary).expanduser().resolve(strict=True)
+        locator = Path(self.binary).expanduser()
+        if not locator.is_absolute():
+            raise ValueError("hardened cursor runtime is not trusted")
+        self._validate_runtime_path(locator.parent, ownership=False)
+        binary = locator.resolve(strict=True)
         runtime_root = binary.parent
         required = (binary, runtime_root / "node", runtime_root / "index.js")
         if self._is_tmp_path(runtime_root) or self._is_relative_to(runtime_root, workspace):
             raise ValueError("hardened cursor runtime is not trusted")
-        root_stat = runtime_root.stat()
-        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_mode & 0o022:
-            raise ValueError("hardened cursor runtime is not trusted")
+        self._validate_runtime_path(runtime_root, ownership=True)
         for artifact in required:
-            artifact_stat = artifact.stat()
-            if not stat.S_ISREG(artifact_stat.st_mode) or artifact_stat.st_mode & 0o022:
+            artifact_stat = self._runtime_lstat(artifact)
+            if (
+                stat.S_ISLNK(artifact_stat.st_mode)
+                or not stat.S_ISREG(artifact_stat.st_mode)
+                or artifact_stat.st_uid not in {0, os.getuid()}
+                or artifact_stat.st_mode & 0o022
+            ):
                 raise ValueError("hardened cursor runtime is not trusted")
         if not os.access(binary, os.X_OK) or not os.access(runtime_root / "node", os.X_OK):
             raise ValueError("hardened cursor runtime is unavailable")
         return runtime_root, binary
+
+    def _validate_runtime_path(self, path: Path, *, ownership: bool) -> None:
+        if not path.is_absolute():
+            raise ValueError("hardened cursor runtime is not trusted")
+        current = Path(path.anchor)
+        components = (current,)
+        for part in path.parts[1:]:
+            current /= part
+            components += (current,)
+        for component in components:
+            metadata = self._runtime_lstat(component)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("hardened cursor runtime is not trusted")
+            if ownership and (
+                metadata.st_uid not in {0, os.getuid()} or metadata.st_mode & 0o022
+            ):
+                raise ValueError("hardened cursor runtime is not trusted")
+
+    def _runtime_lstat(self, path: Path) -> os.stat_result:
+        return path.lstat()
 
     def _sandbox_home(self, workspace: Path) -> Path:
         configured = Path(self.cfg.agent.sandbox_home).expanduser()
