@@ -384,15 +384,14 @@ reinforce
 contradict
 merge
 mark_candidate
-forget
 ```
 
-The automatic curator may only propose `forget` for a stored expiry that has actually
-elapsed or for resolved same-subject/category replacement items whose content is also
-affirmatively supported by the cited source batch. A fabricated, unrelated, or merely
-named related ID grants no delete authority. This proof remains mandatory when an
-authorized user triggers `/memory review now`. User-requested hard deletion is handled
-by the deterministic command service and does not depend on model permission.
+The automatic curator never has hard-delete authority, including when an authorized
+user triggers `/memory review now`. Replacement and correction use validated `revise`,
+`contradict`, or `merge` semantics. User-requested `/memory forget` and `/memory clear`
+are handled by the deterministic command service, and item expiry is handled by
+store-owned maintenance; neither path depends on model permission. The validator and
+transactional commit layer both reject curator-originated `forget` proposals.
 
 ## Validation and Failure Semantics
 

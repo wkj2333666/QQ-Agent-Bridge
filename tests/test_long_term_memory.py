@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import importlib
 from pathlib import Path
 import sqlite3
@@ -378,6 +379,64 @@ def test_commit_review_is_atomic_and_consumes_only_selected_scoped_sources(
     assert [source.id for source in store.pending_sources(GROUP_A, 10)] == [second]
     assert store.status(GROUP_A).active_count == 1
     assert store.status(GROUP_A).pending_count == 1
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        MemoryProposal(
+            operation="forget",
+            item_id="TARGET",
+            actor_class="curator",
+        ),
+        MemoryProposal(
+            operation="forget",
+            item_id="TARGET",
+            actor_class="user",
+            evidence_required=True,
+        ),
+    ],
+    ids=["curator-actor", "curator-evidence-provenance"],
+)
+def test_commit_review_rejects_curator_forget_and_preserves_source_atomically(
+    store: LongTermMemoryStore,
+    proposal: MemoryProposal,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    seed_source = store.collect(
+        _source(GROUP_A, "seed", "user-a", "u1 works in finance")
+    )
+    assert seed_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (seed_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                category="project",
+                content="u1 works in finance",
+            ),
+        ),
+    )[0]
+    review_source = store.collect(
+        _source(
+            GROUP_A,
+            "review",
+            "user-a",
+            "u1 works in finance and u1 lives in Paris",
+        )
+    )
+    assert review_source is not None
+    forged = replace(proposal, item_id=target.id)
+
+    with pytest.raises(ValueError, match="curator forget"):
+        store.commit_review(GROUP_A, (review_source,), (forged,))
+
+    assert store.get_item(GROUP_A, target.id) == target
+    assert [value.id for value in store.pending_sources(GROUP_A, 10)] == [
+        review_source
+    ]
 
 
 def test_per_source_failure_deadlines_are_atomic(

@@ -530,11 +530,22 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "Don’t remember u1 prefers paper reports.",
         'The sentence "u1 prefers paper reports" is only an example.',
         "It is false that u1 prefers paper reports.",
+        "It isn't true that u1 prefers paper reports.",
+        "It isn’t true that u1 prefers paper reports.",
         "I deny that u1 prefers paper reports.",
+        "For example, u1 prefers paper reports.",
+        "For instance: u1 prefers paper reports.",
+        "Hypothetically, u1 prefers paper reports.",
+        "Suppose u1 prefers paper reports.",
+        "If u1 prefers paper reports, the dashboard would change.",
         "不要把“u1 prefers paper reports”记为长期记忆。",
         "不 要 记 住 u1 prefers paper reports。",
         "请忘记 u1 prefers paper reports。",
         "并非 u1 prefers paper reports。",
+        "例如：u1 prefers paper reports。",
+        "比 如，u1 prefers paper reports。",
+        "假设 u1 prefers paper reports。",
+        "如果 u1 prefers paper reports，就更新报表。",
     ],
     ids=[
         "quoted-opt-out",
@@ -543,11 +554,22 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "curly-dont",
         "quoted-example",
         "false-that",
+        "isnt-true",
+        "curly-isnt-true",
         "deny-that",
+        "english-example",
+        "english-instance",
+        "english-hypothetical",
+        "english-suppose",
+        "english-if",
         "chinese-opt-out",
         "spaced-chinese-opt-out",
         "chinese-forget",
         "chinese-negation",
+        "chinese-example",
+        "spaced-chinese-example",
+        "chinese-suppose",
+        "chinese-if",
     ],
 )
 def test_evidence_binding_rejects_non_affirmative_context_regardless_of_confidence(
@@ -996,6 +1018,21 @@ def test_mixed_language_credential_assignments_are_unconditionally_rejected(
         "ＡＷＳ＿ＡＣＣＥＳＳ＿ＫＥＹ＿ＩＤ＝ＡＫＩＡＩＯＳＦＯＤＮＮ７ＥＸＡＭＰＬＥ",
         "Access Key ID is AKIAIOSFODNN7EXAMPLE",
         "客户端密钥就是 opaque-client-secret",
+        "我的登录密码改成 hunter2value",
+        "我的登录密码改为 hunter2value",
+        "mi contraseña es hunter2value",
+        "mi clave cambió a hunter2value",
+        "パスワードは hunter2value",
+        "パスワード：hunter2value",
+        "API\u200b key is abcdefghijklmnop",
+        "A\u200bP\u200dI\u2060 key is abcdefghijklmnop",
+        "ＡＰＩ\u200b＿ＫＥＹ＝ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐ",
+        "mot de passe est hunter2value",
+        "Passwort ist hunter2value",
+        "senha é hunter2value",
+        "пароль: hunter2value",
+        "비밀번호는 hunter2value",
+        "GOOGLE_APPLICATION_CREDENTIALS=opaquevalue123456",
     ],
     ids=[
         "chinese-jiushi",
@@ -1005,6 +1042,21 @@ def test_mixed_language_credential_assignments_are_unconditionally_rejected(
         "fullwidth-aws-access-key-id",
         "access-key-id-label",
         "chinese-client-secret-jiushi",
+        "chinese-changed-to",
+        "chinese-changed-to-variant",
+        "spanish-password",
+        "spanish-changed-to",
+        "japanese-password-wa",
+        "japanese-password-colon",
+        "zero-width-api-key",
+        "multiple-format-controls",
+        "fullwidth-zero-width-env",
+        "french-password",
+        "german-password",
+        "portuguese-password",
+        "russian-password",
+        "korean-password",
+        "common-credentials-env",
     ],
 )
 def test_unicode_and_access_key_credentials_are_unconditionally_rejected(
@@ -1275,9 +1327,15 @@ def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
         "我的名字叫：张三",
         "我 叫 ： 张三",
         "我的 名字 叫 : 张三",
+        "我的姓名：张三",
+        "姓名：张三",
+        "姓 名 ： 张三",
         "我家住北京市海淀区中关村大街27号",
         "我家住：北京市海淀区中关村大街27号",
         "我家住 北京市 海淀区 中关村大街 27号",
+        "家庭地址：北京市海淀区中关村大街27号",
+        "家庭 地址 : 北京市 海淀区 中关村大街 27号",
+        "家庭住址＝北京市海淀区中关村大街27号",
     ],
     ids=[
         "name-colon",
@@ -1285,9 +1343,15 @@ def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
         "name-verb-colon",
         "name-token-spacing",
         "name-phrase-spacing",
+        "my-name-label",
+        "name-label",
+        "spaced-name-label",
         "home-lives",
         "home-lives-colon",
         "home-lives-spacing",
+        "family-address-label",
+        "spaced-family-address-label",
+        "family-residence-fullwidth-equals",
     ],
 )
 def test_punctuated_legal_names_and_precise_home_addresses_are_sensitive(
@@ -2667,31 +2731,37 @@ def test_background_forget_requires_resolved_deterministic_authority(
     assert store.get_item(GROUP, target.id) is not None
 
 
-@pytest.mark.parametrize("authority", ["expired", "replacement"])
-def test_background_forget_accepts_resolved_expiry_or_replacement_proof(
+@pytest.mark.parametrize("claimed_authority", ["expired", "replacement"])
+def test_background_curator_forget_rejects_expiry_and_replacement_claims(
     store: LongTermMemoryStore,
     cfg: BridgeConfig,
-    authority: str,
+    claimed_authority: str,
 ) -> None:
     target = seed_item(
         store,
         MemoryProposal.add(
             subject_kind="user",
             subject_id="u1",
-            category="preference",
-            content="u1 prefers paper reports",
-            expires_at=1 if authority == "expired" else None,
+            category=(
+                "identity" if claimed_authority == "replacement" else "preference"
+            ),
+            content=(
+                "u1 works in finance"
+                if claimed_authority == "replacement"
+                else "u1 prefers paper reports"
+            ),
+            expires_at=1 if claimed_authority == "expired" else None,
         ),
     )
     related_ids: tuple[str, ...] = ()
-    if authority == "replacement":
+    if claimed_authority == "replacement":
         replacement = seed_item(
             store,
             MemoryProposal.add(
                 subject_kind="user",
                 subject_id="u1",
-                category="preference",
-                content="u1 prefers digital reports",
+                category="identity",
+                content="u1 lives in Paris",
             ),
             message_id="valid-replacement",
         )
@@ -2702,8 +2772,8 @@ def test_background_forget_accepts_resolved_expiry_or_replacement_proof(
         message_id="m41",
         sender_id="u1",
         text=(
-            "u1 prefers digital reports; this replaces u1 prefers paper reports"
-            if authority == "replacement"
+            "u1 works in finance and u1 lives in Paris"
+            if claimed_authority == "replacement"
             else "u1 prefers paper reports"
         ),
         message_timestamp=100,
@@ -2721,10 +2791,9 @@ def test_background_forget_accepts_resolved_expiry_or_replacement_proof(
         GROUP, (evidence,), (proposal,), actor=None
     )
 
-    assert result.rejected == ()
-    assert result.accepted[0].operation == "forget"
-    assert result.accepted[0].item_id == target.id
-    assert result.accepted[0].related_item_ids == related_ids
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "actor_not_authorized"
+    assert store.get_item(GROUP, target.id) is not None
 
 
 def test_curator_forget_requires_proof_even_when_review_has_an_actor(
@@ -2835,7 +2904,9 @@ def test_forget_then_revise_rejects_removed_target_and_commits_valid_siblings(
         source_kind="self_statement",
     )
     forget = MemoryProposal(
-        operation="forget", item_id=getattr(target, first_id_attr)
+        operation="forget",
+        item_id=getattr(target, first_id_attr),
+        actor_class="user",
     )
     revise = MemoryProposal(
         operation="revise",

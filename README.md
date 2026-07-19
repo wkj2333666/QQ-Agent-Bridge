@@ -209,10 +209,12 @@ The curator runs as a restricted ask-only Agent with network disabled, no projec
 workspace writes, no normal task tools, and no QQ progress output. Its proposals are
 untrusted, must cite supporting source row IDs, and require affirmative normalized
 support outside quotes, negations, examples, and opt-out instructions. Curator forgets
-require elapsed stored expiry or resolved, evidence-backed replacement items. Duplicate
-keys and non-JSON numeric constants are rejected. Credential checks normalize Unicode
-and reject standard access-key environment names. Generated restricted homes/workspaces
-are removed on disposal, shutdown, and startup failure.
+are never allowed to hard-delete records; changes use validated revise, contradict, or
+merge operations, while deterministic user commands and store expiry remain the only
+hard-delete paths. Duplicate keys and non-JSON numeric constants are rejected.
+Credential checks apply Unicode NFKC, remove format controls, case-fold labels, and
+reject multilingual assignments and standard secret environment names. Generated
+restricted homes/workspaces are removed on disposal, shutdown, and startup failure.
 A database failure disables only long-term memory; normal chat, tasks, schedules, and
 OneBot continue running.
 
