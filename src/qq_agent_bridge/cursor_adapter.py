@@ -317,6 +317,7 @@ class CursorAdapter:
     def _validate_runtime_path(self, path: Path, *, ownership: bool) -> None:
         if not path.is_absolute():
             raise ValueError("hardened cursor runtime is not trusted")
+        uid_mapped_prefixes = self._uid_mapped_system_prefixes(path) if ownership else set()
         current = Path(path.anchor)
         components = (current,)
         for part in path.parts[1:]:
@@ -326,10 +327,38 @@ class CursorAdapter:
             metadata = self._runtime_lstat(component)
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                 raise ValueError("hardened cursor runtime is not trusted")
-            if ownership and (
-                metadata.st_uid not in {0, os.getuid()} or metadata.st_mode & 0o022
+            if ownership and metadata.st_mode & 0o022:
+                raise ValueError("hardened cursor runtime is not trusted")
+            if (
+                ownership
+                and metadata.st_uid not in {0, os.getuid()}
+                and (
+                    component not in uid_mapped_prefixes
+                    or not self._runtime_is_read_only_mount(component)
+                )
             ):
                 raise ValueError("hardened cursor runtime is not trusted")
+
+    def _uid_mapped_system_prefixes(self, runtime_root: Path) -> set[Path]:
+        try:
+            import pwd
+
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+        except (ImportError, KeyError, OSError):
+            return set()
+        if not self._is_relative_to(runtime_root, home):
+            return set()
+        current = Path(home.anchor)
+        prefixes = {current}
+        for part in home.parts[1:]:
+            current /= part
+            if current == home:
+                break
+            prefixes.add(current)
+        return prefixes
+
+    def _runtime_is_read_only_mount(self, path: Path) -> bool:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
 
     def _runtime_lstat(self, path: Path) -> os.stat_result:
         return path.lstat()
