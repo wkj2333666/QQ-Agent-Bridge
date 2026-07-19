@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import qq_agent_bridge.memory_commands as memory_commands_module
 from qq_agent_bridge.config import BridgeConfig
 from qq_agent_bridge.long_term_memory import LongTermMemoryStore
@@ -328,6 +330,184 @@ def test_natural_language_review_returns_background_request(tmp_path: Path) -> N
     assert result.review_request is not None
     assert result.review_request.scope == GROUP
     assert "已安排" in result.text
+
+
+@pytest.mark.parametrize("group", [True, False], ids=["owner-group", "private-user"])
+@pytest.mark.parametrize(
+    ("intent", "initial", "expected"),
+    [
+        ("status", True, True),
+        ("enable", False, True),
+        ("disable", True, False),
+    ],
+)
+def test_natural_state_intent_executes_only_selected_handler(
+    tmp_path: Path,
+    group: bool,
+    intent: str,
+    initial: bool,
+    expected: bool,
+) -> None:
+    db = store(tmp_path)
+    ev = event("owner" if group else "member", group=group)
+    scope = GROUP if group else MemoryScope("private", "member")
+    db.set_scope_enabled(scope, initial)
+
+    async def interpreter(_prompt: str) -> str:
+        return json.dumps({"intent": intent})
+
+    service = MemoryCommandService(config(), db, interpreter=interpreter)
+    run(service.handle(ev, "用自然语言管理长期记忆"))
+
+    assert db.is_scope_enabled(scope) is expected
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        '{"intent":"remember","content":123}',
+        '{"intent":"remember","content":true}',
+        '{"intent":"remember","content":"x","target":"me"}',
+        '{"intent":"status","content":"irrelevant"}',
+        '{"intent":"list","page":true}',
+        '{"intent":"list","page":1.0}',
+        '{"intent":"list","target":123}',
+        '{"intent":"list","target":[]}',
+        '{"intent":"forget"}',
+        '{"intent":"forget","references":[true]}',
+        '{"intent":"confirm","reference":123}',
+        '{"intent":"correct","references":["abc"]}',
+        '{"intent":"correct","reference":"abc","content":false}',
+        '{"intent":"clear","target":"user"}',
+        '{"intent":"clear","target":"user","subject_id":123}',
+        '{"intent":"clear","target":[]}',
+        '{"intent":"clear","target":"me","subject_id":"other"}',
+        '{"intent":"review","unknown":"x"}',
+    ],
+)
+def test_intent_specific_schema_rejects_malformed_output_without_mutation(
+    tmp_path: Path, output: str
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+
+    async def interpreter(_prompt: str) -> str:
+        return output
+
+    service = MemoryCommandService(config(), db, interpreter=interpreter)
+    before = db.status(GROUP)
+    result = run(service.handle(event(), "自然语言请求"))
+
+    assert "没能可靠理解" in result.text
+    assert db.status(GROUP) == before
+    assert db.list_items(GROUP) == ()
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "api_token=secretvalue123",
+        "api-token: secretvalue123",
+        "api token = secretvalue123",
+        "oauth_access_token=secretvalue123",
+        "session_key=secretvalue123",
+        "client-secret=secretvalue123",
+        "bearer_token=secretvalue123",
+        "refresh_token=secretvalue123",
+        "access-key=secretvalue123",
+    ],
+)
+def test_remember_and_correct_reject_extended_credential_labels(
+    tmp_path: Path, credential: str
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    item_id = seed(db, subject_kind="user", subject_id="member", content="safe value")
+    service = MemoryCommandService(config(), db)
+
+    remembered = run(service.handle(event(), f"remember {credential}"))
+    corrected = run(service.handle(event(), f"correct {item_id} {credential}"))
+
+    assert "不能" in remembered.text
+    assert "不能" in corrected.text
+    items = db.list_items(GROUP, subject_id="member")
+    assert [item.content for item in items] == ["safe value"]
+
+
+def test_forget_scrubs_credential_fixture_from_items_fts_and_revisions(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    credential = "api_token=secretvalue123"
+    item_id = seed(db, subject_kind="user", subject_id="member", content=credential)
+    service = MemoryCommandService(config(), db)
+
+    assert "已忘记" in run(service.handle(event(), f"forget {item_id}")).text
+
+    assert db.get_item(GROUP, item_id) is None
+    assert db._conn.execute(  # noqa: SLF001 - assert storage scrubbing, not API behavior
+        "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'secretvalue123'"
+    ).fetchone()[0] == 0
+    revisions = db._conn.execute(  # noqa: SLF001
+        "SELECT before_summary, after_summary FROM memory_revisions"
+    ).fetchall()
+    assert all(credential not in str(value) for row in revisions for value in row)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我确诊了糖尿病",
+        "My medical diagnosis is diabetes",
+        "我住在静安区南京西路100号",
+        "My home address is 100 Main Street",
+        "我的手机号是13800138000",
+        "My email is alice@example.com",
+        "我的身份证号是110101199001011234",
+        "My passport number is X12345678",
+        "我的银行卡号是6222020200000000",
+        "My annual salary is 100000 dollars",
+        "我的伴侣是小王",
+        "I am bisexual and married",
+        "我的政治立场是自由主义",
+        "My political affiliation is independent",
+        "我的宗教信仰是佛教",
+        "My religion is Buddhism",
+    ],
+)
+def test_remember_and_correct_conservatively_escalate_sensitive_content(
+    tmp_path: Path, content: str
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    item_id = seed(db, subject_kind="user", subject_id="member", content="普通偏好")
+    service = MemoryCommandService(config(), db)
+
+    remembered = run(service.handle(event(), f"remember {content}"))
+    corrected = run(service.handle(event(), f"correct {item_id} {content}"))
+
+    assert "已记住" in remembered.text
+    assert "已更正" in corrected.text
+    items = db.list_items(GROUP, subject_id="member")
+    assert items
+    assert all(item.sensitivity == "sensitive" for item in items)
+
+
+def test_correcting_sensitive_item_to_benign_text_does_not_downgrade(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    item_id = seed(
+        db,
+        subject_kind="user",
+        subject_id="member",
+        content="我的手机号是13800138000",
+        sensitivity="sensitive",
+    )
+    service = MemoryCommandService(config(), db)
+
+    result = run(service.handle(event(), f"correct {item_id} 以后通过应用联系我"))
+
+    assert "已更正" in result.text
+    item = db.get_item(GROUP, item_id)
+    assert item is not None
+    assert item.sensitivity == "sensitive"
 
 
 def test_candidate_confirmation_respects_subject_and_sensitivity(tmp_path: Path) -> None:

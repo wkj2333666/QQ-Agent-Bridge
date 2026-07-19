@@ -806,6 +806,11 @@ class LongTermMemoryStore:
             content = self._content(proposal.content)
             category = str(row["category"])
             self._require_category(category)
+            sensitivity = str(proposal.sensitivity or row["sensitivity"])
+            if sensitivity not in {"normal", "sensitive"}:
+                raise ValueError("invalid revised memory sensitivity")
+            if str(row["sensitivity"]) == "sensitive" and sensitivity != "sensitive":
+                raise ValueError("sensitive memory cannot be downgraded")
             duplicate = self._find_duplicate_or_raise_collision(
                 conn,
                 scope,
@@ -813,7 +818,7 @@ class LongTermMemoryStore:
                 subject_id=row["subject_id"],
                 category=category,
                 content=content,
-                sensitivity=row["sensitivity"],
+                sensitivity=sensitivity,
                 exclude_item_id=item_id,
             )
             if duplicate is not None:
@@ -846,7 +851,7 @@ class LongTermMemoryStore:
                 subject_id=row["subject_id"],
                 category=category,
                 content=content,
-                sensitivity=row["sensitivity"],
+                sensitivity=sensitivity,
             )
             if current_key == revised_key:
                 return self._apply_operation(
@@ -883,7 +888,7 @@ class LongTermMemoryStore:
                     confidence,
                     confidence,
                     status,
-                    str(row["sensitivity"]),
+                    sensitivity,
                     proposal.source_kind,
                     now,
                     now,

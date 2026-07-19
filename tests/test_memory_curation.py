@@ -519,6 +519,48 @@ def test_validator_rejects_shared_secret_assignment_variants(
     assert result.rejected[0].reason == "secret_content"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "api_token=abcdefgh",
+        "api-token: abcdefgh",
+        "api token equals abcdefgh",
+        "oauth_access_token=abcdefgh",
+        "oauth-key: abcdefgh",
+        "session_token=abcdefgh",
+        "session-key: abcdefgh",
+        "client_token=abcdefgh",
+        "client-secret: abcdefgh",
+        "bearer_token=abcdefgh",
+        "bearer: abcdefgh",
+        "Bearer abcdefgh123",
+        "Authorization: Bearer abcdefgh123",
+        "refresh_token=abcdefgh",
+        "access-key: abcdefgh",
+    ],
+)
+def test_validator_rejects_extended_authentication_secret_labels(
+    cfg: BridgeConfig, content: str
+) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content=content,
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content, explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "secret_content"
+
+
 def test_sensitive_personal_fact_requires_explicit_request_by_subject(
     cfg: BridgeConfig,
 ) -> None:
@@ -538,6 +580,127 @@ def test_sensitive_personal_fact_requires_explicit_request_by_subject(
     )
 
     assert result.accepted == (proposal,)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我确诊了糖尿病",
+        "My medical diagnosis is diabetes",
+        "我住在静安区南京西路100号",
+        "My home address is 100 Main Street",
+        "我的手机号是13800138000",
+        "My legal name is Alice Smith",
+        "我的银行卡号是6222020200000000",
+        "My spouse is Bob",
+        "我的政治立场是自由主义",
+        "My religion is Buddhism",
+    ],
+)
+def test_validator_conservatively_escalates_sensitive_personal_content(
+    cfg: BridgeConfig, content: str
+) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content=content,
+        sensitivity="normal",
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content, explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.rejected == ()
+    assert result.accepted[0].sensitivity == "sensitive"
+
+
+def test_sensitive_classifier_still_requires_explicit_subject_consent(
+    cfg: BridgeConfig,
+) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="我的病史包括糖尿病",
+        sensitivity="normal",
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=proposal.content or "", explicit=False),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "sensitivity_consent_required"
+
+
+def test_sensitive_revision_escalates_and_existing_sensitive_item_never_downgrades(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    normal = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="普通偏好",
+            source_kind="self_statement",
+        ),
+    )
+    sensitive = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="我的病史包括糖尿病",
+            sensitivity="sensitive",
+            source_kind="explicit_request",
+        ),
+        message_id="sensitive-seed",
+    )
+    evidence = source(text="我的手机号是13800138000", explicit=True)
+
+    escalation = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (evidence,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=normal.id,
+                content=evidence.text,
+                source_kind="explicit_request",
+            ),
+        ),
+        actor=MemoryActor("123", "member"),
+    )
+    downgrade = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (source(text="现在只保留普通描述", explicit=True),),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=sensitive.id,
+                content="现在只保留普通描述",
+                sensitivity="normal",
+                source_kind="explicit_request",
+            ),
+        ),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert escalation.rejected == ()
+    assert escalation.accepted[0].sensitivity == "sensitive"
+    committed = store.commit_review(GROUP, (), escalation.accepted, trigger_class="explicit")
+    assert committed[0].sensitivity == "sensitive"
+    assert downgrade.accepted == ()
+    assert downgrade.rejected[0].reason == "target_metadata_mismatch"
 
 
 @pytest.mark.parametrize(

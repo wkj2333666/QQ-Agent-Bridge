@@ -52,23 +52,93 @@ _INTERNAL_DIRECTIVE_RE = re.compile(
     r"<system\b|资源发送令牌\s*[：:])",
     re.IGNORECASE,
 )
+_SECRET_LABEL_SEPARATOR = r"[\s_-]*"
 _ENGLISH_SECRET_LABEL = (
-    r"(?:api[\s_-]*key|access[\s_-]*token|auth[\s_-]*token|token|"
-    r"password|passwd|secret|cookie|(?:recovery|backup)\s+codes?)"
+    rf"(?:(?:api|oauth2?|session|client){_SECRET_LABEL_SEPARATOR}"
+    rf"(?:(?:access|refresh){_SECRET_LABEL_SEPARATOR})?(?:token|key|secret)|"
+    rf"(?:access|refresh|auth){_SECRET_LABEL_SEPARATOR}(?:token|key)|"
+    rf"bearer(?:{_SECRET_LABEL_SEPARATOR}token)?|token|"
+    r"password|passwd|secret|cookie|(?:recovery|backup)[\s_-]+codes?)"
 )
 _ENGLISH_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|[=:：])"
-_CHINESE_SECRET_LABEL = r"(?:密码|口令|令牌|恢复(?:代码|码)|备份(?:代码|码))"
+_CHINESE_SECRET_LABEL = (
+    r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
+    r"密码|口令|恢复(?:代码|码)|备份(?:代码|码))"
+)
 _CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(
+        r"\b(?:authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/-]{8,}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         rf"\b{_ENGLISH_SECRET_LABEL}\b\s*{_ENGLISH_SECRET_ASSIGNMENT}\s*\S",
         re.IGNORECASE,
     ),
     re.compile(
         rf"{_CHINESE_SECRET_LABEL}\s*{_CHINESE_SECRET_ASSIGNMENT}\s*\S"
+    ),
+)
+
+_SENSITIVE_PATTERNS = (
+    # Health and medical status.
+    re.compile(
+        r"(?:确诊|诊断|病史|患有|用药|服药|怀孕|孕期|抑郁症?|焦虑症?|"
+        r"双相|癌症|糖尿病|艾滋|HIV|血压|过敏)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:medical\s+(?:diagnosis|condition|history)|diagnosed\s+with|"
+        r"pregnan(?:t|cy)|depression|anxiety|bipolar|cancer|diabetes|hiv|"
+        r"blood\s+pressure|allerg(?:y|ic)|medication)\b",
+        re.IGNORECASE,
+    ),
+    # Precise location and contact details.
+    re.compile(
+        r"(?:家庭住址|详细地址|现住址|住址|住在.{0,30}(?:区|县).{0,30}"
+        r"(?:路|街|巷|号|小区)|经纬度|坐标)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:home|street|residential|mailing)\s+address\b|"
+        r"\b(?:address\s+is|live\s+at)\s+\d+\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE),
+    re.compile(r"(?:手机号|手机号码|联系电话|电话号码|邮箱|电子邮箱|微信号|QQ号)"),
+    re.compile(
+        r"\b(?:phone|mobile|telephone|email|wechat|qq)\s*"
+        r"(?:number|address|id|account)?\s*(?:is|=|:)\s*\S+",
+        re.IGNORECASE,
+    ),
+    # Legal identity and financial information.
+    re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
+    re.compile(
+        r"\b(?:legal\s+name|passport\s+(?:number|no)|social\s+security\s+number|ssn)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:银行卡(?:号|号码)?|银行账户|信用卡(?:号|号码)?|工资|收入|债务|负债|资产)"),
+    re.compile(
+        r"\b(?:bank\s+account|bank\s+card|credit\s+card|annual\s+salary|"
+        r"salary|income|debt|net\s+worth)\b",
+        re.IGNORECASE,
+    ),
+    # Intimate relationships, politics, and religion.
+    re.compile(r"(?:伴侣|配偶|男朋友|女朋友|婚姻|已婚|离婚|性取向|性生活)"),
+    re.compile(
+        r"\b(?:spouse|partner|boyfriend|girlfriend|married|divorced|"
+        r"bisexual|homosexual|heterosexual|sexual\s+orientation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:政治立场|政治观点|党派|党员|投票倾向|宗教|信仰|佛教|基督教|伊斯兰教)"),
+    re.compile(
+        r"\b(?:political\s+(?:affiliation|view|belief)|party\s+membership|"
+        r"voting\s+preference|religion|religious\s+belief|faith|buddhis[mt]|"
+        r"christian(?:ity)?|islam|muslim)\b",
+        re.IGNORECASE,
     ),
 )
 
@@ -365,6 +435,12 @@ class MemoryValidator:
                 return None, "invalid_related_target"
         elif proposal.sensitivity is None:
             proposal = replace(proposal, sensitivity="normal")
+
+        if (
+            proposal.content is not None
+            and classify_memory_sensitivity(proposal.content) == "sensitive"
+        ):
+            proposal = replace(proposal, sensitivity="sensitive")
 
         if proposal.sensitivity == "secret":
             return None, "secret_content"
@@ -671,6 +747,7 @@ class MemoryValidator:
                 target,
                 content=proposal.content or target.content,
                 status=proposal.status or target.status,
+                sensitivity=proposal.sensitivity or target.sensitivity,
             )
         elif proposal.operation == "reinforce" and target.status in {
             "candidate",
@@ -696,22 +773,37 @@ class MemoryValidator:
     def _target_metadata_mismatch(
         proposal: MemoryProposal, target: MemoryItem
     ) -> bool:
-        return any(
+        if any(
             getattr(proposal, field) is not None
             and getattr(proposal, field) != getattr(target, field)
             for field in TARGET_METADATA_FIELDS
+            if field != "sensitivity"
+        ):
+            return True
+        if proposal.sensitivity is None or proposal.sensitivity == target.sensitivity:
+            return False
+        return not (
+            target.sensitivity == "normal"
+            and proposal.sensitivity == "sensitive"
+            and proposal.content is not None
+            and classify_memory_sensitivity(proposal.content) == "sensitive"
         )
 
     @staticmethod
     def _with_target_metadata(
         proposal: MemoryProposal, target: MemoryItem
     ) -> MemoryProposal:
+        sensitivity = (
+            "sensitive"
+            if "sensitive" in {target.sensitivity, proposal.sensitivity}
+            else target.sensitivity
+        )
         return replace(
             proposal,
             subject_kind=target.subject_kind,
             subject_id=target.subject_id,
             category=target.category,
-            sensitivity=target.sensitivity,
+            sensitivity=sensitivity,
         )
 
     @staticmethod
@@ -892,6 +984,14 @@ def _contains_secret(text: str) -> bool:
     return any(pattern.search(text) is not None for pattern in _SECRET_PATTERNS)
 
 
+def classify_memory_sensitivity(text: str) -> str:
+    """Conservatively classify personal content without delegating policy to a model."""
+    normalized = _normalize_text(text)
+    if any(pattern.search(normalized) is not None for pattern in _SENSITIVE_PATTERNS):
+        return "sensitive"
+    return "normal"
+
+
 __all__ = [
     "ACTIVE_CONFIDENCE_THRESHOLD",
     "MAX_MEMORY_CONTENT_CHARS",
@@ -903,4 +1003,5 @@ __all__ = [
     "RejectedProposal",
     "ValidationResult",
     "parse_curator_output",
+    "classify_memory_sensitivity",
 ]
