@@ -176,6 +176,118 @@ def test_storage_maintenance_defaults_are_balanced() -> None:
     assert storage.resources.transient_retention_seconds == 86_400
 
 
+def test_long_term_memory_scopes_are_disabled_by_default() -> None:
+    cfg = BridgeConfig()
+
+    assert cfg.long_term_memory.enabled is True
+    assert cfg.long_term_memory.default_scope_enabled is False
+    assert cfg.long_term_memory.groups == {}
+    assert cfg.long_term_memory.users == {}
+    assert cfg.long_term_memory.database_path == "data/long-term-memory.sqlite3"
+    assert cfg.long_term_memory.review.message_threshold == 40
+    assert cfg.long_term_memory.review.minimum_messages == 10
+    assert cfg.long_term_memory.review.idle_seconds == 600
+    assert cfg.long_term_memory.review.interval_seconds == 21_600
+    assert cfg.long_term_memory.review.raw_ttl_seconds == 604_800
+    assert cfg.long_term_memory.review.max_concurrent == 1
+    assert cfg.long_term_memory.review.model == "auto"
+    assert cfg.long_term_memory.review.timeout_seconds == 90
+    assert cfg.long_term_memory.review.max_attempts == 3
+    assert cfg.long_term_memory.retrieval.max_items == 12
+    assert cfg.long_term_memory.retrieval.max_chars == 1_500
+    assert cfg.long_term_memory.retrieval.minimum_score == 0.45
+    assert cfg.long_term_memory.decay.enabled is True
+    assert cfg.long_term_memory.decay.interval_seconds == 86_400
+    assert cfg.long_term_memory.decay.grace_seconds == 2_592_000
+    assert cfg.long_term_memory.decay.dormant_threshold == 0.40
+
+
+def test_long_term_memory_loads_bounded_values_and_string_scope_keys(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+long_term_memory:
+  enabled: false
+  default_scope_enabled: true
+  database_path: custom-memory.sqlite3
+  groups: {1001: true, "1002": false, ignored: invalid}
+  users: {2001: true}
+  review:
+    message_threshold: 0
+    minimum_messages: 999999
+    idle_seconds: -1
+    interval_seconds: 999999999
+    raw_ttl_seconds: 0
+    max_concurrent: 8
+    model: composer
+    timeout_seconds: .inf
+    max_attempts: 0
+  retrieval:
+    max_items: 999999
+    max_chars: -5
+    minimum_score: 2
+  decay:
+    enabled: false
+    interval_seconds: 0
+    grace_seconds: -10
+    dormant_threshold: -1
+""",
+        encoding="utf-8",
+    )
+
+    memory = BridgeConfig.load(path).long_term_memory
+
+    assert memory.enabled is False
+    assert memory.default_scope_enabled is True
+    assert memory.database_path == "custom-memory.sqlite3"
+    assert memory.groups == {"1001": True, "1002": False}
+    assert memory.users == {"2001": True}
+    assert memory.review.message_threshold == 1
+    assert memory.review.minimum_messages == 10_000
+    assert memory.review.idle_seconds == 1
+    assert memory.review.interval_seconds == 2_592_000
+    assert memory.review.raw_ttl_seconds == 60
+    assert memory.review.max_concurrent == 1
+    assert memory.review.model == "composer"
+    assert memory.review.timeout_seconds == 90
+    assert memory.review.max_attempts == 1
+    assert memory.retrieval.max_items == 100
+    assert memory.retrieval.max_chars == 1
+    assert memory.retrieval.minimum_score == 1.0
+    assert memory.decay.enabled is False
+    assert memory.decay.interval_seconds == 60
+    assert memory.decay.grace_seconds == 0
+    assert memory.decay.dormant_threshold == 0.0
+
+
+def test_long_term_memory_malformed_sections_use_safe_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+long_term_memory:
+  enabled: nope
+  default_scope_enabled: 1
+  database_path: ""
+  groups: invalid
+  users: []
+  review: invalid
+  retrieval: []
+  decay: null
+""",
+        encoding="utf-8",
+    )
+
+    assert BridgeConfig.load(path).long_term_memory == BridgeConfig().long_term_memory
+
+
+def test_example_config_documents_long_term_memory_defaults() -> None:
+    memory = BridgeConfig.load(ROOT / "config.example.yaml").long_term_memory
+
+    assert memory == BridgeConfig().long_term_memory
+
+
 def test_storage_maintenance_loads_and_clamps_values(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(

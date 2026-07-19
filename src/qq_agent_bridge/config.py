@@ -78,6 +78,46 @@ class AmbientMemoryConfig:
 
 
 @dataclass
+class MemoryReviewConfig:
+    message_threshold: int = 40
+    minimum_messages: int = 10
+    idle_seconds: int = 600
+    interval_seconds: int = 21_600
+    raw_ttl_seconds: int = 604_800
+    max_concurrent: int = 1
+    model: str = "auto"
+    timeout_seconds: int = 90
+    max_attempts: int = 3
+
+
+@dataclass
+class MemoryRetrievalConfig:
+    max_items: int = 12
+    max_chars: int = 1_500
+    minimum_score: float = 0.45
+
+
+@dataclass
+class MemoryDecayConfig:
+    enabled: bool = True
+    interval_seconds: int = 86_400
+    grace_seconds: int = 2_592_000
+    dormant_threshold: float = 0.40
+
+
+@dataclass
+class LongTermMemoryConfig:
+    enabled: bool = True
+    default_scope_enabled: bool = False
+    groups: dict[str, bool] = field(default_factory=dict)
+    users: dict[str, bool] = field(default_factory=dict)
+    database_path: str = "data/long-term-memory.sqlite3"
+    review: MemoryReviewConfig = field(default_factory=MemoryReviewConfig)
+    retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
+    decay: MemoryDecayConfig = field(default_factory=MemoryDecayConfig)
+
+
+@dataclass
 class ResourcesConfig:
     enabled: bool = True
     root: str = "downloads/qq-agent-bridge"
@@ -232,6 +272,7 @@ class BridgeConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     ambient_memory: AmbientMemoryConfig = field(default_factory=AmbientMemoryConfig)
+    long_term_memory: LongTermMemoryConfig = field(default_factory=LongTermMemoryConfig)
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     storage_maintenance: StorageMaintenanceConfig = field(
@@ -255,6 +296,7 @@ class BridgeConfig:
         botc = BotConfig(**raw.get("bot", {}))
         memory = MemoryConfig(**raw.get("memory", {}))
         ambient_memory = AmbientMemoryConfig(**raw.get("ambient_memory", {}))
+        long_term_memory = _load_long_term_memory(raw.get("long_term_memory", {}))
         resources = ResourcesConfig(**raw.get("resources", {}))
         resources.animation_max_frames = min(16, max(2, int(resources.animation_max_frames)))
         resources.animation_max_duration_seconds = min(
@@ -314,6 +356,7 @@ class BridgeConfig:
             bot=botc,
             memory=memory,
             ambient_memory=ambient_memory,
+            long_term_memory=long_term_memory,
             resources=resources,
             whisper=whisper,
             storage_maintenance=storage_maintenance,
@@ -391,6 +434,79 @@ def _load_storage_maintenance(raw: Any) -> StorageMaintenanceConfig:
     )
 
 
+def _load_long_term_memory(raw: Any) -> LongTermMemoryConfig:
+    defaults = LongTermMemoryConfig()
+    values = raw if isinstance(raw, dict) else {}
+    review_values = values.get("review")
+    review_values = review_values if isinstance(review_values, dict) else {}
+    retrieval_values = values.get("retrieval")
+    retrieval_values = retrieval_values if isinstance(retrieval_values, dict) else {}
+    decay_values = values.get("decay")
+    decay_values = decay_values if isinstance(decay_values, dict) else {}
+
+    database_path = values.get("database_path", defaults.database_path)
+    if not isinstance(database_path, str) or not database_path.strip():
+        database_path = defaults.database_path
+
+    return LongTermMemoryConfig(
+        enabled=_bool_or_default(values.get("enabled"), defaults.enabled),
+        default_scope_enabled=_bool_or_default(
+            values.get("default_scope_enabled"), defaults.default_scope_enabled
+        ),
+        groups=_bool_scope_map(values.get("groups")),
+        users=_bool_scope_map(values.get("users")),
+        database_path=database_path.strip(),
+        review=MemoryReviewConfig(
+            message_threshold=_bounded_int(
+                review_values.get("message_threshold"), 40, 1, 10_000
+            ),
+            minimum_messages=_bounded_int(
+                review_values.get("minimum_messages"), 10, 1, 10_000
+            ),
+            idle_seconds=_bounded_int(
+                review_values.get("idle_seconds"), 600, 1, 604_800
+            ),
+            interval_seconds=_bounded_int(
+                review_values.get("interval_seconds"), 21_600, 60, 2_592_000
+            ),
+            raw_ttl_seconds=_bounded_int(
+                review_values.get("raw_ttl_seconds"), 604_800, 60, 2_592_000
+            ),
+            max_concurrent=_bounded_int(
+                review_values.get("max_concurrent"), 1, 1, 1
+            ),
+            model=_nonempty_string(review_values.get("model"), "auto"),
+            timeout_seconds=_bounded_int(
+                review_values.get("timeout_seconds"), 90, 1, 3_600
+            ),
+            max_attempts=_bounded_int(
+                review_values.get("max_attempts"), 3, 1, 20
+            ),
+        ),
+        retrieval=MemoryRetrievalConfig(
+            max_items=_bounded_int(retrieval_values.get("max_items"), 12, 1, 100),
+            max_chars=_bounded_int(
+                retrieval_values.get("max_chars"), 1_500, 1, 100_000
+            ),
+            minimum_score=_bounded_float(
+                retrieval_values.get("minimum_score"), 0.45, 0.0, 1.0
+            ),
+        ),
+        decay=MemoryDecayConfig(
+            enabled=_bool_or_default(decay_values.get("enabled"), True),
+            interval_seconds=_bounded_int(
+                decay_values.get("interval_seconds"), 86_400, 60, 2_592_000
+            ),
+            grace_seconds=_bounded_int(
+                decay_values.get("grace_seconds"), 2_592_000, 0, 31_536_000
+            ),
+            dormant_threshold=_bounded_float(
+                decay_values.get("dormant_threshold"), 0.40, 0.0, 1.0
+            ),
+        ),
+    )
+
+
 def _load_storage_area(
     raw: Any,
     defaults: StorageAreaMaintenanceConfig,
@@ -433,6 +549,32 @@ def _bounded_int(value: Any, default: int, lower: int, upper: int) -> int:
     if not math.isfinite(number):
         return default
     return min(upper, max(lower, int(number)))
+
+
+def _bounded_float(value: Any, default: float, lower: float, upper: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(upper, max(lower, number))
+
+
+def _bool_or_default(value: Any, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _nonempty_string(value: Any, default: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return default
+    return value.strip()
+
+
+def _bool_scope_map(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items() if isinstance(value, bool)}
 
 
 def _load_profiles(raw: Any) -> ProfileConfig:
