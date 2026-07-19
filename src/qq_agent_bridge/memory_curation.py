@@ -67,9 +67,9 @@ _CHINESE_SECRET_LABEL = (
 )
 _CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _ENV_SECRET_SUFFIX = (
-    r"(?:api_key|secret_access_key|oauth(?:_access)?_token|session_(?:token|key)|"
-    r"client_(?:token|key|secret)|access_(?:token|key)|refresh_(?:token|key)|"
-    r"token|secret)"
+    r"(?:(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
+    r"secret_access_key|(?:access|refresh|auth)_(?:token|key)|bearer(?:_token)?|"
+    r"private_key|password|passwd|cookie|token|secret|(?:recovery|backup)_codes?)"
 )
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
@@ -87,10 +87,25 @@ _SECRET_PATTERNS = (
         rf"{_CHINESE_SECRET_LABEL}\s*{_CHINESE_SECRET_ASSIGNMENT}\s*\S"
     ),
     re.compile(
-        rf"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+_)+{_ENV_SECRET_SUFFIX}"
-        rf"\s*[=:：]\s*\S",
+        rf"(?<![A-Za-z0-9_])_*(?:[A-Za-z0-9]+_)*{_ENV_SECRET_SUFFIX}"
+        rf"\s*{_ENGLISH_SECRET_ASSIGNMENT}\s*\S",
         re.IGNORECASE,
     ),
+)
+
+_FORMATTED_PHONE_CANDIDATE_RE = re.compile(
+    r"(?<!\d)(?:\+86[- \t]?)?1[3-9](?:[- \t]?\d){9}(?!\d)"
+)
+_FORMATTED_MAINLAND_ID_CANDIDATE_RE = re.compile(
+    r"(?<![0-9A-Za-z])[1-9](?:[- \t]?\d){16}[- \t]?[0-9Xx]"
+    r"(?![0-9A-Za-z])"
+)
+_FORMATTED_FINANCIAL_ID_CANDIDATE_RE = re.compile(
+    r"(?<!\d)\d(?:[- \t]?\d){15,18}(?!\d)"
+)
+_MAINLAND_ID_RE = re.compile(
+    r"[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])"
+    r"(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]"
 )
 
 _SENSITIVE_PATTERNS = (
@@ -1004,9 +1019,29 @@ def _contains_secret(text: str) -> bool:
 def classify_memory_sensitivity(text: str) -> str:
     """Conservatively classify personal content without delegating policy to a model."""
     normalized = _normalize_text(text)
-    if any(pattern.search(normalized) is not None for pattern in _SENSITIVE_PATTERNS):
+    if _contains_structured_sensitive_identifier(normalized) or any(
+        pattern.search(normalized) is not None for pattern in _SENSITIVE_PATTERNS
+    ):
         return "sensitive"
     return "normal"
+
+
+def _contains_structured_sensitive_identifier(text: str) -> bool:
+    for match in _FORMATTED_PHONE_CANDIDATE_RE.finditer(text):
+        compact = re.sub(r"[- \t]", "", match.group())
+        if compact.startswith("+86"):
+            compact = compact[3:]
+        if re.fullmatch(r"1[3-9]\d{9}", compact):
+            return True
+    for match in _FORMATTED_MAINLAND_ID_CANDIDATE_RE.finditer(text):
+        compact = re.sub(r"[- \t]", "", match.group())
+        if _MAINLAND_ID_RE.fullmatch(compact):
+            return True
+    for match in _FORMATTED_FINANCIAL_ID_CANDIDATE_RE.finditer(text):
+        compact = re.sub(r"[- \t]", "", match.group())
+        if re.fullmatch(r"\d{16,19}", compact):
+            return True
+    return False
 
 
 __all__ = [

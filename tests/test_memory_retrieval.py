@@ -219,8 +219,28 @@ def test_classifier_escalated_sensitive_item_stays_out_of_ordinary_retrieval(
 
 @pytest.mark.parametrize(
     "content",
-    ["13800138000", "110101199001011234", "6222020200000000"],
-    ids=["mobile", "mainland-id", "bank-card"],
+    [
+        "13800138000",
+        "+8613800138000",
+        "138-0013-8000",
+        "138 0013 8000",
+        "110101199001011234",
+        "110101-19900101-1234",
+        "6222020200000000",
+        "6222 0202 0000 0000",
+        "6222-0202-0000-0000",
+    ],
+    ids=[
+        "mobile",
+        "country-mobile",
+        "hyphen-mobile",
+        "spaced-mobile",
+        "mainland-id",
+        "formatted-mainland-id",
+        "bank-card",
+        "spaced-bank-card",
+        "hyphen-bank-card",
+    ],
 )
 def test_standalone_identifier_is_sensitive_and_excluded_from_retrieval(
     store: LongTermMemoryStore, content: str

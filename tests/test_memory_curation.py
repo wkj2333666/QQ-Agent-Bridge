@@ -545,6 +545,15 @@ def test_validator_rejects_shared_secret_assignment_variants(
         "VENDOR_SESSION_TOKEN=opaquevalue123456",
         "SERVICE_CLIENT_SECRET=opaquevalue123456",
         "PROVIDER_REFRESH_TOKEN=opaquevalue123456",
+        "DATABASE_PASSWORD is opaquevalue123456",
+        "REDIS_PASSWD are opaquevalue123456",
+        "SESSION_COOKIE equals opaquevalue123456",
+        "_OPENAI_API_KEY=opaquevalue123456",
+        "_PASSWORD=opaquevalue123456",
+        "__SERVICE_PRIVATE_KEY: opaquevalue123456",
+        "APP_RECOVERY_CODES are opaquevalue123456",
+        "APP_BACKUP_CODE equals opaquevalue123456",
+        "MY_APP_REFRESH_TOKEN is opaquevalue123456",
     ],
 )
 def test_validator_rejects_extended_authentication_secret_labels(
@@ -606,6 +615,12 @@ def test_sensitive_personal_fact_requires_explicit_request_by_subject(
         "13800138000",
         "110101199001011234",
         "6222020200000000",
+        "+8613800138000",
+        "138-0013-8000",
+        "138 0013 8000",
+        "110101-19900101-1234",
+        "6222 0202 0000 0000",
+        "6222-0202-0000-0000",
     ],
 )
 def test_validator_conservatively_escalates_sensitive_personal_content(
@@ -634,6 +649,55 @@ def test_validator_conservatively_escalates_sensitive_personal_content(
 @pytest.mark.parametrize("content", ["013800138000", "138001380001"])
 def test_mobile_classifier_does_not_match_inside_longer_digit_run(content: str) -> None:
     assert classify_memory_sensitivity(content) == "normal"
+
+
+@pytest.mark.parametrize(
+    ("target_sensitivity", "content"),
+    [
+        ("normal", "+86 138-0013-8000"),
+        ("sensitive", "现在只保留普通描述"),
+    ],
+    ids=["candidate-escalates", "candidate-does-not-downgrade"],
+)
+def test_low_confidence_contradiction_candidate_uses_maximum_sensitivity(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    target_sensitivity: str,
+    content: str,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="原始事实",
+            sensitivity=target_sensitivity,
+            source_kind="explicit_request",
+        ),
+    )
+    evidence = source(text=content, explicit=True)
+    proposal = MemoryProposal(
+        operation="contradict",
+        item_id=target.id,
+        content=content,
+        confidence=0.5,
+        source_kind="explicit_request",
+        explicit_memory=True,
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (evidence,),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].sensitivity == "sensitive"
+    committed = store.commit_review(GROUP, (), result.accepted, trigger_class="explicit")
+    assert committed[0].status == "candidate"
+    assert committed[0].sensitivity == "sensitive"
 
 
 def test_sensitive_classifier_still_requires_explicit_subject_consent(

@@ -9,9 +9,14 @@ import pytest
 
 import qq_agent_bridge.memory_commands as memory_commands_module
 from qq_agent_bridge.config import BridgeConfig
-from qq_agent_bridge.long_term_memory import LongTermMemoryStore
-from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope
+from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
+from qq_agent_bridge.long_term_memory_models import (
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+)
 from qq_agent_bridge.memory_commands import MemoryCommandService, build_memory_command_interpreter
+from qq_agent_bridge.memory_curation import MemoryActor, MemoryValidator
 from qq_agent_bridge.storage_gate import StorageActivityGate
 from qq_agent_bridge.types import ChatEvent
 
@@ -426,6 +431,15 @@ def test_intent_specific_schema_rejects_malformed_output_without_mutation(
         "VENDOR_SESSION_TOKEN=opaquevalue123456",
         "SERVICE_CLIENT_SECRET=opaquevalue123456",
         "PROVIDER_REFRESH_TOKEN=opaquevalue123456",
+        "DATABASE_PASSWORD is opaquevalue123456",
+        "REDIS_PASSWD are opaquevalue123456",
+        "SESSION_COOKIE equals opaquevalue123456",
+        "_OPENAI_API_KEY=opaquevalue123456",
+        "_PASSWORD=opaquevalue123456",
+        "__SERVICE_PRIVATE_KEY: opaquevalue123456",
+        "APP_RECOVERY_CODES are opaquevalue123456",
+        "APP_BACKUP_CODE equals opaquevalue123456",
+        "MY_APP_REFRESH_TOKEN is opaquevalue123456",
     ],
 )
 def test_remember_and_correct_reject_extended_credential_labels(
@@ -485,6 +499,12 @@ def test_forget_scrubs_credential_fixture_from_items_fts_and_revisions(tmp_path:
         "13800138000",
         "110101199001011234",
         "6222020200000000",
+        "+8613800138000",
+        "138-0013-8000",
+        "138 0013 8000",
+        "110101-19900101-1234",
+        "6222 0202 0000 0000",
+        "6222-0202-0000-0000",
     ],
 )
 def test_remember_and_correct_conservatively_escalate_sensitive_content(
@@ -524,14 +544,19 @@ def test_correcting_sensitive_item_to_benign_text_does_not_downgrade(tmp_path: P
     assert item.sensitivity == "sensitive"
 
 
-def test_standalone_mobile_remains_sensitive_after_benign_correction(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "content",
+    ["+86 138 0013 8000", "110101-19900101-1234", "6222-0202-0000-0000"],
+    ids=["formatted-mobile", "formatted-id", "formatted-card"],
+)
+def test_formatted_identifier_remains_sensitive_after_benign_correction(
+    tmp_path: Path, content: str
 ) -> None:
     db = store(tmp_path)
     db.set_scope_enabled(GROUP, True)
     service = MemoryCommandService(config(), db)
 
-    assert "已记住" in run(service.handle(event(), "remember 13800138000")).text
+    assert "已记住" in run(service.handle(event(), f"remember {content}")).text
     item = db.list_items(GROUP, subject_id="member")[0]
     assert item.sensitivity == "sensitive"
 
@@ -541,6 +566,63 @@ def test_standalone_mobile_remains_sensitive_after_benign_correction(
     corrected = db.get_item(GROUP, item.id)
     assert corrected is not None
     assert corrected.sensitivity == "sensitive"
+
+
+def test_low_confidence_sensitive_contradiction_confirmation_stays_private(
+    tmp_path: Path,
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    target_id = seed(
+        db,
+        subject_kind="user",
+        subject_id="member",
+        content="普通联系方式",
+    )
+    cfg = config()
+    content = "+86 138-0013-8000"
+    source = MemorySource(
+        scope=GROUP,
+        message_id="low-sensitive",
+        sender_id="member",
+        text=content,
+        message_timestamp=1_700_000_001,
+        explicit=True,
+    )
+    validation = MemoryValidator(cfg, store=db).validate(
+        GROUP,
+        (source,),
+        (
+            MemoryProposal(
+                operation="contradict",
+                item_id=target_id,
+                content=content,
+                confidence=0.5,
+                source_kind="explicit_request",
+                explicit_memory=True,
+            ),
+        ),
+        actor=MemoryActor("member", "member"),
+    )
+    assert validation.rejected == ()
+    assert validation.accepted[0].operation == "mark_candidate"
+    assert validation.accepted[0].sensitivity == "sensitive"
+
+    committed = db.commit_review(GROUP, (), validation.accepted, trigger_class="explicit")
+    candidate = committed[0]
+    assert candidate.status == "candidate"
+    assert candidate.sensitivity == "sensitive"
+
+    service = MemoryCommandService(cfg, db)
+    assert "已确认" in run(service.handle(event(mid="confirm"), f"confirm {candidate.id}")).text
+    confirmed = db.get_item(GROUP, candidate.id)
+    assert confirmed is not None
+    assert confirmed.status == "active"
+    assert confirmed.sensitivity == "sensitive"
+    retrieved = LongTermMemoryRetriever(db, cfg.long_term_memory).retrieve(
+        GROUP, "member", (), None, content
+    )
+    assert content not in retrieved
 
 
 def test_candidate_confirmation_respects_subject_and_sensitivity(tmp_path: Path) -> None:

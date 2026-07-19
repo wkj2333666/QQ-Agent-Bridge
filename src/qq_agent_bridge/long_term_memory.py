@@ -1037,7 +1037,9 @@ class LongTermMemoryStore:
             content=proposal.content,
             confidence=proposal.confidence,
             status="candidate",
-            sensitivity=str(target["sensitivity"]),
+            sensitivity=_maximum_sensitivity(
+                target["sensitivity"], proposal.sensitivity
+            ),
             source_kind=proposal.source_kind,
             explicit_memory=proposal.explicit_memory,
             decay_exempt=proposal.decay_exempt,
@@ -1091,11 +1093,12 @@ class LongTermMemoryStore:
             candidate_target = self._get_item_row(conn, scope, candidate_target_id)
             if candidate_target is None:
                 raise ValueError("candidate target does not exist in scope")
+            target_sensitivity = str(candidate_target["sensitivity"])
+            sensitivity = _maximum_sensitivity(target_sensitivity, sensitivity)
             if (
                 str(candidate_target["subject_kind"]) != str(proposal.subject_kind)
                 or str(candidate_target["subject_id"]) != str(proposal.subject_id)
                 or str(candidate_target["category"]) != category
-                or str(candidate_target["sensitivity"]) != sensitivity
             ):
                 raise ValueError("candidate target metadata does not match proposal")
             candidate_target_id = str(candidate_target["id"])
