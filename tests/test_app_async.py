@@ -4335,6 +4335,35 @@ def test_reply_cleanup_requests_only_pressure_check() -> None:
     asyncio.run(go())
 
 
+def test_outgoing_job_paths_are_protected_until_reply_cleanup(tmp_path: Path) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.agent.default_workspace = str(tmp_path)
+        cfg.workspaces = {str(tmp_path): True}
+        app = App(cfg)
+        job = Job(
+            id="active-resource-job",
+            cmd="task",
+            args="生成文件",
+            event=make_ev("/task 生成文件", group="group"),
+        )
+
+        app._configure_outgoing_resources(job)
+
+        assert job.outgoing_dir is not None
+        outgoing = Path(job.outgoing_dir)
+        sending = tmp_path / cfg.resources.root / "sending" / "active-resource-job"
+        assert app.storage_maintainer.is_protected(outgoing)
+        assert app.storage_maintainer.is_protected(sending)
+
+        await app._cleanup_reply_job(job)
+
+        assert not app.storage_maintainer.is_protected(outgoing)
+        assert not app.storage_maintainer.is_protected(sending)
+
+    asyncio.run(go())
+
+
 def test_reload_reports_storage_root_change(tmp_path: Path) -> None:
     async def go() -> None:
         cfg = make_cfg()

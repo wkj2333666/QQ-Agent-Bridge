@@ -92,6 +92,43 @@ agent:
 为 `0700`、文件为 `0600`，并会对敏感字段和长度做脱敏/截断。排查结束后请按需清理
 `runtime/agent-traces/` 中的本地日志。
 
+## 自动存储维护
+
+Bridge 内置了有边界的进程内清理，只管理三类由本项目创建的数据：
+
+- `agent.sandbox_home` 下的 Agent 沙箱状态；
+- `agent.trace_root` 直属目录中的普通 `*.jsonl` 文件；
+- `resources.root` 下按日期保存的接收资源，以及 `outgoing`、`sending` 任务目录。
+
+维护会在启动时先运行一次，之后按 `interval_seconds` 周期运行，默认值为
+`21600`（6 小时）。每个任务结束后只做一次廉价的磁盘可用空间检查，必要时提前
+请求压力清理。活动任务、主动发言、自然语言 schedule 解析、资源准备和 artifact
+repair 与维护共用互斥门，因此清理不会和正在使用这些目录的工作重叠。
+
+默认限制如下：
+
+| 区域 | 容量上限 | 保留期 |
+| --- | ---: | ---: |
+| 沙箱 | `2147483648` 字节（2 GiB） | `1209600` 秒（14 天） |
+| Trace | `536870912` 字节（512 MiB） | `1209600` 秒（14 天） |
+| 接收资源 | 共用 `5368709120` 字节（5 GiB） | `604800` 秒（7 天） |
+| `outgoing` / `sending` | 共用 `5368709120` 字节（5 GiB） | `86400` 秒（24 小时） |
+
+相关文件系统可用空间低于 `5368709120` 字节（5 GiB）时会触发压力清理。扫描数量
+和单次运行时间都有上限。符号链接、未知目录、Cursor 认证/配置、当前任务数据和
+生成的 runtime skill bundle 不会被跟随或选中。失败日志不记录资源名、prompt 或
+token，也不会阻止 bridge 继续运行。
+
+设置 `storage_maintenance.enabled: false` 可以完全关闭自动维护。某区域的
+`max_bytes: 0` 只关闭容量清理，保留期设为 `0` 只关闭对应的年龄清理。限制和周期
+可以热更新；修改 `agent.sandbox_home`、`agent.trace_root`、默认 workspace 或
+`resources.root` 后需要重启，当前进程在重启前仍只使用启动时验证过的旧根目录。
+
+```yaml
+storage_maintenance:
+  enabled: false
+```
+
 ## OneBot 网关
 
 仓库里带了一个 NapCatQQ 的 compose 模板，位于 `runtime/napcat/`。它只是部署辅助；NapCatQQ 本身是独立项目。

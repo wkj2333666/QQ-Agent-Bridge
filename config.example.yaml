@@ -102,6 +102,7 @@ storage_maintenance:
   interval_seconds: 21600
   min_free_bytes: 5368709120
   sandbox:
+    # 0 disables this capacity or age rule; it never means "delete everything".
     max_bytes: 2147483648
     retention_seconds: 1209600
   traces:

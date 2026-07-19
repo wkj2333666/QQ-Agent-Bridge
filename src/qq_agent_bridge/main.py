@@ -126,6 +126,7 @@ class App:
         self._heartbeat_tasks: set[asyncio.Task[None]] = set()
         self._artifact_repair_tasks: set[asyncio.Task[str]] = set()
         self._outgoing_jobs: dict[str, Job] = {}
+        self._protected_storage_paths: dict[str, tuple[Path, ...]] = {}
         self._progress_reporters: dict[str, ProgressReporter] = {}
         self._schedule_parse_outcomes: dict[str, NaturalScheduleOutcome] = {}
         self._schedule_parse_mentions: dict[str, tuple[str, ...]] = {}
@@ -590,6 +591,8 @@ class App:
         except Exception:  # noqa: BLE001 - cleanup must not mask the original job outcome
             logger.exception("job cleanup failed job=%s", job.id)
         finally:
+            for path in self._protected_storage_paths.pop(job.id, ()):
+                self.storage_maintainer.unprotect_path(path)
             self.storage_maintainer.request_pressure_check()
 
     async def _reply_when_done_inner(self, job: Job) -> None:
@@ -1684,9 +1687,16 @@ class App:
         job.outgoing_dir_dev = outbox_stat.st_dev
         job.outgoing_dir_ino = outbox_stat.st_ino
         self._outgoing_jobs[job.event.id] = job
+        sending = workspace / self.cfg.resources.root / "sending" / self._safe_job_id(job.id)
+        protected_paths = (outbox, sending)
+        self._protected_storage_paths[job.id] = protected_paths
+        for path in protected_paths:
+            self.storage_maintainer.protect_path(path)
 
     def _safe_job_id(self, job_id: str) -> str:
-        safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in job_id)
+        safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in job_id).strip(
+            ".-"
+        )
         return safe[:64] or "job"
 
     def _build_resource_manager(self, cfg: BridgeConfig) -> ResourceManager:
