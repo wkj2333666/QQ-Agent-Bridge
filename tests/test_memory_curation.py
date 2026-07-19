@@ -187,6 +187,14 @@ def test_collector_stores_group_culture_and_structured_provenance(
         (make_event("备份代码：9", group="g"), None),
         (make_event("private key: opaquevalue123456", group="g"), None),
         (make_event("private-key equals opaquevalue123456", group="g"), None),
+        (make_event("secret key: opaquevalue123456", group="g"), None),
+        (make_event("secret-key equals opaquevalue123456", group="g"), None),
+        (make_event("SECRET_KEY=opaquevalue123456", group="g"), None),
+        (make_event("DJANGO_SECRET_KEY=opaquevalue123456", group="g"), None),
+        (make_event("JWT_SECRET_KEY is opaquevalue123456", group="g"), None),
+        (make_event("passphrase: alpha beta gamma", group="g"), None),
+        (make_event("SSH_KEY_PASSPHRASE=alpha beta gamma", group="g"), None),
+        (make_event("SSH_PRIVATE_KEY_PASSPHRASE=alpha beta gamma", group="g"), None),
         (make_event("私钥：opaquevalue123456", group="g"), None),
         (make_event("recovery phrase is alpha beta gamma", group="g"), None),
         (make_event("backup key: opaquevalue123456", group="g"), None),
@@ -194,8 +202,16 @@ def test_collector_stores_group_culture_and_structured_provenance(
         (make_event("seed-phrase is alpha beta gamma", group="g"), None),
         (make_event("mnemonic: alpha beta gamma", group="g"), None),
         (make_event("mnemonic phrase equals alpha beta gamma", group="g"), None),
+        (make_event("mnemonic words are alpha beta gamma", group="g"), None),
+        (make_event("recovery words: alpha beta gamma", group="g"), None),
+        (make_event("backup-words equals alpha beta gamma", group="g"), None),
+        (make_event("seed words is alpha beta gamma", group="g"), None),
         (make_event("_SEED_PHRASE=alpha beta gamma", group="g"), None),
         (make_event("__MNEMONIC_PHRASE is alpha beta gamma", group="g"), None),
+        (make_event("WALLET_MNEMONIC_WORDS=alpha beta gamma", group="g"), None),
+        (make_event("APP_RECOVERY_WORDS are alpha beta gamma", group="g"), None),
+        (make_event("_BACKUP_WORDS: alpha beta gamma", group="g"), None),
+        (make_event("__SEED_WORDS equals alpha beta gamma", group="g"), None),
         (make_event("助记词是 甲乙丙丁", group="g"), None),
         (make_event("恢复短语：甲乙丙丁", group="g"), None),
         (make_event("种子短语等于 甲乙丙丁", group="g"), None),
@@ -220,6 +236,23 @@ def test_collector_rejects_ineligible_or_secret_material(
 
     assert not MemoryCollector(store, cfg).collect_event(event, command_name=command_name)
     assert store.pending_sources(GROUP, 10) == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We should rotate the secret key regularly",
+        "I use mnemonic words to remember the order",
+        "A passphrase policy should be documented",
+    ],
+)
+def test_collector_requires_assignment_before_rejecting_secret_labels(
+    store: LongTermMemoryStore, cfg: BridgeConfig, text: str
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+
+    assert MemoryCollector(store, cfg).collect_event(make_event(text, group="g"))
+    assert store.pending_sources(GROUP, 10)[0].text == text
 
 
 def test_collector_rejects_disabled_global_or_exact_scope(
@@ -570,6 +603,16 @@ def test_validator_rejects_shared_secret_assignment_variants(
         "MY_APP_REFRESH_TOKEN is opaquevalue123456",
         "private key: opaquevalue123456",
         "private-key equals opaquevalue123456",
+        "secret key: opaquevalue123456",
+        "secret-key equals opaquevalue123456",
+        "SECRET_KEY=opaquevalue123456",
+        "DJANGO_SECRET_KEY=opaquevalue123456",
+        "JWT_SECRET_KEY is opaquevalue123456",
+        "passphrase: alpha beta gamma",
+        "key-passphrase equals alpha beta gamma",
+        "WALLET_PASSPHRASE=alpha beta gamma",
+        "SSH_KEY_PASSPHRASE is alpha beta gamma",
+        "SSH_PRIVATE_KEY_PASSPHRASE=alpha beta gamma",
         "私钥：opaquevalue123456",
         "recovery phrase is alpha beta gamma",
         "recovery-key: opaquevalue123456",
@@ -580,8 +623,16 @@ def test_validator_rejects_shared_secret_assignment_variants(
         "seed code equals opaquevalue123456",
         "mnemonic: alpha beta gamma",
         "mnemonic phrase equals alpha beta gamma",
+        "mnemonic words are alpha beta gamma",
+        "recovery words: alpha beta gamma",
+        "backup-words equals alpha beta gamma",
+        "seed words is alpha beta gamma",
         "_SEED_PHRASE=alpha beta gamma",
         "__MNEMONIC_PHRASE is alpha beta gamma",
+        "WALLET_MNEMONIC_WORDS=alpha beta gamma",
+        "APP_RECOVERY_WORDS are alpha beta gamma",
+        "_BACKUP_WORDS: alpha beta gamma",
+        "__SEED_WORDS equals alpha beta gamma",
         "助记词是 甲乙丙丁",
         "恢复短语：甲乙丙丁",
         "种子短语等于 甲乙丙丁",
@@ -656,6 +707,16 @@ def test_sensitive_personal_fact_requires_explicit_request_by_subject(
         "138.0013.8000",
         "(138) 0013 8000",
         "+86-(138)-0013.8000",
+        "138–0013–8000",
+        "138—0013—8000",
+        "138‐0013‑8000",
+        "138‒0013−8000",
+        "138―0013﹘8000",
+        "138﹣0013－8000",
+        "138．0013．8000",
+        "＋86（138）0013－8000",
+        "＋86　（138）　0013－8000",
+        "＋86 (138) 0013-8000",
     ],
 )
 def test_validator_conservatively_escalates_sensitive_personal_content(
@@ -687,6 +748,8 @@ def test_validator_conservatively_escalates_sensitive_personal_content(
         "013800138000",
         "138001380001",
         "138)0013(8000",
+        "138/0013/8000",
+        "１３８－００１３－８０００",
     ],
 )
 def test_mobile_classifier_does_not_match_inside_longer_digit_run(content: str) -> None:
