@@ -8,6 +8,7 @@ import sqlite3
 from typing import Any
 
 import yaml
+import pytest
 
 import qq_agent_bridge.main as main_module
 from qq_agent_bridge.config import BridgeConfig
@@ -260,8 +261,142 @@ def test_run_starts_memory_before_onebot_and_closes_it_on_shutdown(
         await asyncio.wait_for(task, 1)
 
         assert order.index("memory-start") < order.index("onebot-start")
-        assert order.index("memory-stop") < order.index("onebot-stop")
+        assert order.index("onebot-stop") < order.index("memory-stop")
         assert coordinator.stopped
+        assert app.long_term_memory_store is None
+
+    asyncio.run(go())
+
+
+def test_adapter_start_failure_cleans_initialized_memory_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        order: list[str] = []
+        coordinator = FakeCoordinator(order)
+        install_fake_memory_builders(monkeypatch, coordinator)
+        app = App(config(tmp_path), config_path=tmp_path / "config.yaml")
+
+        class FailingAdapter(FakeAdapter):
+            async def start(self, _handler: Any) -> None:
+                order.append("onebot-start")
+                raise RuntimeError("injected adapter failure")
+
+        app.adapter = FailingAdapter(order)  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError, match="injected adapter failure"):
+            await app.run()
+
+        assert order.index("onebot-stop") < order.index("memory-stop")
+        assert coordinator.stopped
+        assert app.long_term_memory_store is None
+
+    asyncio.run(go())
+
+
+def test_scheduler_start_failure_cleans_adapter_and_memory_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        order: list[str] = []
+        cfg = config(tmp_path)
+        cfg.scheduler.enabled = True
+        coordinator = FakeCoordinator(order)
+        install_fake_memory_builders(monkeypatch, coordinator)
+        app = App(cfg, config_path=tmp_path / "config.yaml")
+        app.adapter = FakeAdapter(order)  # type: ignore[assignment]
+
+        class FailingScheduler:
+            def initialize(self) -> None:
+                order.append("scheduler-initialize")
+
+            async def start(self) -> None:
+                order.append("scheduler-start")
+                raise RuntimeError("injected scheduler failure")
+
+            async def stop(self) -> None:
+                order.append("scheduler-stop")
+
+        app.scheduler = FailingScheduler()  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError, match="injected scheduler failure"):
+            await app.run()
+
+        assert order.index("scheduler-stop") < order.index("onebot-stop")
+        assert order.index("onebot-stop") < order.index("memory-stop")
+        assert app.long_term_memory_store is None
+
+    asyncio.run(go())
+
+
+def test_cancellation_during_memory_start_closes_local_store_and_coordinator(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        entered = asyncio.Event()
+
+        class BlockingCoordinator(FakeCoordinator):
+            async def start(self) -> None:
+                entered.set()
+                await asyncio.Future()
+
+        coordinator = BlockingCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        app = App(config(tmp_path), config_path=tmp_path / "config.yaml")
+        task = asyncio.create_task(app.run())
+        await asyncio.wait_for(entered.wait(), 1)
+
+        task.cancel()
+        await asyncio.wait_for(task, 1)
+
+        assert coordinator.stopped
+        assert app.long_term_memory_store is None
+        reopened = LongTermMemoryStore(tmp_path / "data" / "memory.sqlite3")
+        reopened.initialize()
+        reopened.close()
+
+    asyncio.run(go())
+
+
+def test_cancellation_during_memory_start_bounds_resistant_coordinator_stop(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        start_entered = asyncio.Event()
+        stop_cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class ResistantStartupCoordinator(FakeCoordinator):
+            async def start(self) -> None:
+                start_entered.set()
+                await asyncio.Future()
+
+            async def stop(self) -> None:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    stop_cancelled.set()
+                    await release.wait()
+
+        coordinator = ResistantStartupCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        monkeypatch.setattr(main_module, "MEMORY_REVIEW_SHUTDOWN_GRACE_SECONDS", 0.01)
+        app = App(config(tmp_path), config_path=tmp_path / "config.yaml")
+        task = asyncio.create_task(app.run())
+        await asyncio.wait_for(start_entered.wait(), 1)
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        returned_before_release = task.done()
+        release.set()
+        await asyncio.wait_for(task, 1)
+
+        assert stop_cancelled.is_set()
+        assert returned_before_release
         assert app.long_term_memory_store is None
 
     asyncio.run(go())
@@ -333,6 +468,65 @@ def test_enabled_group_and_private_events_collect_without_waiting_for_review(
         await app._shutdown_long_term_memory()
 
     asyncio.run(go())
+
+
+def test_unmentioned_slash_commands_are_never_collected(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.long_term_memory.groups = {"group": True}
+        coordinator = FakeCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        app = App(cfg, config_path=tmp_path / "config.yaml")
+        app.adapter = FakeAdapter()  # type: ignore[assignment]
+        app.policy = Policy(cfg, lambda _job: asyncio.sleep(0, result="ok"))
+        await app._initialize_long_term_memory()
+
+        for index, text in enumerate(
+            ("/help", "/memory disable", "/status", "/ask 不应采集", "/unknown 内容"),
+            start=1,
+        ):
+            await app._handle(event(text, mentioned=False, mid=f"command-{index}"))
+
+        assert app.long_term_memory_store is not None
+        assert app.long_term_memory_store.pending_sources(
+            MemoryScope("group", "group"), 10
+        ) == ()
+        assert coordinator.notifications == []
+        await app._shutdown_long_term_memory()
+
+    asyncio.run(go())
+
+
+def test_private_long_term_retrieval_uses_trusted_sender_scope(
+    tmp_path: Path,
+) -> None:
+    cfg = config(tmp_path)
+    app = App(cfg, config_path=tmp_path / "config.yaml")
+    calls: list[tuple[Any, ...]] = []
+
+    class CapturingRetriever:
+        def retrieve(self, *args: Any) -> str:
+            calls.append(args)
+            return "private context"
+
+    app.long_term_memory_retriever = CapturingRetriever()  # type: ignore[assignment]
+    private = ChatEvent(
+        id="private-mismatch",
+        platform="qq",
+        chat_id="transport-supplied-other-scope",
+        sender_id="authenticated-sender",
+        is_group=False,
+        mentioned_bot=True,
+        text="记得我吗",
+        timestamp=10,
+    )
+
+    assert app._long_term_context_for(private, private.text) == "private context"
+    assert calls[0][0] == MemoryScope("private", "authenticated-sender")
+    assert calls[0][1] == "authenticated-sender"
 
 
 def test_collection_uses_only_trusted_quote_sender_for_direct_interaction(
@@ -498,6 +692,137 @@ def test_reload_updates_exact_maps_and_settings_but_keeps_open_database_path(
         assert app.long_term_memory_collector.cfg is app.cfg
         assert app.memory_commands is not None and app.memory_commands.cfg is app.cfg
         assert coordinator.reloads == [app.cfg]
+        await app._shutdown_long_term_memory()
+
+    asyncio.run(go())
+
+
+def test_reload_scope_failure_keeps_old_config_runtime_and_persistent_choices(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.long_term_memory.groups = {"group": True}
+        coordinator = FakeCoordinator()
+        install_fake_memory_builders(monkeypatch, coordinator)
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        await app._initialize_long_term_memory()
+        assert app.long_term_memory_store is not None
+        store = app.long_term_memory_store
+        store._conn.execute(
+            """
+            CREATE TRIGGER reject_scope BEFORE INSERT ON memory_scopes
+            WHEN NEW.scope_id = 'reject-me'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected scope failure');
+            END
+            """
+        )
+        old_cfg = app.cfg
+        old_collector = app.long_term_memory_collector
+        old_retriever = app.long_term_memory_retriever
+        old_commands = app.memory_commands
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "storage_maintenance": {"enabled": False},
+                    "long_term_memory": {
+                        "enabled": True,
+                        "default_scope_enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                        "groups": {"group": False, "reject-me": True},
+                        "users": {},
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        ok, message = await app._reload_config()
+
+        assert not ok
+        assert message.startswith("[error] 配置重载失败：")
+        assert app.cfg is old_cfg
+        assert app.long_term_memory_collector is old_collector
+        assert app.long_term_memory_retriever is old_retriever
+        assert app.memory_commands is old_commands
+        assert store.default_scope_enabled is False
+        assert store.is_scope_enabled(MemoryScope("group", "group"))
+        assert not store.is_scope_enabled(MemoryScope("group", "reject-me"))
+        assert coordinator.reloads == []
+        await app._shutdown_long_term_memory()
+
+    asyncio.run(go())
+
+
+def test_reload_coordinator_failure_rolls_back_scope_choices_and_runtime(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.long_term_memory.groups = {"group": True}
+        coordinator = FakeCoordinator()
+        coordinator.current_cfg = cfg  # type: ignore[attr-defined]
+        install_fake_memory_builders(monkeypatch, coordinator)
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        await app._initialize_long_term_memory()
+        assert app.long_term_memory_store is not None
+        store = app.long_term_memory_store
+        old_cfg = app.cfg
+        old_collector = app.long_term_memory_collector
+        reload_calls: list[Any] = []
+
+        def fail_new_runtime(candidate: Any) -> None:
+            reload_calls.append(candidate)
+            coordinator.current_cfg = candidate  # type: ignore[attr-defined]
+            if candidate is not old_cfg:
+                raise RuntimeError("injected coordinator failure")
+
+        coordinator.reload = fail_new_runtime  # type: ignore[method-assign]
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "storage_maintenance": {"enabled": False},
+                    "long_term_memory": {
+                        "enabled": True,
+                        "default_scope_enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                        "groups": {"group": False, "new-group": True},
+                        "users": {},
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        ok, _message = await app._reload_config()
+
+        assert not ok
+        assert app.cfg is old_cfg
+        assert app.long_term_memory_collector is old_collector
+        assert coordinator.current_cfg is old_cfg  # type: ignore[attr-defined]
+        assert reload_calls[-1] is old_cfg
+        assert store.default_scope_enabled is False
+        assert store.is_scope_enabled(MemoryScope("group", "group"))
+        assert not store.is_scope_enabled(MemoryScope("group", "new-group"))
         await app._shutdown_long_term_memory()
 
     asyncio.run(go())
@@ -704,5 +1029,37 @@ def test_shutdown_drain_is_bounded_for_cancellation_resistant_review_delivery(
 
         assert cancellation_seen.is_set()
         assert returned_with_resistant_task
+
+    asyncio.run(go())
+
+
+def test_memory_coordinator_shutdown_has_an_app_level_deadline(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        app = App(config(tmp_path), config_path=tmp_path / "config.yaml")
+        release = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+
+        class ResistantCoordinator:
+            async def stop(self) -> None:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancellation_seen.set()
+                    await release.wait()
+
+        app.memory_review_coordinator = ResistantCoordinator()  # type: ignore[assignment]
+        monkeypatch.setattr(main_module, "MEMORY_REVIEW_SHUTDOWN_GRACE_SECONDS", 0.01)
+
+        shutdown = asyncio.create_task(app._shutdown_long_term_memory())
+        await asyncio.sleep(0.05)
+        returned_before_release = shutdown.done()
+        release.set()
+        await asyncio.wait_for(shutdown, 1)
+
+        assert cancellation_seen.is_set()
+        assert returned_before_release
 
     asyncio.run(go())

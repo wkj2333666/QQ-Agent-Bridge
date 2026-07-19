@@ -190,12 +190,21 @@ def _prompt_memory_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
 def _long_term_memory_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
     if not cfg.long_term_memory.enabled:
         return ""
-    access = cfg.command_access("memory", ev.chat_id if ev.is_group else None)
-    if access == "disabled":
+    is_owner = cfg.is_owner(ev.sender_id)
+    group_id = ev.chat_id if ev.is_group else None
+    if not _command_visible(cfg, "memory", is_owner, group_id):
         return ""
+    scope_text = "长期记忆按当前群或私聊隔离，默认关闭；"
+    if not ev.is_group or is_owner:
+        return (
+            scope_text
+            + "可用 /memory enable 显式开启、/memory review now 立即复盘，"
+            "用 /memory help 查看管理方式。"
+        )
     return (
-        "长期记忆按当前群或私聊隔离，默认关闭；"
-        "可用 /memory enable 显式开启，用 /memory help 查看管理方式。"
+        scope_text
+        + "可用 /memory status、/memory list 和 /memory remember 管理自己的条目；"
+        "只有 owner 能显式开启或关闭本群长期记忆并立即复盘。"
     )
 
 

@@ -21,7 +21,7 @@ from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, 
 from .command_access_store import write_command_access_to_config
 from .command_help import build_command_help
 from .long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
-from .long_term_memory_models import MemoryScope
+from .long_term_memory_models import MemoryScope, exact_memory_scope
 from .memory import ConversationMemory, GroupAmbientMemory
 from .memory_commands import (
     MemoryCommandService,
@@ -179,7 +179,8 @@ class App:
         if self._is_self_event(ev):
             return
         if ev.is_group and not ev.mentioned_bot:
-            self._collect_long_term_event(ev)
+            if not re.match(r"^\s*[/／]", ev.text):
+                self._collect_long_term_event(ev)
             if self._should_cache_unmentioned_resources(ev):
                 self.attachment_cache.remember(ev)
             if self._should_remember_ambient(ev):
@@ -455,9 +456,10 @@ class App:
             collected = collector.collect_event(ev, command_name=command_name)
             if not collected:
                 return False
-            scope = MemoryScope(
-                "group" if ev.is_group else "private",
-                ev.chat_id if ev.is_group else ev.sender_id,
+            scope = exact_memory_scope(
+                is_group=ev.is_group,
+                chat_id=ev.chat_id,
+                sender_id=ev.sender_id,
             )
             coordinator.notify(scope)
             return True
@@ -967,14 +969,36 @@ class App:
             logger.exception("config reload failed")
             return False, f"[error] 配置重载失败：{type(exc).__name__}"
 
+        try:
+            new_agent = build_agent_adapter(cfg)
+            new_gated_agent = GatedAgentAdapter(new_agent, self.storage_gate)
+            new_search = WorkspaceSearch(cfg)
+            new_transcriber, new_resources = self._resource_manager_parts(cfg)
+            new_schedule_parser = NaturalLanguageScheduleParser(cfg, new_gated_agent)
+            new_proactive = ProactiveSpeaker(
+                cfg,
+                new_gated_agent,
+                self._send_proactive,
+                ambient_context=self._proactive_ambient_context,
+                long_term_context=self._retrieve_long_term_context,
+                remember=self._remember_proactive_exchange,
+            )
+        except Exception as exc:  # noqa: BLE001 - no live state has changed yet
+            logger.warning("config reload staging failed error=%s", type(exc).__name__)
+            return False, f"[error] 配置重载失败：{type(exc).__name__}"
+
+        memory_ok, memory_note = await self._reload_long_term_memory(cfg)
+        if not memory_ok:
+            return False, f"[error] 配置重载失败：{memory_note}"
+
         self.cfg = cfg
         storage_roots_changed = self.storage_maintainer.reload_config(cfg)
-        self.agent = build_agent_adapter(cfg)
-        self.cursor = self.agent
-        self.gated_agent = GatedAgentAdapter(self.agent, self.storage_gate)
-        self.search = WorkspaceSearch(cfg)
-        self.resources = self._build_resource_manager(cfg)
-        memory_note = await self._reload_long_term_memory(cfg)
+        self.agent = new_agent
+        self.cursor = new_agent
+        self.gated_agent = new_gated_agent
+        self.search = new_search
+        self.transcriber = new_transcriber
+        self.resources = new_resources
         self.memory.max_messages = cfg.memory.max_messages
         self.memory.max_chars = cfg.memory.max_chars
         self.ambient_memory.configure(
@@ -994,7 +1018,7 @@ class App:
             self.policy.reload_config(cfg)
         old_schedule_path = self.schedule_database_path
         new_schedule_path = self._schedule_database_path(cfg)
-        self.schedule_nl_parser = NaturalLanguageScheduleParser(cfg, self.gated_agent)
+        self.schedule_nl_parser = new_schedule_parser
         self.scheduler.reload_config(cfg.scheduler)
         schedule_note = ""
         if new_schedule_path != old_schedule_path:
@@ -1008,14 +1032,7 @@ class App:
             else:
                 await self.scheduler.stop()
         await self.proactive.stop()
-        self.proactive = ProactiveSpeaker(
-            cfg,
-            self.gated_agent,
-            self._send_proactive,
-            ambient_context=self._proactive_ambient_context,
-            long_term_context=self._retrieve_long_term_context,
-            remember=self._remember_proactive_exchange,
-        )
+        self.proactive = new_proactive
         storage_note = " 存储根目录变更需要重启。" if storage_roots_changed else ""
         return True, (
             f"配置已重载。OneBot 连接参数变更需要重启。"
@@ -1033,22 +1050,26 @@ class App:
         store: LongTermMemoryStore,
         cfg: BridgeConfig,
     ) -> None:
-        store.default_scope_enabled = bool(cfg.long_term_memory.default_scope_enabled)
-        for scope_id, enabled in cfg.long_term_memory.groups.items():
-            store.set_scope_enabled(MemoryScope("group", scope_id), enabled)
-        for scope_id, enabled in cfg.long_term_memory.users.items():
-            store.set_scope_enabled(MemoryScope("private", scope_id), enabled)
+        store.apply_scope_configuration(
+            default_scope_enabled=cfg.long_term_memory.default_scope_enabled,
+            groups=cfg.long_term_memory.groups,
+            users=cfg.long_term_memory.users,
+        )
 
-    async def _initialize_long_term_memory(self) -> None:
+    async def _initialize_long_term_memory(
+        self,
+        target_cfg: BridgeConfig | None = None,
+    ) -> None:
         if self.long_term_memory_store is not None:
             return
         self.long_term_memory_error = None
         self._long_term_memory_accepting = False
-        if self.echo_only or not self.cfg.long_term_memory.enabled:
+        app_cfg = target_cfg or self.cfg
+        if self.echo_only or not app_cfg.long_term_memory.enabled:
             return
 
-        cfg = self.cfg.long_term_memory
-        database_path = self._long_term_memory_path(self.cfg)
+        cfg = app_cfg.long_term_memory
+        database_path = self._long_term_memory_path(app_cfg)
         store = LongTermMemoryStore(
             database_path,
             default_scope_enabled=cfg.default_scope_enabled,
@@ -1060,26 +1081,28 @@ class App:
         try:
             async with self.storage_gate.activity():
                 store.initialize()
-                self._apply_long_term_memory_scope_config(store, self.cfg)
+                self._apply_long_term_memory_scope_config(store, app_cfg)
             coordinator = build_memory_review_coordinator(
-                self.cfg,
+                app_cfg,
                 store,
                 self.storage_gate,
-                self.cfg.agent.default_workspace,
+                app_cfg.agent.default_workspace,
             )
             interpreter = build_memory_command_interpreter(
-                self.cfg,
+                app_cfg,
                 self.storage_gate,
-                self.cfg.agent.default_workspace,
+                app_cfg.agent.default_workspace,
             )
             await coordinator.start()
-        except Exception as exc:  # noqa: BLE001 - isolate optional subsystem startup
+        except BaseException as exc:  # cleanup must also cover startup cancellation
             if coordinator is not None:
                 try:
-                    await coordinator.stop()
-                except Exception:  # noqa: BLE001 - startup cleanup is best effort
+                    await self._stop_memory_coordinator(coordinator)
+                except BaseException:  # noqa: BLE001 - preserve the original failure
                     pass
             store.close()
+            if not isinstance(exc, Exception):
+                raise
             self.long_term_memory_error = type(exc).__name__
             logger.warning(
                 "long-term memory startup failed error=%s",
@@ -1098,33 +1121,35 @@ class App:
         self._long_term_memory_protected_paths = protected
         self.long_term_memory_database_path = database_path
         self.long_term_memory_store = store
-        self.long_term_memory_collector = MemoryCollector(store, self.cfg)
+        self.long_term_memory_collector = MemoryCollector(store, app_cfg)
         self.long_term_memory_retriever = LongTermMemoryRetriever(
             store,
-            self.cfg.long_term_memory,
+            app_cfg.long_term_memory,
         )
         self.memory_review_coordinator = coordinator
         self.memory_commands = MemoryCommandService(
-            self.cfg,
+            app_cfg,
             store,
             interpreter=interpreter,
             acknowledge=self._acknowledge_memory_command,
         )
         self._long_term_memory_accepting = True
 
-    async def _reload_long_term_memory(self, cfg: BridgeConfig) -> str:
+    async def _reload_long_term_memory(self, cfg: BridgeConfig) -> tuple[bool, str]:
         store = self.long_term_memory_store
         if store is None:
             if cfg.long_term_memory.enabled:
-                await self._initialize_long_term_memory()
+                await self._initialize_long_term_memory(cfg)
                 if self.long_term_memory_store is None and self.long_term_memory_error:
-                    return f" 长期记忆不可用：{self.long_term_memory_error}。"
-            return ""
+                    return False, f"长期记忆不可用：{self.long_term_memory_error}"
+            return True, ""
 
         configured_path = self._long_term_memory_path(cfg)
         path_note = ""
         if configured_path != self.long_term_memory_database_path:
             path_note = " long_term_memory.database_path 变更需要重启。"
+        coordinator = self.memory_review_coordinator
+        coordinator_reload_attempted = False
         try:
             new_collector = MemoryCollector(store, cfg)
             new_retriever = LongTermMemoryRetriever(store, cfg.long_term_memory)
@@ -1140,26 +1165,38 @@ class App:
                 acknowledge=self._acknowledge_memory_command,
             )
             async with self.storage_gate.activity():
-                self._apply_long_term_memory_scope_config(store, cfg)
-            coordinator = self.memory_review_coordinator
-            if coordinator is not None:
-                coordinator.reload(cfg)
+                with store.scope_configuration_transaction(
+                    default_scope_enabled=cfg.long_term_memory.default_scope_enabled,
+                    groups=cfg.long_term_memory.groups,
+                    users=cfg.long_term_memory.users,
+                ):
+                    if coordinator is not None:
+                        coordinator_reload_attempted = True
+                        coordinator.reload(cfg)
             self.long_term_memory_collector = new_collector
             self.long_term_memory_retriever = new_retriever
             self.memory_commands = new_commands
             self._long_term_memory_accepting = bool(cfg.long_term_memory.enabled)
             self.long_term_memory_error = None
         except Exception as exc:  # noqa: BLE001 - retain the open store on reload errors
+            if coordinator is not None and coordinator_reload_attempted:
+                try:
+                    coordinator.reload(self.cfg)
+                except Exception as rollback_exc:  # noqa: BLE001 - report only error class
+                    logger.warning(
+                        "long-term memory runtime rollback failed error=%s",
+                        type(rollback_exc).__name__,
+                    )
             logger.warning("long-term memory reload failed error=%s", type(exc).__name__)
-            return f" 长期记忆配置重载失败：{type(exc).__name__}。{path_note}"
-        return path_note
+            return False, type(exc).__name__
+        return True, path_note
 
     async def _shutdown_long_term_memory(self) -> None:
         self._long_term_memory_accepting = False
         coordinator = self.memory_review_coordinator
         if coordinator is not None:
             try:
-                await coordinator.stop()
+                await self._stop_memory_coordinator(coordinator)
             except Exception as exc:  # noqa: BLE001 - shutdown is best effort
                 logger.warning("memory coordinator shutdown failed error=%s", type(exc).__name__)
         await self._drain_memory_review_tasks(cancel=True)
@@ -1175,6 +1212,35 @@ class App:
         self.long_term_memory_retriever = None
         self.memory_commands = None
         self.memory_review_coordinator = None
+
+    async def _stop_memory_coordinator(self, coordinator: object) -> None:
+        stop_task = asyncio.create_task(
+            coordinator.stop(),  # type: ignore[attr-defined]
+            name="memory-coordinator-stop",
+        )
+        done, pending = await asyncio.wait(
+            (stop_task,),
+            timeout=MEMORY_REVIEW_SHUTDOWN_GRACE_SECONDS,
+        )
+        if done:
+            results = await asyncio.gather(*done, return_exceptions=True)
+            failure = next((value for value in results if isinstance(value, BaseException)), None)
+            if failure is not None:
+                raise failure
+        if pending:
+            stop_task.cancel()
+            stop_task.add_done_callback(self._consume_task_result)
+            logger.warning(
+                "memory coordinator shutdown timed out pending=%d",
+                len(pending),
+            )
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[object]) -> None:
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
 
     def _chunk(self, text: str, size: int = 900) -> list[str]:
         # functional chunk
@@ -2032,36 +2098,44 @@ class App:
         return safe[:64] or "job"
 
     def _build_resource_manager(self, cfg: BridgeConfig) -> ResourceManager:
-        self.transcriber = (
+        self.transcriber, resources = self._resource_manager_parts(cfg)
+        return resources
+
+    def _resource_manager_parts(
+        self,
+        cfg: BridgeConfig,
+    ) -> tuple[WhisperRunner | None, ResourceManager]:
+        transcriber = (
             WhisperRunner(cfg.whisper)
             if cfg.whisper.enabled and cfg.whisper.binary and cfg.whisper.model
             else None
         )
         record_url = getattr(self.adapter, "resolve_record_url", None)
-        return ResourceManager(
+        resources = ResourceManager(
             cfg,
             record_url=record_url if callable(record_url) else None,
-            transcriber=self.transcriber,
+            transcriber=transcriber,
         )
+        return transcriber, resources
 
     async def run(self) -> None:
         logger.info("loading config, echo_only=%s", self.echo_only)
-        if not self.echo_only:
-            self.policy = Policy(self.cfg, self._agent_runner)
-            if self.cfg.scheduler.enabled:
-                self.scheduler.initialize()
-            await self._initialize_long_term_memory()
         try:
-            await self.storage_maintainer.start()
-        except Exception as exc:  # noqa: BLE001 - maintenance cannot block bridge startup
-            logger.warning(
-                "storage maintenance startup failed error=%s",
-                type(exc).__name__,
-            )
-        await self.adapter.start(self._handle)
-        if not self.echo_only:
-            await self.scheduler.start()
-        try:
+            if not self.echo_only:
+                self.policy = Policy(self.cfg, self._agent_runner)
+                if self.cfg.scheduler.enabled:
+                    self.scheduler.initialize()
+                await self._initialize_long_term_memory()
+            try:
+                await self.storage_maintainer.start()
+            except Exception as exc:  # noqa: BLE001 - maintenance cannot block bridge startup
+                logger.warning(
+                    "storage maintenance startup failed error=%s",
+                    type(exc).__name__,
+                )
+            await self.adapter.start(self._handle)
+            if not self.echo_only:
+                await self.scheduler.start()
             await asyncio.Future()  # run forever
         except asyncio.CancelledError:
             pass
@@ -2095,17 +2169,17 @@ class App:
             except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
                 logger.warning("proactive shutdown failed error=%s", type(exc).__name__)
             try:
-                await self._shutdown_long_term_memory()
+                await self.adapter.stop()
             except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
-                logger.warning("long-term memory shutdown failed error=%s", type(exc).__name__)
+                logger.warning("onebot shutdown failed error=%s", type(exc).__name__)
             try:
                 await self.storage_maintainer.stop()
             except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
                 logger.warning("storage maintenance shutdown failed error=%s", type(exc).__name__)
             try:
-                await self.adapter.stop()
-            except Exception as exc:  # noqa: BLE001 - shutdown is already best effort
-                logger.warning("onebot shutdown failed error=%s", type(exc).__name__)
+                await self._shutdown_long_term_memory()
+            except Exception as exc:  # noqa: BLE001 - continue the shutdown sequence
+                logger.warning("long-term memory shutdown failed error=%s", type(exc).__name__)
 
     async def _agent_runner(self, job: Job) -> str:
         self._cancel_memory_review_for_interactive()
@@ -2178,7 +2252,11 @@ class App:
             self.resources.cleanup_prepared(prepared_resources)
 
     def _long_term_context_for(self, ev: ChatEvent, query: str) -> str:
-        scope = MemoryScope("group" if ev.is_group else "private", ev.chat_id)
+        scope = exact_memory_scope(
+            is_group=ev.is_group,
+            chat_id=ev.chat_id,
+            sender_id=ev.sender_id,
+        )
         mentions = tuple(
             dict.fromkeys(
                 str(segment.qq)

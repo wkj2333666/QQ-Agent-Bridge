@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 import uuid
 
 from .config import LongTermMemoryConfig, MemoryRetrievalConfig
@@ -114,16 +114,69 @@ class LongTermMemoryStore:
     def set_scope_enabled(self, scope: MemoryScope, enabled: bool) -> None:
         now = int(time.time())
         with self._transaction() as conn:
-            conn.execute(
-                """
-                INSERT INTO memory_scopes(scope_kind, scope_id, enabled, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
-                    enabled = excluded.enabled,
-                    updated_at = excluded.updated_at
-                """,
-                (*self._scope_params(scope), int(bool(enabled)), now),
-            )
+            self._set_scope_enabled_conn(conn, scope, enabled, now)
+
+    def apply_scope_configuration(
+        self,
+        *,
+        default_scope_enabled: bool,
+        groups: Mapping[str, bool],
+        users: Mapping[str, bool],
+    ) -> None:
+        """Apply explicit scope overrides atomically without clearing omitted choices."""
+        with self.scope_configuration_transaction(
+            default_scope_enabled=default_scope_enabled,
+            groups=groups,
+            users=users,
+        ):
+            pass
+
+    @contextmanager
+    def scope_configuration_transaction(
+        self,
+        *,
+        default_scope_enabled: bool,
+        groups: Mapping[str, bool],
+        users: Mapping[str, bool],
+    ) -> Iterator[None]:
+        """Keep persisted choices pending until the caller's runtime swap is valid."""
+        new_default = bool(default_scope_enabled)
+        now = int(time.time())
+        with self._transaction() as conn:
+            for scope_id, enabled in groups.items():
+                self._set_scope_enabled_conn(
+                    conn,
+                    MemoryScope("group", scope_id),
+                    enabled,
+                    now,
+                )
+            for scope_id, enabled in users.items():
+                self._set_scope_enabled_conn(
+                    conn,
+                    MemoryScope("private", scope_id),
+                    enabled,
+                    now,
+                )
+            yield
+        self.default_scope_enabled = new_default
+
+    def _set_scope_enabled_conn(
+        self,
+        conn: sqlite3.Connection,
+        scope: MemoryScope,
+        enabled: bool,
+        now: int,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO memory_scopes(scope_kind, scope_id, enabled, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            """,
+            (*self._scope_params(scope), int(bool(enabled)), now),
+        )
 
     def collect(self, source: MemorySource) -> int | None:
         created_at = int(source.created_at or time.time())

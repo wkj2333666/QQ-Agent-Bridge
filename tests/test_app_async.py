@@ -4582,7 +4582,7 @@ def test_storage_maintenance_starts_before_onebot_and_stops_after_work() -> None
         await asyncio.wait_for(task, 0.5)
 
         assert order[:2] == ["maintenance-start", "onebot-start"]
-        assert order[-2:] == ["maintenance-stop", "onebot-stop"]
+        assert order[-2:] == ["onebot-stop", "maintenance-stop"]
 
     order: list[str] = []
     started = asyncio.Event()

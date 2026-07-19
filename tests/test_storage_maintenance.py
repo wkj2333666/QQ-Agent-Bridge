@@ -239,6 +239,35 @@ def test_protected_current_job_is_never_inventoried_or_deleted(tmp_path: Path) -
     assert job_dir.exists()
 
 
+def test_inventory_rejects_ancestor_containing_protected_database(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    resources = Path(cfg.agent.default_workspace) / cfg.resources.root
+    dated = resources / "2026-01-01"
+    database = _write(dated / "state" / "memory.sqlite3", b"durable")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    maintainer.protect_path(database)
+
+    candidates = maintainer.inventory(now=2_000_000.0).candidates["resources"]
+
+    assert all(candidate.path != dated for candidate in candidates)
+    assert database.read_bytes() == b"durable"
+
+
+def test_deletion_rejects_protected_database_reached_through_alias(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    resources = Path(cfg.agent.default_workspace) / cfg.resources.root
+    dated = resources / "2026-01-01"
+    database = _write(dated / "state" / "memory.sqlite3", b"durable")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    candidate = maintainer.inventory(now=2_000_000.0).candidates["resources"][0]
+    alias = resources / "memory-alias"
+    alias.symlink_to(database.parent, target_is_directory=True)
+    maintainer.protect_path(alias / database.name)
+
+    assert maintainer.delete_candidate(candidate) == (0, 0)
+    assert database.read_bytes() == b"durable"
+
+
 def test_normal_cleanup_applies_retention_then_oldest_first_cap(tmp_path: Path) -> None:
     cfg, home = make_storage_cfg(tmp_path)
     cfg.storage_maintenance.traces.retention_seconds = 100

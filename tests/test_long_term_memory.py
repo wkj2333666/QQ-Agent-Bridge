@@ -212,6 +212,35 @@ def test_store_requires_exact_scope_for_enablement_and_sources(
     assert store.is_scope_enabled(PRIVATE_A)
 
 
+def test_scope_configuration_batch_rolls_back_default_and_rows_on_failure(
+    tmp_path: Path,
+) -> None:
+    store = LongTermMemoryStore(tmp_path / "memory.sqlite3")
+    store.initialize()
+    store.set_scope_enabled(GROUP_A, True)
+    store._conn.execute(
+        """
+        CREATE TRIGGER reject_scope BEFORE INSERT ON memory_scopes
+        WHEN NEW.scope_id = 'reject-me'
+        BEGIN
+            SELECT RAISE(ABORT, 'injected scope failure');
+        END
+        """
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.apply_scope_configuration(
+            default_scope_enabled=True,
+            groups={"group-a": False, "reject-me": True},
+            users={},
+        )
+
+    assert store.default_scope_enabled is False
+    assert store.is_scope_enabled(GROUP_A)
+    assert not store.is_scope_enabled(MemoryScope("group", "reject-me"))
+    store.close()
+
+
 def test_items_cannot_cross_private_group_or_group_boundaries(
     store: LongTermMemoryStore,
 ) -> None:

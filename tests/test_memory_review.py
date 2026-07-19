@@ -465,6 +465,52 @@ def test_background_cancellation_before_commit_retains_sources(
     asyncio.run(go())
 
 
+def test_cancellation_epoch_blocks_commit_when_curator_suppresses_cancellation(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        cfg.long_term_memory.review.message_threshold = 1
+        cfg.long_term_memory.review.idle_seconds = 1
+        collect_source(store, message_id="m1")
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class CancellationResistantAgent(FakeAgent):
+            async def run(
+                self,
+                prompt: str,
+                workspace: str | None = None,
+                mode: str = "ask",
+                **kwargs: Any,
+            ) -> str:
+                self.calls.append(AgentCall(prompt, workspace, mode, kwargs))
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+                return '{"operations": []}'
+
+        agent = CancellationResistantAgent()
+        coordinator = make_coordinator(store, agent, cfg, tmp_path, now=100)
+        coordinator.notify(GROUP)
+        due = asyncio.create_task(coordinator.run_due(now=101))
+        while not agent.calls:
+            await asyncio.sleep(0)
+
+        coordinator.cancel_background_for_interactive()
+        await asyncio.wait_for(cancelled.wait(), 1)
+        release.set()
+        outcomes = await asyncio.wait_for(due, 1)
+
+        assert outcomes[0].error == "cancelled"
+        assert store.status(GROUP).pending_count == 1
+
+    asyncio.run(go())
+
+
 def test_failed_review_keeps_sources_and_backs_off(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,

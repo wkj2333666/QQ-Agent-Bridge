@@ -180,19 +180,46 @@ class StorageMaintainer:
         return free is not None and free < self.cfg.storage_maintenance.min_free_bytes
 
     def protect_path(self, path: Path | str) -> None:
-        protected = Path(os.path.abspath(Path(path).expanduser()))
+        protected = self._absolute_path(path)
         with self._protected_lock:
             self._protected_paths.add(protected)
 
     def unprotect_path(self, path: Path | str) -> None:
-        protected = Path(os.path.abspath(Path(path).expanduser()))
+        protected = self._absolute_path(path)
         with self._protected_lock:
             self._protected_paths.discard(protected)
 
     def is_protected(self, path: Path | str) -> bool:
-        protected = Path(os.path.abspath(Path(path).expanduser()))
+        candidate = self._absolute_path(path)
         with self._protected_lock:
-            return protected in self._protected_paths
+            protected_paths = tuple(self._protected_paths)
+        candidate_aliases = self._path_aliases(candidate)
+        return any(
+            self._paths_overlap(candidate_alias, protected_alias)
+            for protected in protected_paths
+            for candidate_alias in candidate_aliases
+            for protected_alias in self._path_aliases(protected)
+        )
+
+    @staticmethod
+    def _absolute_path(path: Path | str) -> Path:
+        return Path(os.path.abspath(Path(path).expanduser()))
+
+    @classmethod
+    def _path_aliases(cls, path: Path) -> tuple[Path, ...]:
+        absolute = cls._absolute_path(path)
+        try:
+            resolved = absolute.resolve(strict=False)
+        except OSError:
+            return (absolute,)
+        return (absolute,) if resolved == absolute else (absolute, resolved)
+
+    @staticmethod
+    def _paths_overlap(left: Path, right: Path) -> bool:
+        try:
+            return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+        except (OSError, ValueError):
+            return False
 
     def request_pressure_check(self) -> None:
         if not self.cfg.storage_maintenance.enabled or not self.pressure_needed():
