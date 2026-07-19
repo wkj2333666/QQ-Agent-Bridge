@@ -961,6 +961,47 @@ def test_direct_revision_cannot_downgrade_sensitive_item(
     assert unchanged.sensitivity == "sensitive"
 
 
+@pytest.mark.parametrize(
+    ("original_sensitivity", "proposal_sensitivity"),
+    [("normal", "sensitive"), ("sensitive", "normal")],
+    ids=["replacement-escalates", "replacement-does-not-downgrade"],
+)
+def test_direct_contradiction_uses_maximum_sensitivity(
+    store: LongTermMemoryStore,
+    original_sensitivity: str,
+    proposal_sensitivity: str,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    item = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="old fact",
+                sensitivity=original_sensitivity,
+            ),
+        ),
+    )[0]
+
+    committed = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal(
+                operation="contradict",
+                item_id=item.id,
+                content="replacement fact",
+                sensitivity=proposal_sensitivity,
+            ),
+        ),
+    )
+
+    replacement = next(candidate for candidate in committed if candidate.id != item.id)
+    assert replacement.sensitivity == "sensitive"
+
+
 def test_expiry_and_decay_are_bounded_and_scope_independent(
     store: LongTermMemoryStore,
 ) -> None:

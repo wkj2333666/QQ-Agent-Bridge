@@ -383,6 +383,10 @@ def test_natural_state_intent_executes_only_selected_handler(
         '{"intent":"clear","target":[]}',
         '{"intent":"clear","target":"me","subject_id":"other"}',
         '{"intent":"review","unknown":"x"}',
+        '{"intent":"status","intent":"disable"}',
+        '{"intent":"remember","content":"first","content":"second"}',
+        '{"intent":"show","reference":"first","reference":"second"}',
+        '{"intent":"list","target":"me","target":"group"}',
     ],
 )
 def test_intent_specific_schema_rejects_malformed_output_without_mutation(
@@ -415,6 +419,13 @@ def test_intent_specific_schema_rejects_malformed_output_without_mutation(
         "bearer_token=secretvalue123",
         "refresh_token=secretvalue123",
         "access-key=secretvalue123",
+        "OPENAI_API_KEY=opaquevalue123456",
+        "AWS_SECRET_ACCESS_KEY=opaquevalue654321",
+        "GITHUB_TOKEN=opaquevalue123456",
+        "ACME_OAUTH_ACCESS_TOKEN=opaquevalue123456",
+        "VENDOR_SESSION_TOKEN=opaquevalue123456",
+        "SERVICE_CLIENT_SECRET=opaquevalue123456",
+        "PROVIDER_REFRESH_TOKEN=opaquevalue123456",
     ],
 )
 def test_remember_and_correct_reject_extended_credential_labels(
@@ -471,6 +482,9 @@ def test_forget_scrubs_credential_fixture_from_items_fts_and_revisions(tmp_path:
         "My political affiliation is independent",
         "我的宗教信仰是佛教",
         "My religion is Buddhism",
+        "13800138000",
+        "110101199001011234",
+        "6222020200000000",
     ],
 )
 def test_remember_and_correct_conservatively_escalate_sensitive_content(
@@ -508,6 +522,25 @@ def test_correcting_sensitive_item_to_benign_text_does_not_downgrade(tmp_path: P
     item = db.get_item(GROUP, item_id)
     assert item is not None
     assert item.sensitivity == "sensitive"
+
+
+def test_standalone_mobile_remains_sensitive_after_benign_correction(
+    tmp_path: Path,
+) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    service = MemoryCommandService(config(), db)
+
+    assert "已记住" in run(service.handle(event(), "remember 13800138000")).text
+    item = db.list_items(GROUP, subject_id="member")[0]
+    assert item.sensitivity == "sensitive"
+
+    assert "已更正" in run(
+        service.handle(event(mid="m2"), f"correct {item.id} 改用应用内联系")
+    ).text
+    corrected = db.get_item(GROUP, item.id)
+    assert corrected is not None
+    assert corrected.sensitivity == "sensitive"
 
 
 def test_candidate_confirmation_respects_subject_and_sensitivity(tmp_path: Path) -> None:

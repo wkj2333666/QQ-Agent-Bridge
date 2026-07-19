@@ -726,7 +726,10 @@ class MemoryCommandService:
 
     @staticmethod
     def _parse_intent(output: str) -> dict[str, Any]:
-        value = json.loads(str(output).strip())
+        value = json.loads(
+            str(output).strip(),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
         if not isinstance(value, dict):
             raise ValueError("invalid intent envelope")
         intent = value.get("intent")
@@ -870,6 +873,15 @@ def build_memory_command_interpreter(
 
 def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
 
 
 def _validate_reference_fields(
