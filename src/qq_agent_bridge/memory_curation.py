@@ -57,19 +57,23 @@ _ENGLISH_SECRET_LABEL = (
     rf"(?:(?:api|oauth2?|session|client){_SECRET_LABEL_SEPARATOR}"
     rf"(?:(?:access|refresh){_SECRET_LABEL_SEPARATOR})?(?:token|key|secret)|"
     rf"(?:access|refresh|auth){_SECRET_LABEL_SEPARATOR}(?:token|key)|"
-    rf"bearer(?:{_SECRET_LABEL_SEPARATOR}token)?|token|"
-    r"password|passwd|secret|cookie|(?:recovery|backup)[\s_-]+codes?)"
+    rf"bearer(?:{_SECRET_LABEL_SEPARATOR}token)?|"
+    rf"private{_SECRET_LABEL_SEPARATOR}key|"
+    rf"(?:recovery|backup|seed){_SECRET_LABEL_SEPARATOR}(?:phrase|key|codes?)|"
+    rf"mnemonic(?:{_SECRET_LABEL_SEPARATOR}phrase)?|token|"
+    r"password|passwd|secret|cookie)"
 )
 _ENGLISH_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|[=:：])"
 _CHINESE_SECRET_LABEL = (
     r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
-    r"密码|口令|恢复(?:代码|码)|备份(?:代码|码))"
+    r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码))"
 )
 _CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _ENV_SECRET_SUFFIX = (
     r"(?:(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
     r"secret_access_key|(?:access|refresh|auth)_(?:token|key)|bearer(?:_token)?|"
-    r"private_key|password|passwd|cookie|token|secret|(?:recovery|backup)_codes?)"
+    r"private_key|password|passwd|cookie|token|secret|"
+    r"(?:recovery|backup|seed)_(?:phrase|key|codes?)|mnemonic(?:_phrase)?)"
 )
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
@@ -94,7 +98,8 @@ _SECRET_PATTERNS = (
 )
 
 _FORMATTED_PHONE_CANDIDATE_RE = re.compile(
-    r"(?<!\d)(?:\+86[- \t]?)?1[3-9](?:[- \t]?\d){9}(?!\d)"
+    r"(?<!\d)(?:\+86[- .\t]?)?(?:1[3-9]\d|\(1[3-9]\d\))"
+    r"(?:[- .\t]?\d){8}(?!\d)"
 )
 _FORMATTED_MAINLAND_ID_CANDIDATE_RE = re.compile(
     r"(?<![0-9A-Za-z])[1-9](?:[- \t]?\d){16}[- \t]?[0-9Xx]"
@@ -1028,7 +1033,7 @@ def classify_memory_sensitivity(text: str) -> str:
 
 def _contains_structured_sensitive_identifier(text: str) -> bool:
     for match in _FORMATTED_PHONE_CANDIDATE_RE.finditer(text):
-        compact = re.sub(r"[- \t]", "", match.group())
+        compact = re.sub(r"[- .\t()]", "", match.group())
         if compact.startswith("+86"):
             compact = compact[3:]
         if re.fullmatch(r"1[3-9]\d{9}", compact):
