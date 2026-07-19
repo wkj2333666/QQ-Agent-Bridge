@@ -1002,6 +1002,97 @@ def test_direct_contradiction_uses_maximum_sensitivity(
     assert replacement.sensitivity == "sensitive"
 
 
+@pytest.mark.parametrize(
+    ("target_sensitivity", "proposal_sensitivity"),
+    [("normal", "sensitive"), ("sensitive", "normal")],
+    ids=["candidate-escalates", "candidate-does-not-downgrade"],
+)
+def test_direct_low_confidence_contradiction_candidate_uses_maximum_sensitivity(
+    store: LongTermMemoryStore,
+    target_sensitivity: str,
+    proposal_sensitivity: str,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="old fact",
+                sensitivity=target_sensitivity,
+            ),
+        ),
+    )[0]
+
+    committed = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal(
+                operation="contradict",
+                item_id=target.id,
+                content="possible replacement",
+                confidence=0.5,
+                sensitivity=proposal_sensitivity,
+            ),
+        ),
+    )
+
+    candidate = committed[0]
+    assert candidate.status == "candidate"
+    assert candidate.candidate_target_id == target.id
+    assert candidate.sensitivity == "sensitive"
+
+
+@pytest.mark.parametrize(
+    ("target_sensitivity", "proposal_sensitivity"),
+    [("normal", "sensitive"), ("sensitive", "normal")],
+    ids=["explicit-candidate-escalates", "explicit-candidate-does-not-downgrade"],
+)
+def test_direct_mark_candidate_uses_target_maximum_sensitivity(
+    store: LongTermMemoryStore,
+    target_sensitivity: str,
+    proposal_sensitivity: str,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="old fact",
+                sensitivity=target_sensitivity,
+            ),
+        ),
+    )[0]
+
+    candidate = store.commit_review(
+        GROUP_A,
+        (),
+        (
+            MemoryProposal(
+                operation="mark_candidate",
+                candidate_target_id=target.id,
+                subject_kind="user",
+                subject_id="user-a",
+                category="preference",
+                content="possible replacement",
+                confidence=0.5,
+                status="candidate",
+                sensitivity=proposal_sensitivity,
+            ),
+        ),
+    )[0]
+
+    assert candidate.status == "candidate"
+    assert candidate.candidate_target_id == target.id
+    assert candidate.sensitivity == "sensitive"
+
+
 def test_expiry_and_decay_are_bounded_and_scope_independent(
     store: LongTermMemoryStore,
 ) -> None:
