@@ -158,6 +158,78 @@ def test_agent_config_has_fast_chat_and_task_models() -> None:
     assert cfg.agent.trace_root == "runtime/agent-traces"
     assert cfg.agent.trace_max_bytes == 5242880
     assert cfg.agent.trace_max_line_chars == 2000
+
+
+def test_storage_maintenance_defaults_are_balanced() -> None:
+    cfg = BridgeConfig()
+    storage = cfg.storage_maintenance
+
+    assert storage.enabled
+    assert storage.interval_seconds == 21_600
+    assert storage.min_free_bytes == 5 * 1024**3
+    assert storage.sandbox.max_bytes == 2 * 1024**3
+    assert storage.sandbox.retention_seconds == 14 * 86_400
+    assert storage.traces.max_bytes == 512 * 1024**2
+    assert storage.traces.retention_seconds == 14 * 86_400
+    assert storage.resources.max_bytes == 5 * 1024**3
+    assert storage.resources.retention_seconds == 7 * 86_400
+    assert storage.resources.transient_retention_seconds == 86_400
+
+
+def test_storage_maintenance_loads_and_clamps_values(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+storage_maintenance:
+  enabled: true
+  interval_seconds: 1
+  min_free_bytes: 99999999999999
+  sandbox: {max_bytes: -1, retention_seconds: 999999999}
+  traces: {max_bytes: 1234, retention_seconds: 0}
+  resources:
+    max_bytes: 5678
+    retention_seconds: 9
+    transient_retention_seconds: 10
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(path)
+
+    assert cfg.storage_maintenance.interval_seconds == 60
+    assert cfg.storage_maintenance.min_free_bytes == 1024**4
+    assert cfg.storage_maintenance.sandbox.max_bytes == 0
+    assert cfg.storage_maintenance.sandbox.retention_seconds == 365 * 86_400
+    assert cfg.storage_maintenance.traces.max_bytes == 1234
+    assert cfg.storage_maintenance.traces.retention_seconds == 0
+    assert cfg.storage_maintenance.resources.max_bytes == 5678
+    assert cfg.storage_maintenance.resources.retention_seconds == 9
+    assert cfg.storage_maintenance.resources.transient_retention_seconds == 10
+
+
+def test_storage_maintenance_invalid_nested_values_use_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+storage_maintenance:
+  interval_seconds: .nan
+  min_free_bytes: nope
+  sandbox: invalid
+  traces: []
+  resources: null
+""",
+        encoding="utf-8",
+    )
+
+    cfg = BridgeConfig.load(path)
+
+    assert cfg.storage_maintenance == BridgeConfig().storage_maintenance
+
+
+def test_example_config_enables_balanced_storage_maintenance() -> None:
+    cfg = BridgeConfig.load(ROOT / "config.example.yaml")
+
+    assert cfg.storage_maintenance == BridgeConfig().storage_maintenance
     assert cfg.bot.reply_chunk_delay_seconds == 0.2
 
 
