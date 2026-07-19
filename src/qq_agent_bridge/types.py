@@ -102,6 +102,7 @@ CommandName = Literal[
     "reset",
     "reload",
     "schedule",
+    "memory",
 ]
 
 

@@ -31,6 +31,7 @@ COMMAND_NAMES = (
     "reload",
     "schedule",
     "permission",
+    "memory",
 )
 
 
@@ -106,3 +107,12 @@ def test_unknown_command_returns_friendly_help_prompt() -> None:
     assert "未知命令" in reply
     assert "/help" in reply
     assert "ask" in reply
+
+
+def test_memory_help_documents_scoped_management_and_confirmation() -> None:
+    cfg = BridgeConfig(commands={"memory": "user"})
+    reply = build_command_help("memory", cfg, make_event())
+
+    assert "/memory remember" in reply
+    assert "/memory clear" in reply
+    assert "确认" in reply

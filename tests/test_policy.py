@@ -154,6 +154,51 @@ def test_parse_reset_command() -> None:
     assert parsed.args == ""
 
 
+def test_parse_memory_command_and_default_access_is_user() -> None:
+    cfg = BridgeConfig(allowed_users=["reader"])
+    pol = Policy(cfg, fake_runner)
+    parsed = pol.parse("/memory remember 我喜欢短回复")
+
+    assert parsed is not None
+    assert parsed.name == "memory"
+    assert parsed.args == "remember 我喜欢短回复"
+    allowed, reason = pol.allow(
+        ChatEvent(
+            id="memory-1",
+            platform="qq",
+            chat_id="reader",
+            sender_id="reader",
+            is_group=False,
+            mentioned_bot=False,
+            text="/memory",
+            timestamp=1,
+        ),
+        "memory",
+    )
+    assert (allowed, reason) == (True, "ok")
+
+
+def test_memory_default_respects_group_permission_override() -> None:
+    cfg = BridgeConfig(
+        allowed_groups=["group"],
+        allowed_users=["reader"],
+        command_groups={"group": {"memory": "disabled"}},
+    )
+    pol = Policy(cfg, fake_runner)
+    ev = ChatEvent(
+        id="memory-group-1",
+        platform="qq",
+        chat_id="group",
+        sender_id="reader",
+        is_group=True,
+        mentioned_bot=True,
+        text="/memory",
+        timestamp=1,
+    )
+
+    assert pol.allow(ev, "memory") == (False, "cmd-disabled")
+
+
 def test_parse_reload_command() -> None:
     cfg = BridgeConfig()
     pol = Policy(cfg, fake_runner)

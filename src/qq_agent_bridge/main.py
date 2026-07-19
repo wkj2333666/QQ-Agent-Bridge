@@ -23,6 +23,7 @@ from .command_help import build_command_help
 from .long_term_memory import LongTermMemoryRetriever
 from .long_term_memory_models import MemoryScope
 from .memory import ConversationMemory, GroupAmbientMemory
+from .memory_commands import MemoryCommandService
 from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
 from .output_guard import guard_internal_output
@@ -111,6 +112,7 @@ class App:
         self.resources = self._build_resource_manager(cfg)
         self.memory = ConversationMemory(cfg.memory.max_messages, cfg.memory.max_chars)
         self.long_term_memory_retriever: LongTermMemoryRetriever | None = None
+        self.memory_commands: MemoryCommandService | None = None
         self.ambient_memory = GroupAmbientMemory(
             max_messages=cfg.ambient_memory.max_messages,
             max_chars=cfg.ambient_memory.max_chars,
@@ -254,6 +256,21 @@ class App:
             await self._cleanup_policy()
             return
 
+        if parsed.name == "memory":
+            if self.memory_commands is None:
+                txt = "[error] 长期记忆服务尚未启动。"
+            else:
+                if (
+                    hasattr(self.memory_commands, "acknowledge")
+                    and self.memory_commands.acknowledge is None
+                ):
+                    self.memory_commands.acknowledge = self._acknowledge_memory_command
+                result = await self.memory_commands.handle(ev, parsed.args)
+                txt = result.text
+            await self._send_text(ev.chat_id, ev.is_group, txt, ev.id)
+            await self._cleanup_policy()
+            return
+
         if self._missing_quoted_voice_resource(ev, parsed.name):
             await self._send_text(
                 ev.chat_id,
@@ -319,7 +336,12 @@ class App:
                 self.ambient_memory.reset(ev)
             if ev.is_group:
                 self.proactive.reset_chat(ev.chat_id)
-            await self._send_text(ev.chat_id, ev.is_group, "已清空当前会话记忆和最近群聊背景", ev.id)
+            await self._send_text(
+                ev.chat_id,
+                ev.is_group,
+                "已清空当前会话记忆和最近群聊背景；长期记忆不受影响。",
+                ev.id,
+            )
             await self._cleanup_policy()
             return
 
@@ -382,6 +404,9 @@ class App:
             if progress:
                 await self._send_text(ev.chat_id, ev.is_group, progress, f"{ev.id}-progress")
             self._schedule_reply(job)
+
+    async def _acknowledge_memory_command(self, ev: ChatEvent, text: str) -> None:
+        await self._send_text(ev.chat_id, ev.is_group, text, f"{ev.id}-memory-ack")
 
     def _is_self_event(self, ev: ChatEvent) -> bool:
         return bool(self.cfg.bot.self_id and ev.sender_id == self.cfg.bot.self_id)
@@ -1537,6 +1562,8 @@ class App:
         return str(value).strip().lower()
 
     def _permission_global_access(self, command: str) -> str:
+        if command == "memory" and "memory" not in self.cfg.commands:
+            return "user"
         return str(self.cfg.command_access(command)).strip().lower()
 
     def _permission_effective_access(self, group_id: str | None, command: str) -> str:
@@ -1546,6 +1573,8 @@ class App:
         override = self._permission_override(group_id, command)
         if override is not None:
             return override
+        if command == "memory" and "memory" not in self.cfg.commands:
+            return global_access
         try:
             return str(self.cfg.command_access(command, group_id)).strip().lower()
         except TypeError:
