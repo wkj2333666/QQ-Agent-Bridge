@@ -112,9 +112,7 @@ class ProactiveSpeaker:
         if len(batch) > max_items:
             del batch[: len(batch) - max_items]
         if ev.chat_id not in self._timers:
-            task = asyncio.create_task(self._flush_later(ev.chat_id))
-            self._timers[ev.chat_id] = task
-            task.add_done_callback(lambda _task, chat_id=ev.chat_id: self._timers.pop(chat_id, None))
+            self._schedule_flush(ev.chat_id)
             self._debug(
                 "schedule",
                 chat_id=ev.chat_id,
@@ -177,6 +175,22 @@ class ProactiveSpeaker:
         if self._timers:
             await asyncio.gather(*self._timers.values(), return_exceptions=True)
         self._timers.clear()
+
+    def transition_timer_snapshot(self) -> tuple[str, ...]:
+        """Capture live pending flushes so a failed runtime handoff can restore them."""
+        return tuple(chat_id for chat_id, task in self._timers.items() if not task.done())
+
+    def restore_transition_timers(self, chat_ids: tuple[str, ...]) -> None:
+        """Idempotently restore only flushes that existed before a failed handoff."""
+        for chat_id in chat_ids:
+            if not self._batches.get(chat_id):
+                continue
+            current = self._timers.get(chat_id)
+            if current is not None and not current.done():
+                continue
+            if current is not None:
+                self._timers.pop(chat_id, None)
+            self._schedule_flush(chat_id)
 
     def _should_collect(self, ev: ChatEvent) -> bool:
         cfg = self.cfg.proactive
@@ -242,6 +256,24 @@ class ProactiveSpeaker:
     async def _flush_later(self, chat_id: str) -> None:
         await asyncio.sleep(max(0.0, self.cfg.proactive.batch_seconds))
         await self._flush(chat_id)
+
+    def _schedule_flush(self, chat_id: str) -> None:
+        task = asyncio.create_task(self._flush_later(chat_id))
+        self._timers[chat_id] = task
+        task.add_done_callback(
+            lambda completed, pending_chat=chat_id: self._discard_completed_timer(
+                pending_chat,
+                completed,
+            )
+        )
+
+    def _discard_completed_timer(
+        self,
+        chat_id: str,
+        completed: asyncio.Task[None],
+    ) -> None:
+        if self._timers.get(chat_id) is completed:
+            self._timers.pop(chat_id, None)
 
     async def _flush(self, chat_id: str) -> None:
         batch = self._batches.pop(chat_id, [])

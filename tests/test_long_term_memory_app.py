@@ -969,6 +969,175 @@ def test_reload_proactive_stop_failure_rolls_back_scheduler_and_memory(
     asyncio.run(go())
 
 
+def test_reload_memory_failure_restores_stopped_proactive_batch_and_one_timer(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.proactive.enabled = True
+        cfg.proactive.allowed_groups = ["group"]
+        cfg.proactive.batch_seconds = 600
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        old_cfg = app.cfg
+        old_proactive = app.proactive
+        pending = event("pending chat", mentioned=False, mid="pending-proactive")
+        old_proactive.observe(pending)
+        original_timer = old_proactive._timers["group"]  # noqa: SLF001
+
+        async def fail_memory(_cfg: BridgeConfig) -> tuple[bool, str]:
+            return False, "injected memory failure"
+
+        app._reload_long_term_memory = fail_memory  # type: ignore[method-assign]
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "scheduler": {"enabled": False},
+                    "storage_maintenance": {"enabled": False},
+                    "proactive": {
+                        "enabled": True,
+                        "allowed_groups": ["group"],
+                        "batch_seconds": 600,
+                    },
+                    "long_term_memory": {
+                        "enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        ok, message = await app._reload_config()
+
+        assert not ok and message.startswith("[error] 配置重载失败：")
+        assert app.cfg is old_cfg
+        assert app.proactive is old_proactive
+        assert original_timer.cancelled()
+        assert "group" in old_proactive._batches  # noqa: SLF001
+        restored = tuple(old_proactive._timers.values())  # noqa: SLF001
+        assert len(restored) == 1
+        assert restored[0] is not original_timer
+        assert not restored[0].done()
+        await old_proactive.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "transition",
+    ("scheduler-start", "scheduler-stop", "proactive-stop"),
+)
+def test_reload_cancellation_rolls_back_each_awaited_transition_before_reraise(
+    tmp_path: Path,
+    transition: str,
+) -> None:
+    async def go() -> None:
+        cfg = config(tmp_path)
+        cfg.scheduler.enabled = transition == "scheduler-stop"
+        cfg.proactive.enabled = True
+        cfg.proactive.allowed_groups = ["group"]
+        cfg.proactive.batch_seconds = 600
+        config_path = tmp_path / "config.yaml"
+        app = App(cfg, config_path=config_path)
+        old_cfg = app.cfg
+        old_proactive = app.proactive
+        old_proactive.observe(event("pending chat", mentioned=False, mid="cancel-pending"))
+        entered = asyncio.Event()
+
+        class CancellableScheduler:
+            def __init__(self) -> None:
+                self.cfg = cfg.scheduler
+                self.running = transition == "scheduler-stop"
+                self._suspend_start = transition == "scheduler-start"
+                self._suspend_stop = transition == "scheduler-stop"
+
+            def reload_config(self, candidate: Any) -> None:
+                self.cfg = candidate
+
+            async def start(self) -> None:
+                self.running = True
+                if self._suspend_start:
+                    self._suspend_start = False
+                    entered.set()
+                    await asyncio.Future()
+
+            async def stop(self) -> None:
+                self.running = False
+                if self._suspend_stop:
+                    self._suspend_stop = False
+                    entered.set()
+                    await asyncio.Future()
+
+        scheduler = CancellableScheduler()
+        app.scheduler = scheduler  # type: ignore[assignment]
+        original_proactive_stop = old_proactive.stop
+        if transition == "proactive-stop":
+
+            async def cancellable_proactive_stop() -> None:
+                await original_proactive_stop()
+                entered.set()
+                await asyncio.Future()
+
+            old_proactive.stop = cancellable_proactive_stop  # type: ignore[method-assign]
+
+        new_scheduler_enabled = transition == "scheduler-start"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "owners": cfg.owners,
+                    "allowed_users": cfg.allowed_users,
+                    "allowed_groups": cfg.allowed_groups,
+                    "workspaces": cfg.workspaces,
+                    "commands": cfg.commands,
+                    "agent": {"default_workspace": cfg.agent.default_workspace},
+                    "scheduler": {"enabled": new_scheduler_enabled},
+                    "storage_maintenance": {"enabled": False},
+                    "proactive": {
+                        "enabled": True,
+                        "allowed_groups": ["group"],
+                        "batch_seconds": 600,
+                    },
+                    "long_term_memory": {
+                        "enabled": True,
+                        "database_path": cfg.long_term_memory.database_path,
+                    },
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        reload_task = asyncio.create_task(app._reload_config())
+        await asyncio.wait_for(entered.wait(), 1)
+        reload_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reload_task
+
+        assert app.cfg is old_cfg
+        assert app.proactive is old_proactive
+        assert scheduler.cfg is old_cfg.scheduler
+        assert scheduler.running is (transition == "scheduler-stop")
+        assert "group" in old_proactive._batches  # noqa: SLF001
+        active_timers = tuple(
+            timer
+            for timer in old_proactive._timers.values()  # noqa: SLF001
+            if not timer.done()
+        )
+        assert len(active_timers) == 1
+        old_proactive.stop = original_proactive_stop  # type: ignore[method-assign]
+        await old_proactive.stop()
+
+    asyncio.run(go())
+
+
 def test_reload_global_disable_does_not_depend_on_interpreter_rebuild(
     tmp_path: Path,
     monkeypatch: Any,
