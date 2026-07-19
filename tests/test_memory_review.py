@@ -172,6 +172,7 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert '"operations"' in call.prompt
         assert "Return JSON only" in call.prompt
         assert "|forget" not in call.prompt
+        assert "|merge|" not in call.prompt
         assert "Never propose hard deletion" in call.prompt
 
     asyncio.run(go())
@@ -582,6 +583,34 @@ def test_failed_review_keeps_sources_and_backs_off(
         assert outcome.next_attempt_at == 1_060
         assert store.status(GROUP).pending_count == 1
         assert store.pending_sources(GROUP, limit=10, now=1_059) == ()
+        pending = store.pending_sources(GROUP, limit=10, now=1_060)
+        assert [value.id for value in pending] == [source_id]
+        assert pending[0].attempt_count == 1
+
+    asyncio.run(go())
+
+
+def test_schema_incomplete_operation_keeps_source_for_retry(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(store, message_id="schema-incomplete")
+        coordinator = make_coordinator(
+            store,
+            FakeAgent('{"operations":[{"operation":"add"}]}'),
+            cfg,
+            tmp_path,
+            now=1_000,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error == "malformed_output"
+        assert outcome.accepted == ()
+        assert outcome.next_attempt_at == 1_060
+        assert store.status(GROUP).pending_count == 1
         pending = store.pending_sources(GROUP, limit=10, now=1_060)
         assert [value.id for value in pending] == [source_id]
         assert pending[0].attempt_count == 1

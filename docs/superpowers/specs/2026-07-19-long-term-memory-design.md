@@ -330,6 +330,11 @@ cannot bypass this requirement. Legal-name statements, WeChat/contact handles, a
 postal addresses precise to street and house number are included in this rule and
 never activate through normal background review. Legal-name and precise-address
 detection tolerates ordinary punctuation and spacing, including `我家住` forms.
+Secret and sensitivity classification share a security normal form: Unicode NFKC,
+case folding, and removal of invisible format, control, and combining characters that
+could split a label. Recognizable multilingual authentication labels paired with a
+secret-like value, plus standard token/environment signatures, are rejected without
+depending on a particular assignment phrase.
 
 Passwords, tokens, cookies, private keys, recovery codes, and authentication secrets
 are never stored even when explicitly requested.
@@ -382,16 +387,17 @@ add
 revise
 reinforce
 contradict
-merge
 mark_candidate
 ```
 
 The automatic curator never has hard-delete authority, including when an authorized
-user triggers `/memory review now`. Replacement and correction use validated `revise`,
-`contradict`, or `merge` semantics. User-requested `/memory forget` and `/memory clear`
+user triggers `/memory review now`; it cannot propose `forget` or `merge`. Replacement
+and correction use validated `revise` or `contradict` semantics. User-requested
+`/memory forget` and `/memory clear`
 are handled by the deterministic command service, and item expiry is handled by
 store-owned maintenance; neither path depends on model permission. The validator and
-transactional commit layer both reject curator-originated `forget` proposals.
+transactional commit layer both reject curator-originated `forget` and `merge`
+proposals, including a `revise` that would internally collapse into a duplicate.
 
 ## Validation and Failure Semantics
 
@@ -413,12 +419,13 @@ categories, secrets, excessive length, or invalid state transitions reject only 
 operation. Other valid operations in the batch may commit. Logs store a fixed reason
 code, not content.
 
-Extractive matching is necessary but not sufficient evidence. The deterministic
-validator preserves enough source structure to reject matches that occur only inside
-quotes, negations, examples, output instructions, forget requests, or explicit
-do-not-store/do-not-remember contexts. Curator confidence cannot override this polarity
-and consent gate; ambiguous support becomes a candidate only when the deterministic
-gate permits it, otherwise the operation is rejected.
+Extractive matching is necessary but not sufficient evidence. To activate a proposal,
+the normalized cited source must be essentially the proposed assertion, allowing only
+trivial speaker and punctuation wrappers. Added semantic context such as uncertainty,
+hearsay, quotes, negations, examples, output instructions, forget requests, or explicit
+do-not-store/do-not-remember contexts cannot activate it. Curator confidence cannot
+override this deterministic polarity and consent gate; ambiguous support becomes a
+candidate only when the gate permits it, otherwise the operation is rejected.
 
 ### Low confidence
 
@@ -497,8 +504,9 @@ not enter normal prompts.
 
 Retrieved item content is added to normal and proactive Agent trace/log redaction
 values, including both unmentioned batch decisions and direct-mention classification.
-This redaction applies to diagnostic sinks only; the assistant result remains available
-to the normal output delivery path.
+Matching is bounded, escaped, case-insensitive, and whitespace-flexible. This redaction
+applies to diagnostic sinks only; the assistant result remains available to the normal
+output delivery path.
 
 ## Prompt Contract
 

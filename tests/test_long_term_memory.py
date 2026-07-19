@@ -439,6 +439,125 @@ def test_commit_review_rejects_curator_forget_and_preserves_source_atomically(
     ]
 
 
+@pytest.mark.parametrize(
+    ("actor_class", "evidence_required"),
+    [("curator", False), ("user", True)],
+    ids=["curator-actor", "curator-evidence-provenance"],
+)
+def test_commit_review_rejects_curator_merge_and_preserves_rows_atomically(
+    store: LongTermMemoryStore,
+    actor_class: str,
+    evidence_required: bool,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(
+        _source(GROUP_A, "alpha", "subject-redacted", "alpha")
+    )
+    related_source = store.collect(
+        _source(GROUP_A, "beta", "subject-redacted", "beta")
+    )
+    assert target_source is not None and related_source is not None
+    target, related = (
+        store.commit_review(
+            GROUP_A,
+            (source_id,),
+            (
+                MemoryProposal.add(
+                    subject_kind="user",
+                    subject_id="subject-redacted",
+                    category="preference",
+                    content=content,
+                ),
+            ),
+        )[0]
+        for source_id, content in (
+            (target_source, "subject-redacted prefers alpha reports"),
+            (related_source, "subject-redacted prefers beta dashboards"),
+        )
+    )
+    review_source = store.collect(
+        _source(GROUP_A, "review-merge", "subject-redacted", target.content)
+    )
+    assert review_source is not None
+
+    with pytest.raises(ValueError, match="curator merge"):
+        store.commit_review(
+            GROUP_A,
+            (review_source,),
+            (
+                MemoryProposal(
+                    operation="merge",
+                    item_id=target.id,
+                    related_item_ids=(related.id,),
+                    actor_class=actor_class,
+                    evidence_required=evidence_required,
+                ),
+            ),
+        )
+
+    assert store.get_item(GROUP_A, target.id) == target
+    assert store.get_item(GROUP_A, related.id) == related
+    assert [value.id for value in store.pending_sources(GROUP_A, 10)] == [
+        review_source
+    ]
+
+
+def test_commit_review_rejects_curator_revision_that_would_merge(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(
+        _source(GROUP_A, "target", "user-a", "prefers tea")
+    )
+    survivor_source = store.collect(
+        _source(GROUP_A, "survivor", "user-a", "prefers coffee")
+    )
+    assert target_source is not None and survivor_source is not None
+    target, survivor = (
+        store.commit_review(
+            GROUP_A,
+            (source_id,),
+            (
+                MemoryProposal.add(
+                    subject_kind="user",
+                    subject_id="user-a",
+                    category="preference",
+                    content=content,
+                ),
+            ),
+        )[0]
+        for source_id, content in (
+            (target_source, "prefers tea"),
+            (survivor_source, "prefers coffee"),
+        )
+    )
+    review_source = store.collect(
+        _source(GROUP_A, "review-revise", "user-a", "prefers coffee")
+    )
+    assert review_source is not None
+
+    with pytest.raises(ValueError, match="curator merge"):
+        store.commit_review(
+            GROUP_A,
+            (review_source,),
+            (
+                MemoryProposal(
+                    operation="revise",
+                    item_id=target.id,
+                    content=survivor.content,
+                    actor_class="user",
+                    evidence_required=True,
+                ),
+            ),
+        )
+
+    assert store.get_item(GROUP_A, target.id) == target
+    assert store.get_item(GROUP_A, survivor.id) == survivor
+    assert [value.id for value in store.pending_sources(GROUP_A, 10)] == [
+        review_source
+    ]
+
+
 def test_per_source_failure_deadlines_are_atomic(
     store: LongTermMemoryStore,
 ) -> None:
@@ -519,6 +638,7 @@ def test_direct_revision_into_duplicate_reinforces_survivor_and_retires_target(
                 content=" likes   COFFEE ",
                 confidence=0.95,
                 source_kind="self_statement",
+                actor_class="user",
             ),
         ),
     )
@@ -968,6 +1088,7 @@ def test_duplicate_revision_rolls_back_rows_fts_revisions_and_source_consumption
                     item_id=target.id,
                     content="coffee",
                     confidence=0.9,
+                    actor_class="user",
                 ),
             ),
         )

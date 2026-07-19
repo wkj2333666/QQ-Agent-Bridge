@@ -155,9 +155,10 @@ def test_cursor_trace_and_failure_log_redact_job_scoped_bare_values(
 def test_trace_redacts_memory_content_without_redacting_returned_output(
     tmp_path: Path,
 ) -> None:
-    memory_content = "u1 prefers paper reports"
+    memory_content = "Subject-Redacted Prefers Paper Reports"
+    delivered = "subject-redacted  prefers\tpaper reports"
     script = tmp_path / "agent.sh"
-    _write_script(script, f"printf '%s\\n' '{memory_content}'")
+    _write_script(script, f"printf '%s\\n' '{delivered}'")
     trace_root = _trace_root_for(tmp_path)
     cfg = _config(tmp_path, trace_root)
     cfg.agent.binary = str(script)
@@ -174,8 +175,9 @@ def test_trace_redacts_memory_content_without_redacting_returned_output(
 
     path, _records = _read_trace(trace_root)
     serialized = path.read_text(encoding="utf-8")
-    assert result == memory_content
-    assert memory_content not in serialized
+    assert result == delivered
+    assert delivered not in serialized
+    assert "subject-redacted" not in serialized.lower()
     assert "[REDACTED]" in serialized
 
 

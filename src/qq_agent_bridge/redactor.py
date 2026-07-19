@@ -29,6 +29,9 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
+_MAX_EXTRA_REDACTIONS = 128
+_MAX_EXTRA_VALUE_CHARS = 2_048
+
 
 def redact(text: str, extra: Iterable[str] | None = None) -> str:
     """Replace secret-like substrings with [REDACTED]."""
@@ -36,10 +39,27 @@ def redact(text: str, extra: Iterable[str] | None = None) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         out = pattern.sub(replacement, out)
     if extra:
+        applied = 0
         for val in extra:
-            if val and len(val) > 3:
-                out = out.replace(val, "[REDACTED]")
+            pattern = _extra_redaction_pattern(val)
+            if pattern is None:
+                continue
+            out = pattern.sub("[REDACTED]", out)
+            applied += 1
+            if applied >= _MAX_EXTRA_REDACTIONS:
+                break
     return out
+
+
+def _extra_redaction_pattern(value: str) -> re.Pattern[str] | None:
+    normalized = str(value or "").strip()
+    if not 3 < len(normalized) <= _MAX_EXTRA_VALUE_CHARS:
+        return None
+    fragments = normalized.split()
+    if not fragments:
+        return None
+    expression = r"\s+".join(re.escape(fragment) for fragment in fragments)
+    return re.compile(expression, re.IGNORECASE)
 
 
 def strip_ansi(text: str) -> str:
