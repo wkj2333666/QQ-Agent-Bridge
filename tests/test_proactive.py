@@ -1058,7 +1058,7 @@ def test_handoff_reclaims_batch_paused_in_agent_exactly_once(outcome: str) -> No
 
 
 @pytest.mark.parametrize("outcome", ("success", "failure", "cancellation"))
-def test_handoff_resumes_only_unsent_multi_message_side_effects(outcome: str) -> None:
+def test_handoff_skips_claimed_multi_message_send_without_rerunning_agent(outcome: str) -> None:
     async def go() -> None:
         cfg = make_cfg()
         cfg.proactive.batch_seconds = 0
@@ -1137,14 +1137,156 @@ def test_handoff_resumes_only_unsent_multi_message_side_effects(outcome: str) ->
                 await transition
             target = old
 
-        await wait_for(lambda: len(sent) == 3)
+        await wait_for(lambda: len(sent) == 2)
         await asyncio.sleep(0.03)
 
-        assert sent == ["one", "two", "three"]
+        # The send callback is the transport boundary. Once entered, cancellation is
+        # ambiguous, so at-most-once semantics prefer losing "two" over duplicating it.
+        assert sent == ["one", "three"]
         assert len(remembered) == 1
         await target.stop()
         if target is replacement:
             await old.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("outcome", ("success", "failure", "cancellation"))
+def test_handoff_does_not_repeat_reply_delivered_before_ack(outcome: str) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0
+        cfg.proactive.min_messages = 1
+        cfg.proactive.reply_message_delay_seconds = 0
+        ack_waiting = asyncio.Event()
+        block_second_ack = True
+        delivered: list[str] = []
+        remembered: list[tuple[Any, Any]] = []
+
+        class ThreeReplyAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                return (
+                    '{"speak": true, "messages": ['
+                    '{"text": "one"}, {"text": "two"}, {"text": "three"}]}'
+                )
+
+        class MustNotRunAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                raise AssertionError("parsed replies must resume without another Agent call")
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            nonlocal block_second_ack
+            delivered.append(text)
+            if text == "two" and block_second_ack:
+                block_second_ack = False
+                ack_waiting.set()
+                await asyncio.Future()
+
+        def remember(batch: Any, replies: Any) -> None:
+            remembered.append((batch, replies))
+
+        old = ProactiveSpeaker(
+            cfg,
+            ThreeReplyAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        replacement = ProactiveSpeaker(
+            cfg,
+            MustNotRunAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        old.observe(make_ev("send three", f"post-dispatch-{outcome}"))
+        await asyncio.wait_for(ack_waiting.wait(), 1)
+
+        generation = old.begin_handoff()
+        await old.stop()
+        if outcome == "success":
+            old.commit_handoff(generation, replacement)
+            target = replacement
+        elif outcome == "failure":
+            await old.rollback_handoff(generation)
+            target = old
+        else:
+            transition_entered = asyncio.Event()
+
+            async def cancelled_transition() -> None:
+                try:
+                    transition_entered.set()
+                    await asyncio.Future()
+                finally:
+                    await old.rollback_handoff(generation)
+
+            transition = asyncio.create_task(cancelled_transition())
+            await transition_entered.wait()
+            transition.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await transition
+            target = old
+
+        await wait_for(lambda: len(delivered) >= 3)
+        await asyncio.sleep(0.03)
+
+        assert delivered == ["one", "two", "three"]
+        assert len(remembered) == 1
+        await target.stop()
+        if target is replacement:
+            await old.stop()
+
+    asyncio.run(go())
+
+
+def test_ordinary_send_exception_consumes_ambiguous_reply_without_retry() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0
+        cfg.proactive.min_messages = 1
+        cfg.proactive.reply_message_delay_seconds = 0
+        attempted: list[str] = []
+        delivered: list[str] = []
+        remembered: list[tuple[Any, Any]] = []
+
+        class Agent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                return (
+                    '{"speak": true, "messages": ['
+                    '{"text": "one"}, {"text": "two"}, {"text": "three"}]}'
+                )
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            attempted.append(text)
+            if text == "two":
+                raise RuntimeError("ambiguous transport failure")
+            delivered.append(text)
+
+        speaker = ProactiveSpeaker(
+            cfg,
+            Agent(),
+            send,
+            remember=lambda batch, replies: remembered.append((batch, replies)),
+        )  # type: ignore[arg-type]
+        speaker.observe(make_ev("send three", "ordinary-send-failure"))
+        await wait_for(lambda: attempted == ["one", "two", "three"])
+        await asyncio.sleep(0.03)
+
+        assert delivered == ["one", "three"]
+        assert len(remembered) == 1
+        assert not speaker._inflight  # noqa: SLF001
+        assert not speaker._resumable  # noqa: SLF001
+        await speaker.stop()
 
     asyncio.run(go())
 

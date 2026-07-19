@@ -505,8 +505,21 @@ class ProactiveSpeaker:
                 return
             echo = f"proactive-{batch[-1].id}-{idx}" if len(replies) > 1 else f"proactive-{batch[-1].id}"
             reply_to = batch[-1].id if idx == 0 else None
-            await self._send_reply(chat_id, reply.text, echo, reply.ats, reply_to)
+            # OneBot can deliver before its ACK. Claim first: an interrupted ambiguous
+            # send may be lost, but a handoff must never expose a duplicate to users.
             work.next_reply = idx + 1
+            try:
+                await self._send_reply(chat_id, reply.text, echo, reply.ats, reply_to)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - delivery may already have happened
+                logger.warning(
+                    "proactive send acknowledgement failed index=%d total=%d error=%s",
+                    idx + 1,
+                    len(replies),
+                    type(exc).__name__,
+                )
+                continue
             self._debug(
                 "send",
                 chat_id=chat_id,
