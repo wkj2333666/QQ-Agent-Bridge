@@ -21,7 +21,7 @@ from qq_agent_bridge.policy import Job, Policy  # type: ignore
 from qq_agent_bridge.redactor import strip_ansi  # type: ignore
 from qq_agent_bridge.resources import PreparedResource  # type: ignore
 from qq_agent_bridge.storage_gate import GatedAgentAdapter  # type: ignore
-from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource  # type: ignore
+from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource, ChatSegment  # type: ignore
 
 
 def extract_outgoing_prompt_context(prompt: str) -> tuple[str, str]:
@@ -187,6 +187,76 @@ def make_app(cfg: BridgeConfig, runner: Any, adapter: FakeAdapter) -> App:
 
     app.policy = Policy(cfg, job_runner)
     return app
+
+
+def test_all_agent_job_modes_share_structured_long_term_memory_retrieval() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.resources.enabled = False
+        prompts: list[str] = []
+        retrievals: list[tuple[Any, ...]] = []
+
+        class FakeRetriever:
+            def retrieve(self, *args: Any) -> str:
+                retrievals.append(args)
+                return "SHARED-LONG-TERM-CONTEXT"
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+        ) -> str:
+            prompts.append(prompt)
+            return "ok"
+
+        app = App(cfg)
+        app.long_term_memory_retriever = FakeRetriever()  # type: ignore[attr-defined]
+        app.agent.run = fake_agent  # type: ignore[method-assign]
+        app._prepare_runtime_skill_bundle = lambda: ""  # type: ignore[method-assign]
+        ev = ChatEvent(
+            id="long-term-shared",
+            platform="qq",
+            chat_id="group",
+            sender_id="reader",
+            is_group=True,
+            mentioned_bot=True,
+            text="@999999 继续项目",
+            timestamp=1,
+            segments=(ChatSegment(type="mention", qq="999999"),),
+            reply=ChatReply(message_id="quoted", sender_id="888888", text="上次决定"),
+        )
+
+        jobs = [
+            Job("ask-job", "ask", "继续项目", ev),
+            Job("task-job", "task", "继续项目", ev),
+            Job("code-job", "code", "继续项目", ev),
+            Job(
+                "schedule-job",
+                "task",
+                "继续项目",
+                ev,
+                source="schedule",
+                schedule_id="schedule-1",
+                schedule_run_id=1,
+                scheduled_for=1,
+            ),
+        ]
+        for job in jobs:
+            assert await app._agent_runner_inner(job) == "ok"
+
+        assert len(retrievals) == len(jobs)
+        for scope, sender, mentions, quoted_sender, query in retrievals:
+            assert (scope.kind, scope.id) == ("group", "group")
+            assert sender == "reader"
+            assert mentions == ("999999",)
+            assert quoted_sender == "888888"
+            assert query == "继续项目"
+        assert len(prompts) == len(jobs)
+        assert all("SHARED-LONG-TERM-CONTEXT" in prompt for prompt in prompts)
+
+    asyncio.run(go())
 
 
 def test_handle_returns_before_ask_job_finishes() -> None:

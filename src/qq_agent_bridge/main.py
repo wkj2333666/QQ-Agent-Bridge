@@ -20,6 +20,8 @@ from .agent_runtime import build_agent_adapter, run_agent
 from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .command_access_store import write_command_access_to_config
 from .command_help import build_command_help
+from .long_term_memory import LongTermMemoryRetriever
+from .long_term_memory_models import MemoryScope
 from .memory import ConversationMemory, GroupAmbientMemory
 from .mention_mode_store import write_mention_modes_to_config
 from .onebot import OneBotAdapter
@@ -108,6 +110,7 @@ class App:
         self.search = WorkspaceSearch(cfg)
         self.resources = self._build_resource_manager(cfg)
         self.memory = ConversationMemory(cfg.memory.max_messages, cfg.memory.max_chars)
+        self.long_term_memory_retriever: LongTermMemoryRetriever | None = None
         self.ambient_memory = GroupAmbientMemory(
             max_messages=cfg.ambient_memory.max_messages,
             max_chars=cfg.ambient_memory.max_chars,
@@ -147,6 +150,7 @@ class App:
             self.gated_agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
+            long_term_context=self._retrieve_long_term_context,
             remember=self._remember_proactive_exchange,
         )
 
@@ -841,6 +845,7 @@ class App:
             self.gated_agent,
             self._send_proactive,
             ambient_context=self._proactive_ambient_context,
+            long_term_context=self._retrieve_long_term_context,
             remember=self._remember_proactive_exchange,
         )
         storage_note = " 存储根目录变更需要重启。" if storage_roots_changed else ""
@@ -1805,6 +1810,7 @@ class App:
             if cmd in {"task", "code"}:
                 runtime_reference_base = self._prepare_runtime_skill_bundle()
             schedule_context = self._schedule_prompt_context(job)
+            long_term_memory = self._long_term_context_for(ev, args or ev.text)
             prompt = build_agent_prompt(
                 cmd,
                 args or ev.text,
@@ -1815,6 +1821,7 @@ class App:
                 resource_context=resource_context,
                 outgoing_resource_context=outgoing_resource_context,
                 profile_prompt=select_profile_prompt(self.cfg, ev),
+                long_term_memory=long_term_memory,
                 runtime_reference_base=runtime_reference_base,
                 schedule_context=schedule_context,
             )
@@ -1836,6 +1843,57 @@ class App:
             )
         finally:
             self.resources.cleanup_prepared(prepared_resources)
+
+    def _long_term_context_for(self, ev: ChatEvent, query: str) -> str:
+        scope = MemoryScope("group" if ev.is_group else "private", ev.chat_id)
+        mentions = tuple(
+            dict.fromkeys(
+                str(segment.qq)
+                for segment in ev.segments
+                if segment.type in {"mention", "at"}
+                and segment.qq
+                and str(segment.qq) != str(self.cfg.bot.self_id or "")
+            )
+        )
+        quoted_sender = (
+            str(ev.reply.sender_id)
+            if ev.reply is not None and ev.reply.sender_id is not None
+            else None
+        )
+        return self._retrieve_long_term_context(
+            scope,
+            ev.sender_id,
+            mentions,
+            quoted_sender,
+            query,
+        )
+
+    def _retrieve_long_term_context(
+        self,
+        scope: MemoryScope,
+        current_sender: str,
+        real_mentions: tuple[str, ...],
+        quoted_sender: str | None,
+        query: str,
+    ) -> str:
+        retriever = self.long_term_memory_retriever
+        if retriever is None:
+            return ""
+        try:
+            return retriever.retrieve(
+                scope,
+                current_sender,
+                real_mentions,
+                quoted_sender,
+                query,
+            )
+        except Exception as exc:  # noqa: BLE001 - memory lookup must not block chat
+            logger.warning(
+                "long-term memory retrieval failed scope=%s error=%s",
+                scope.kind,
+                type(exc).__name__,
+            )
+            return ""
 
     def _schedule_prompt_context(self, job: Job) -> str:
         if job.source != "schedule" or job.scheduled_for is None:
