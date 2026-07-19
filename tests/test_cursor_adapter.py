@@ -619,6 +619,68 @@ def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap() -> None:
         assert forbidden not in cmd
 
 
+def test_hardened_read_only_mounts_only_the_resolved_cursor_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "real-home"
+    runtime = fake_home / ".local/share/cursor-agent/versions/v1"
+    runtime.mkdir(parents=True)
+    binary = runtime / "cursor-agent"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    (runtime / "node").write_text("runtime", encoding="utf-8")
+    (runtime / "node").chmod(0o755)
+    (runtime / "index.js").write_text("runtime", encoding="utf-8")
+    local_bin = fake_home / ".local/bin"
+    local_bin.mkdir(parents=True)
+    env_runner = local_bin / "micromamba"
+    env_runner.write_text("host executable", encoding="utf-8")
+    env_runner.chmod(0o755)
+    (fake_home / ".local/share/mamba").mkdir(parents=True)
+    (fake_home / ".mambarc").write_text("host policy", encoding="utf-8")
+    (fake_home / ".condarc").write_text("host policy", encoding="utf-8")
+    (fake_home / ".cursor/plugins").mkdir(parents=True)
+    (fake_home / ".cursor/plugins/host-plugin").write_text("host plugin", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    workspace = tmp_path / "curator-workspace"
+    workspace.mkdir()
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.binary = str(binary)
+    cfg.agent.env_runner = str(env_runner)
+    cfg.agent.sandbox_home = str(tmp_path / "curator-home")
+    cfg.agent.use_bwrap = True
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    cmd = adapter._build_cmd("curate", str(workspace), "ask", model="auto")
+
+    mounts = _mounts(cmd)
+    mounted_sources = {source for _flag, source, _target in mounts}
+    assert str(runtime) in mounted_sources
+    home_sources = {
+        source
+        for source in mounted_sources
+        if Path(source).is_relative_to(fake_home)
+    }
+    assert home_sources == {str(runtime)}
+    assert not {
+        str(local_bin),
+        str(fake_home / ".local/share/cursor-agent"),
+        str(fake_home / ".local/share/mamba"),
+        str(fake_home / ".mambarc"),
+        str(fake_home / ".condarc"),
+        str(fake_home / ".cursor"),
+    } & mounted_sources
+    assert str(env_runner) not in cmd
+    assert str(binary) not in cmd
+    assert "/opt/qq-agent-curator/cursor/cursor-agent" in cmd
+    assert cmd[cmd.index("PATH") + 1] == "/usr/local/bin:/usr/bin:/bin"
+    assert "MAMBA_ROOT_PREFIX" not in cmd
+
+
 @pytest.mark.parametrize("mode", ["plan", "task", "code"])
 def test_hardened_read_only_command_rejects_non_ask_modes(mode: str) -> None:
     cfg = BridgeConfig(workspaces={"/private/curator": True})
