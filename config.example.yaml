@@ -63,8 +63,13 @@ ambient_memory:
 long_term_memory:
   enabled: true
   default_scope_enabled: false
+  # Exact startup/reload overrides. Scopes omitted here retain choices made with /memory.
   groups: {}
+  # groups:
+  #   "123456": true
   users: {}
+  # users:
+  #   "1000000001": true
   database_path: "data/long-term-memory.sqlite3" # changing this requires a restart
   review:
     message_threshold: 40

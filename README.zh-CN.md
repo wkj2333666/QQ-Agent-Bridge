@@ -31,6 +31,7 @@ QQ 用户/群聊
 - owner 专用命令：`/code`、`/approve`、`/stop`、`/reset`、`/reload`。
 - 任务队列和全局 agent 并发限制。
 - 每个私聊/群聊独立的短期对话记忆。
+- 每个群/私聊显式开启、严格隔离并由 SQLite 持久化的长期记忆。
 - 群聊 ambient memory，让 bot 能理解最近群聊背景，但不把背景消息当命令执行。
 - 每个群/用户可配置独立 profile，避免角色设定串群泄露。
 - SQLite 持久化定时任务，支持单次、执行 N 次、限定时间范围和任意无限周期。
@@ -129,6 +130,71 @@ storage_maintenance:
   enabled: false
 ```
 
+## 作用域长期记忆
+
+长期记忆用于持久保存偏好、稳定项目、反复出现的话题和群规范，但它采用显式开启
+（opt-in）：即使全局功能可用，每个群和每个私聊作用域默认仍是关闭的。不同群、
+不同私聊之间严格作用域隔离；群 A 不会读取群 B 的条目，私聊也不会读取其他用户
+或群的条目。隔离由 bridge 和 SQLite 查询强制执行，不交给模型自行判断。
+
+```yaml
+commands:
+  memory: user
+
+long_term_memory:
+  enabled: true
+  default_scope_enabled: false
+  groups: {}
+  users: {}
+  database_path: "data/long-term-memory.sqlite3"
+  review:
+    message_threshold: 40
+    minimum_messages: 10
+    idle_seconds: 600
+    interval_seconds: 21600
+    raw_ttl_seconds: 604800
+    model: "auto"
+    timeout_seconds: 90
+    max_attempts: 3
+  retrieval:
+    max_items: 12
+    max_chars: 1500
+    minimum_score: 0.45
+  decay:
+    enabled: true
+    interval_seconds: 86400
+    grace_seconds: 2592000
+    dormant_threshold: 0.40
+```
+
+当前作用域可用 `/memory enable` 和 `/memory disable` 开关。群聊中只有 owner 能
+修改开关或执行 `/memory review now`；允许的私聊用户只能管理自己的私聊作用域。
+常用管理命令包括 `/memory status`、`/memory remember <内容>`、`/memory list`、
+`/memory show`、`/memory correct`、`/memory forget`，以及带二次确认的
+`/memory clear`；完整写法见 `/memory help`。`/reset` 只清除最近聊天上下文，不会
+删除长期记忆。
+
+符合条件的用户文本在等待复盘期间最多保留 `604800` 秒（7 天）。达到消息数和
+冷却阈值，或到达周期检查时会后台复盘。每日衰减在 `2592000` 秒宽限期后开始，
+低分条目会先进入休眠，而不是继续被当作当前事实。显式 remember 也必须通过确定性
+的秘密与敏感信息检查。原始文件、合并转发内容、bot 输出、控制命令、凭据以及
+profile/system 内容不会进入采集。
+
+复盘 curator 使用受限的 ask-only Agent：禁用网络、不能写项目工作区、没有常规
+任务工具，也不会向 QQ 发送中间进度。模型建议始终是不可信输入，只有通过确定性
+校验后才会在单个 SQLite 事务中提交。数据库故障只会停用长期记忆，不影响普通聊天、
+任务、schedule 或 OneBot 启动。
+
+数据库是本地明文 SQLite。父目录权限为 `0700`，数据库文件为 `0600`，但运维者
+仍需保护主机访问、磁盘快照和每一份备份。手动备份时应先停止 bridge，再同时复制
+数据库及可能存在的 `-wal`、`-shm` 文件，或者使用 SQLite-aware backup 工具。
+内置通用存储清理会保护这些持久化路径；等待复盘的原始行只受长期记忆自己的 TTL
+策略管理。
+
+`/reload` 可以热重载群/用户显式映射、复盘、检索和衰减设置；配置映射中没有出现
+的作用域会保留此前通过 `/memory` 写入的选择。修改
+`long_term_memory.database_path` 后必须重启，当前进程会继续使用已经打开的旧库。
+
 ## OneBot 网关
 
 仓库里带了一个 NapCatQQ 的 compose 模板，位于 `runtime/napcat/`。它只是部署辅助；NapCatQQ 本身是独立项目。
@@ -182,6 +248,8 @@ ws://127.0.0.1:8765/onebot
 - `/help`：显示简短帮助。
 - `/help <命令>` 或 `/<命令> help`：查看某个命令的详细用法、权限和示例。
 - `/permission`：查看当前群的命令权限；`/permission set|clear` 仅群 owner 可修改，并会持久化。
+- `/memory`：查看当前群或私聊这一精确作用域的长期记忆状态。
+- `/memory help`：查看开启、复盘、记住、检查、修订、遗忘和清空的完整用法。
 - `/profile`：查看当前 profile。
 - `/profile set <提示词>`：设置当前群或当前私聊的 profile。
 - `/profile clear`：清空当前群或当前私聊的 profile。
@@ -217,7 +285,7 @@ owner 专用命令：
 - `/code <请求>`：允许修改授权工作区，带确认流程。
 - `/approve <job> <nonce>`：批准待确认任务。
 - `/stop <job>`：取消任务。
-- `/reset`：清空当前会话记忆和群聊背景。
+- `/reset`：清空最近会话记忆和群聊背景，不影响长期记忆。
 - `/reload`：热重载 `config.yaml`。
 
 群聊里只有 owner 能修改群 profile 和 `/mode`；其他群成员可以查看。私聊里允许用户可以修改自己的私聊 profile，`/mode` 仅用于群聊。

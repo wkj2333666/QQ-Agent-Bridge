@@ -30,6 +30,7 @@ QQ user/group
 - Owner-only `/code`, `/approve`, `/stop`, `/reset`, `/reload`.
 - Queueing and global agent concurrency limits.
 - Short-term conversation memory per private chat or group.
+- Opt-in, strictly scoped SQLite long-term memory with background consolidation.
 - Ambient group context for natural chat without treating background messages
   as commands.
 - Configurable per-group and per-user profiles.
@@ -151,6 +152,76 @@ storage_maintenance:
   enabled: false
 ```
 
+## Scoped Long-Term Memory
+
+Long-term memory is an opt-in feature for durable preferences, projects, recurring
+topics, and group norms. The subsystem may be globally available while every exact
+group and private-chat scope remains disabled by default. A group never reads another
+group's records, and a private chat never reads another user or group. Scope isolation
+is enforced by the bridge and SQLite queries, not delegated to the model.
+
+```yaml
+commands:
+  memory: user
+
+long_term_memory:
+  enabled: true
+  default_scope_enabled: false
+  groups: {}
+  users: {}
+  database_path: "data/long-term-memory.sqlite3"
+  review:
+    message_threshold: 40
+    minimum_messages: 10
+    idle_seconds: 600
+    interval_seconds: 21600
+    raw_ttl_seconds: 604800
+    model: "auto"
+    timeout_seconds: 90
+    max_attempts: 3
+  retrieval:
+    max_items: 12
+    max_chars: 1500
+    minimum_score: 0.45
+  decay:
+    enabled: true
+    interval_seconds: 86400
+    grace_seconds: 2592000
+    dormant_threshold: 0.40
+```
+
+Use `/memory enable` or `/memory disable` for the current scope. In a group only an
+owner can change enablement or run `/memory review now`; an allowed private user can
+manage their own private scope. Useful commands include `/memory status`,
+`/memory remember <text>`, `/memory list`, `/memory show`, `/memory correct`, `/memory forget`,
+and the confirmation-protected `/memory clear`. `/memory help` contains the complete
+syntax. `/reset` clears recent conversation context only and does not erase long-term
+memory.
+
+Eligible user text is buffered for at most `604800` seconds (seven days) while waiting
+for review. Reviews run after the configured message/idle threshold or periodic check.
+Daily decay starts after the `2592000`-second grace period; low-score records become
+dormant instead of being silently treated as current facts. Explicit remember requests
+still pass deterministic secret and sensitivity checks. Raw files, forwarded records,
+bot output, control commands, credentials, and profile/system content are excluded.
+
+The curator runs as a restricted ask-only Agent with network disabled, no project
+workspace writes, no normal task tools, and no QQ progress output. Its proposals are
+untrusted and validated before one atomic SQLite commit. A database failure disables
+only long-term memory; normal chat, tasks, schedules, and OneBot continue running.
+
+The database is local plaintext. Its parent directory is mode `0700` and the database
+is mode `0600`, but operators must still protect host access, disk snapshots, and every
+backup. For a consistent manual backup, stop the bridge and copy the database together
+with any `-wal` and `-shm` files, or use a SQLite-aware backup tool. The built-in generic
+storage cleanup protects these durable paths and applies its own TTL only to pending raw
+review rows.
+
+`/reload` hot-reloads exact group/user maps plus review, retrieval, and decay settings.
+Scopes absent from the maps keep choices previously made through `/memory`. Changing
+`long_term_memory.database_path` requires a restart; the running process keeps the
+already opened database until then.
+
 ## Optional Local Speech Recognition
 
 The bridge can transcribe QQ voice resources with a local `whisper.cpp` binary.
@@ -219,6 +290,8 @@ Common commands:
 - `/help`: show a short QQ-friendly help message.
 - `/help <command>` or `/<command> help`: show detailed usage, permissions, and examples.
 - `/permission`: view per-group command access; only group owners can set/clear overrides.
+- `/memory`: show long-term-memory status for the current exact group/private scope.
+- `/memory help`: show enable, review, remember, inspect, correct, forget, and clear usage.
 - `/profile`: show the current profile.
 - `/profile set <prompt>`: set the current private or group profile.
 - `/profile clear`: clear the current private or group profile.
@@ -256,7 +329,7 @@ Owner-only commands:
 - `/code <request>`: trusted workspace-editing path, with confirmation flow.
 - `/approve <job> <nonce>`: approve a pending risky job.
 - `/stop <job>`: cancel a job.
-- `/reset`: clear current conversation memory and group ambient context.
+- `/reset`: clear recent conversation memory and group ambient context; long-term memory is unchanged.
 - `/reload`: reload `config.yaml`.
 
 In groups, only owners can change the group profile or `/mode`; other group

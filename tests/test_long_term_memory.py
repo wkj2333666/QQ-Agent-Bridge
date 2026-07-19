@@ -163,6 +163,25 @@ def test_initialize_creates_private_wal_database_and_schema(tmp_path: Path) -> N
     store.close()
 
 
+def test_close_checkpoints_wal_before_closing_connection(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class RecordingConnection:
+        def execute(self, statement: str) -> None:
+            calls.append(statement)
+
+        def close(self) -> None:
+            calls.append("close")
+
+    store = LongTermMemoryStore(tmp_path / "memory.sqlite3")
+    store._connection = RecordingConnection()  # type: ignore[assignment]
+
+    store.close()
+
+    assert calls == ["PRAGMA wal_checkpoint(PASSIVE)", "close"]
+    assert store._connection is None
+
+
 def test_store_requires_exact_scope_for_enablement_and_sources(
     store: LongTermMemoryStore,
 ) -> None:

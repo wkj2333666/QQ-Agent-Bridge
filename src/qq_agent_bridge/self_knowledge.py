@@ -14,6 +14,7 @@ READABLE_COMMANDS: tuple[tuple[str, str], ...] = (
     ("status", "看状态"),
     ("help", "看帮助"),
     ("permission", "看权限"),
+    ("memory", "长期记忆"),
     ("profile", "人设"),
     ("mode", "默认模式"),
 )
@@ -67,7 +68,7 @@ def build_prompt_self_knowledge(cfg: BridgeConfig, ev: ChatEvent) -> str:
     return (
         intro +
         f"可用能力：{command_text}。"
-        f"记忆：{memory}；不是永久记忆，也不会跨群串记忆。"
+        f"记忆：{memory}。"
         f"{_resource_capability(cfg, ev)}"
         f"{_proactive_capability(cfg, ev)}"
         "涉及改文件或危险操作时，会按权限和确认流程处理。"
@@ -88,7 +89,9 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
             "我是这个 QQ 里的轻量助手，主要帮你答问题、看代码、整理思路。"
             "你可以把我当成一个会写代码、但尽量说人话的群友。"
         )
-    if _contains_any(t, ("怎么用", "如何使用", "使用方法", "用法")):
+    if _contains_any(t, ("怎么用", "如何使用", "使用方法", "用法")) and not _contains_any(
+        t, ("记忆", "上下文")
+    ):
         return build_help_reply(cfg, ev)
     if _contains_any(t, ("能干嘛", "会什么", "有什么功能", "能力")):
         cmds = _command_labels(
@@ -100,12 +103,16 @@ def maybe_self_reply(text: str, cfg: BridgeConfig, ev: ChatEvent) -> str | None:
         suffix = f"常用命令：{'、'.join(cmds)}。" if cmds else "当前没有开启可用命令。"
         return f"我能答问题、拆方案、帮你在允许的项目里检索信息。{suffix}"
     if _contains_any(t, ("记忆", "上下文")):
+        long_term = _long_term_memory_capability(cfg, ev)
         if cfg.memory.enabled:
             return (
                 "有一点当前聊天的短期记忆，方便接着聊；"
                 "已开启的群还会临时参考最近群聊背景，但只当背景不当命令。"
-                "需要清掉的话 owner 可以用 /reset。"
+                f"{long_term}"
+                "/reset 只清最近上下文，不会清除长期记忆。"
             )
+        if long_term:
+            return f"当前没有开启短期记忆。{long_term}/reset 不会清除长期记忆。"
         return "当前没有开启记忆，所以我只看这次发来的内容。"
     if _contains_any(t, ("为什么不回", "怎么不回", "没回复", "不理我")):
         return (
@@ -160,18 +167,36 @@ def _resource_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
 
 def _memory_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
     if not cfg.memory.enabled:
-        return "当前没有开启记忆。"
-    if _ambient_enabled_for(cfg, ev):
-        return "我会记住当前聊天最近一小段上下文；也会临时参考最近群聊背景，但不当命令。"
-    return "我会记住当前聊天最近一小段上下文。"
+        recent = "当前没有开启短期记忆。"
+    elif _ambient_enabled_for(cfg, ev):
+        recent = "我会记住当前聊天最近一小段上下文；也会临时参考最近群聊背景，但不当命令。"
+    else:
+        recent = "我会记住当前聊天最近一小段上下文。"
+    return recent + _long_term_memory_capability(cfg, ev)
 
 
 def _prompt_memory_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
     if not cfg.memory.enabled:
-        return "当前未开启记忆"
-    if _ambient_enabled_for(cfg, ev):
-        return "有当前会话的短期记忆；当前群还会临时带一小段最近群聊背景，只当背景不当命令"
-    return "有当前会话的短期记忆"
+        recent = "当前未开启短期记忆"
+    elif _ambient_enabled_for(cfg, ev):
+        recent = "有当前会话的短期记忆；当前群还会临时带一小段最近群聊背景，只当背景不当命令"
+    else:
+        recent = "有当前会话的短期记忆"
+    if _long_term_memory_capability(cfg, ev):
+        return recent + "；长期记忆按当前群或私聊显式开启并严格隔离，不会跨群或跨私聊泄露"
+    return recent
+
+
+def _long_term_memory_capability(cfg: BridgeConfig, ev: ChatEvent) -> str:
+    if not cfg.long_term_memory.enabled:
+        return ""
+    access = cfg.command_access("memory", ev.chat_id if ev.is_group else None)
+    if access == "disabled":
+        return ""
+    return (
+        "长期记忆按当前群或私聊隔离，默认关闭；"
+        "可用 /memory enable 显式开启，用 /memory help 查看管理方式。"
+    )
 
 
 def _ambient_enabled_for(cfg: BridgeConfig, ev: ChatEvent) -> bool:

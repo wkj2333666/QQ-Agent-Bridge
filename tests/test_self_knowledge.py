@@ -147,6 +147,28 @@ def test_memory_reply_reflects_config() -> None:
     assert disabled is not None and "没有开启记忆" in disabled
 
 
+def test_self_knowledge_describes_opt_in_scoped_long_term_memory() -> None:
+    cfg = make_cfg()
+    cfg.commands["memory"] = "user"
+    cfg.long_term_memory.enabled = True
+
+    help_reply = build_help_reply(cfg, make_ev())
+    prompt = build_prompt_self_knowledge(cfg, make_ev())
+    memory_reply = maybe_self_reply("你的长期记忆怎么用", cfg, make_ev())
+
+    assert "/memory" in help_reply
+    assert "显式开启" in help_reply
+    assert "长期记忆" in prompt and "不会跨群" in prompt
+    assert memory_reply is not None
+    assert "/memory enable" in memory_reply
+    assert "/reset" in memory_reply and "长期记忆" in memory_reply
+
+    cfg.memory.enabled = False
+    no_short_term = build_prompt_self_knowledge(cfg, make_ev())
+    assert "短期记忆" in no_short_term and "未开启" in no_short_term
+    assert "长期记忆" in no_short_term and "不会跨群" in no_short_term
+
+
 def test_help_reply_hides_owner_commands_from_non_owner() -> None:
     cfg = make_cfg()
 

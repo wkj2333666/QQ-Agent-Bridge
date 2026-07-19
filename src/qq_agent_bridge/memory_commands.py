@@ -93,6 +93,8 @@ class MemoryCommandService:
         self._list_snapshots: dict[tuple[str, str, str], _ListSnapshot] = {}
 
     async def handle(self, ev: ChatEvent, args: str) -> MemoryCommandResult:
+        if not self.cfg.long_term_memory.enabled:
+            return MemoryCommandResult("[disabled] 长期记忆功能已被全局关闭。")
         raw = " ".join(str(args or "").split())
         try:
             deterministic = await self._handle_deterministic(ev, raw)

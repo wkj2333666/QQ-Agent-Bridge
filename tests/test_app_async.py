@@ -4293,7 +4293,9 @@ def test_app_shutdown_bounds_cancellation_resistant_repair_drain(
             self.stopped.set()
 
     async def go() -> None:
-        app = App(make_cfg())
+        cfg = make_cfg()
+        cfg.long_term_memory.enabled = False
+        app = App(cfg)
         adapter = LifecycleAdapter()
         app.adapter = adapter  # type: ignore[assignment]
         monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -4562,6 +4564,7 @@ def test_storage_maintenance_starts_before_onebot_and_stops_after_work() -> None
         nonlocal started
         cfg = make_cfg()
         cfg.storage_maintenance.enabled = True
+        cfg.long_term_memory.enabled = False
         app = App(cfg)
         app.adapter = LifecycleAdapter()  # type: ignore[assignment]
 
@@ -4715,7 +4718,9 @@ def test_maintenance_start_failure_does_not_block_onebot_start() -> None:
             stopped.set()
 
     async def go() -> None:
-        app = App(make_cfg())
+        cfg = make_cfg()
+        cfg.long_term_memory.enabled = False
+        app = App(cfg)
         app.adapter = LifecycleAdapter()  # type: ignore[assignment]
 
         async def broken_start() -> None:
@@ -4742,7 +4747,9 @@ def test_shutdown_stops_maintenance_even_when_proactive_stop_fails() -> None:
             adapter_stopped.set()
 
     async def go() -> None:
-        app = App(make_cfg())
+        cfg = make_cfg()
+        cfg.long_term_memory.enabled = False
+        app = App(cfg)
         app.adapter = LifecycleAdapter()  # type: ignore[assignment]
         app.storage_maintainer.start = async_noop
         app.storage_maintainer.stop = maintenance_stop

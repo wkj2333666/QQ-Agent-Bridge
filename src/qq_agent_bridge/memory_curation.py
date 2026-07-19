@@ -19,7 +19,7 @@ from .long_term_memory_models import (
     MemorySource,
     memory_identity_key,
 )
-from .types import ChatEvent
+from .types import ChatEvent, trusted_reply_sender_id
 
 
 MAX_SOURCE_TEXT_CHARS = 2_000
@@ -290,7 +290,10 @@ class MemoryCollector:
         command_name: str | None = None,
         explicit: bool = False,
     ) -> bool:
-        scope = MemoryScope("group" if ev.is_group else "private", ev.chat_id)
+        scope = MemoryScope(
+            "group" if ev.is_group else "private",
+            ev.chat_id if ev.is_group else ev.sender_id,
+        )
         command = str(command_name).strip().lower() if command_name else None
         if not self.memory_cfg.enabled or not self.store.is_scope_enabled(scope):
             return False
@@ -321,11 +324,7 @@ class MemoryCollector:
                 if segment.type in {"mention", "at"} and segment.qq
             )
         )
-        quoted_sender = (
-            str(ev.reply.sender_id)
-            if ev.reply is not None and ev.reply.sender_id is not None
-            else None
-        )
+        quoted_sender = trusted_reply_sender_id(ev.reply)
         direct = bool(
             not ev.is_group
             or ev.mentioned_bot
