@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
-from .agent_runtime import ProgressCallback, run_agent
+from .agent_runtime import ProgressCallback, build_agent_adapter, run_agent
+from .config import BridgeConfig
 
 
 class StorageActivityGate:
@@ -112,3 +115,29 @@ class GatedAgentAdapter:
                 trace_id=trace_id,
                 redact_extra=redact_extra,
             )
+
+
+def build_restricted_agent_adapter(
+    cfg: BridgeConfig,
+    gate: StorageActivityGate,
+    workspace: Path | str,
+    *,
+    timeout_seconds: int,
+    max_output_chars: int,
+) -> GatedAgentAdapter:
+    """Build an isolated ask-only adapter configuration for background analysis."""
+    restricted = deepcopy(cfg)
+    resolved_workspace = str(Path(workspace).expanduser().resolve(strict=False))
+    restricted.workspaces = {resolved_workspace: True}
+    restricted.max_runtime_seconds = max(1, int(timeout_seconds))
+    restricted.max_output_chars = max(1, int(max_output_chars))
+    restricted.agent.default_workspace = resolved_workspace
+    restricted.agent.use_bwrap = True
+    restricted.agent.share_network = False
+    restricted.agent.force_task_tools = False
+    restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
+    restricted.agent.max_output_chars = restricted.max_output_chars
+    restricted.agent.trace_enabled = False
+    restricted.progress.enabled = False
+    restricted.resources.enabled = False
+    return GatedAgentAdapter(build_agent_adapter(restricted), gate)

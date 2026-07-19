@@ -152,6 +152,7 @@ class LongTermMemoryStore:
         limit: int,
         *,
         now: int | None = None,
+        attempts_below: int | None = None,
     ) -> tuple[MemorySource, ...]:
         current = int(time.time()) if now is None else int(now)
         rows = self._conn.execute(
@@ -159,18 +160,95 @@ class LongTermMemoryStore:
             SELECT * FROM review_buffer
             WHERE scope_kind = ? AND scope_id = ?
               AND review_state = 'pending' AND next_attempt_at <= ?
+              AND (? IS NULL OR attempt_count < ?)
             ORDER BY created_at, id
             LIMIT ?
             """,
-            (*self._scope_params(scope), current, max(1, int(limit))),
+            (
+                *self._scope_params(scope),
+                current,
+                attempts_below,
+                attempts_below,
+                max(1, int(limit)),
+            ),
         ).fetchall()
         return tuple(self._source(row) for row in rows)
+
+    def due_source_count(
+        self,
+        scope: MemoryScope,
+        *,
+        now: int | None = None,
+        attempts_below: int | None = None,
+    ) -> int:
+        current = int(time.time()) if now is None else int(now)
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM review_buffer
+            WHERE scope_kind = ? AND scope_id = ?
+              AND review_state = 'pending' AND next_attempt_at <= ?
+              AND (? IS NULL OR attempt_count < ?)
+            """,
+            (*self._scope_params(scope), current, attempts_below, attempts_below),
+        ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def pending_scopes(
+        self,
+        *,
+        minimum_count: int = 1,
+        now: int | None = None,
+    ) -> tuple[MemoryScope, ...]:
+        current = int(time.time()) if now is None else int(now)
+        rows = self._conn.execute(
+            """
+            SELECT scope_kind, scope_id, COUNT(*) AS count
+            FROM review_buffer
+            WHERE review_state = 'pending' AND next_attempt_at <= ?
+            GROUP BY scope_kind, scope_id
+            HAVING COUNT(*) >= ?
+            ORDER BY scope_kind, scope_id
+            """,
+            (current, max(1, int(minimum_count))),
+        ).fetchall()
+        return tuple(
+            MemoryScope(str(row["scope_kind"]), str(row["scope_id"]))  # type: ignore[arg-type]
+            for row in rows
+        )
+
+    def retry_deferred_scopes(
+        self,
+        *,
+        max_attempts: int,
+        now: int | None = None,
+    ) -> tuple[MemoryScope, ...]:
+        current = int(time.time()) if now is None else int(now)
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT scope_kind, scope_id
+            FROM review_buffer
+            WHERE review_state = 'pending' AND next_attempt_at <= ?
+              AND attempt_count >= ?
+            ORDER BY scope_kind, scope_id
+            """,
+            (current, max(1, int(max_attempts))),
+        ).fetchall()
+        return tuple(
+            MemoryScope(str(row["scope_kind"]), str(row["scope_id"]))  # type: ignore[arg-type]
+            for row in rows
+        )
 
     def commit_review(
         self,
         scope: MemoryScope,
         source_ids: Sequence[int],
         operations: Sequence[MemoryProposal],
+        *,
+        trigger_class: str = "review",
+        proposed_count: int | None = None,
+        rejected_count: int = 0,
+        duration_ms: int = 0,
+        retry_count: int = 0,
     ) -> tuple[MemoryItem, ...]:
         unique_source_ids = tuple(dict.fromkeys(int(value) for value in source_ids))
         committed_ids: list[str] = []
@@ -200,17 +278,23 @@ class LongTermMemoryStore:
                     scope_hash, trigger_class, source_count,
                     proposed_count, accepted_count, candidate_count, rejected_count,
                     duration_ms, retry_count, error_class, started_at, finished_at
-                ) VALUES (?, 'review', ?, ?, ?, ?, 0, 0, 0, NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     self._scope_hash(scope),
+                    trigger_class
+                    if trigger_class in {"review", "threshold", "periodic", "explicit"}
+                    else "review",
                     len(unique_source_ids),
-                    len(operations),
+                    len(operations) if proposed_count is None else max(0, int(proposed_count)),
                     len(operations),
                     sum(
                         op.operation == "mark_candidate" or op.status == "candidate"
                         for op in normalized_operations
                     ),
+                    max(0, int(rejected_count)),
+                    max(0, int(duration_ms)),
+                    max(0, int(retry_count)),
                     now,
                     now,
                 ),
