@@ -46,7 +46,7 @@ from .scheduler import Schedule, ScheduleExecutionResult, ScheduleRun, Scheduler
 from .self_knowledge import build_help_reply, build_prompt_self_knowledge, maybe_self_reply
 from .storage_gate import GatedAgentAdapter, StorageActivityGate
 from .storage_maintenance import StorageMaintainer
-from .types import ChatEvent, ParsedCommand
+from .types import ChatEvent, ParsedCommand, trusted_reply_sender_id
 from .workspace_search import WorkspaceSearch
 from .whisper_runner import WhisperRunner
 
@@ -1855,11 +1855,7 @@ class App:
                 and str(segment.qq) != str(self.cfg.bot.self_id or "")
             )
         )
-        quoted_sender = (
-            str(ev.reply.sender_id)
-            if ev.reply is not None and ev.reply.sender_id is not None
-            else None
-        )
+        quoted_sender = trusted_reply_sender_id(ev.reply)
         return self._retrieve_long_term_context(
             scope,
             ev.sender_id,

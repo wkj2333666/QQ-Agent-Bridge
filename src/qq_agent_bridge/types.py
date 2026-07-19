@@ -7,6 +7,14 @@ from typing import Any, Literal
 
 ResourceKind = Literal["image", "file", "url", "audio", "voice", "video", "forward"]
 TranscriptStatus = Literal["verified", "unavailable"]
+TRUSTED_REPLY_SOURCES = frozenset(
+    {
+        "onebot-cq-reply",
+        "onebot-get-msg",
+        "onebot-recent-cache",
+        "onebot-reply-segment",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,17 @@ class ChatReply:
     segments: tuple[ChatSegment, ...] = ()
     resources: tuple[ChatResource, ...] = ()
     raw_data: dict[str, Any] = field(default_factory=dict)
+
+
+def trusted_reply_sender_id(reply: ChatReply | None) -> str | None:
+    """Return the quoted sender only for structured OneBot reply provenance."""
+    if reply is None or not reply.message_id or reply.sender_id is None:
+        return None
+    source = str(reply.raw_data.get("source", "")).strip().lower()
+    if source not in TRUSTED_REPLY_SOURCES:
+        return None
+    sender_id = str(reply.sender_id).strip()
+    return sender_id or None
 
 
 @dataclass(frozen=True)

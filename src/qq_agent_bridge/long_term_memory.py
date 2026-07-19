@@ -428,6 +428,39 @@ class LongTermMemoryStore:
             (*params, fetch_limit),
         ).fetchall()
 
+        lexical_rows: Sequence[sqlite3.Row] = ()
+        lexical_terms = self._lexical_terms(query)[:40]
+        if lexical_terms:
+            lexical_conditions = [
+                "instr(lower(m.content), ?) > 0" if term.isascii() else "instr(m.content, ?) > 0"
+                for term in lexical_terms
+            ]
+            lexical_scores = [
+                "CASE WHEN instr(lower(m.content), ?) > 0 THEN 1 ELSE 0 END"
+                if term.isascii()
+                else "CASE WHEN instr(m.content, ?) > 0 THEN 1 ELSE 0 END"
+                for term in lexical_terms
+            ]
+            lexical_rows = self._conn.execute(
+                f"""
+                SELECT m.*, NULL AS text_rank
+                FROM memory_items m
+                WHERE {' AND '.join(clauses)}
+                  AND ({' OR '.join(lexical_conditions)})
+                ORDER BY ({' + '.join(lexical_scores)}) DESC,
+                         m.effective_score DESC,
+                         m.source_count DESC, m.last_supported_at DESC,
+                         m.updated_at DESC, m.id
+                LIMIT ?
+                """,
+                (
+                    *params,
+                    *lexical_terms,
+                    *lexical_terms,
+                    fetch_limit,
+                ),
+            ).fetchall()
+
         matched_rows: Sequence[sqlite3.Row] = ()
         if match:
             matched_rows = self._conn.execute(
@@ -445,6 +478,7 @@ class LongTermMemoryStore:
             ).fetchall()
 
         rows_by_id = {str(row["id"]): row for row in fallback_rows}
+        rows_by_id.update((str(row["id"]), row) for row in lexical_rows)
         text_rank: dict[str, float] = {}
         for row in matched_rows:
             item_id = str(row["id"])
@@ -478,19 +512,26 @@ class LongTermMemoryStore:
     @staticmethod
     def _lexical_relevance(query: str, content: str) -> int:
         """Provide deterministic CJK relevance where unicode61 has no word breaks."""
-        def terms(value: str) -> set[str]:
-            result = {
-                token.casefold()
-                for token in re.findall(r"[A-Za-z0-9_]+", value, flags=re.UNICODE)
-            }
-            for run in re.findall(r"[\u3400-\u9fff]+", value):
-                if len(run) == 1:
-                    result.add(run)
-                else:
-                    result.update(run[index : index + 2] for index in range(len(run) - 1))
-            return result
+        return len(
+            set(LongTermMemoryStore._lexical_terms(query))
+            & set(LongTermMemoryStore._lexical_terms(content))
+        )
 
-        return len(terms(query) & terms(content))
+    @staticmethod
+    def _lexical_terms(value: str) -> tuple[str, ...]:
+        result: list[str] = []
+        for token in re.findall(r"[A-Za-z0-9_]+", value, flags=re.UNICODE):
+            normalized = token.casefold()
+            if normalized not in result:
+                result.append(normalized)
+        for run in re.findall(r"[\u3400-\u9fff]+", value):
+            candidates = (run,) if len(run) == 1 else tuple(
+                run[index : index + 2] for index in range(len(run) - 1)
+            )
+            for candidate in candidates:
+                if candidate not in result:
+                    result.append(candidate)
+        return tuple(result)
 
     def hard_delete(self, scope: MemoryScope, item_id: str) -> bool:
         with self._transaction() as conn:

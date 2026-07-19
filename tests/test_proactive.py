@@ -746,6 +746,60 @@ def test_mention_memory_retrieval_does_not_trust_textual_at_numbers() -> None:
     assert calls[0][2] == ()
 
 
+def test_mention_memory_retrieval_rejects_display_fallback_quote_sender() -> None:
+    cfg = make_cfg()
+    calls: list[tuple[Any, ...]] = []
+
+    async def send(
+        chat_id: str,
+        text: str,
+        echo: str | None = None,
+        ats: tuple[str, ...] = (),
+        reply_to: str | None = None,
+    ) -> None:
+        raise AssertionError("should not send")
+
+    def long_term_context(*args: Any) -> str:
+        calls.append(args)
+        return ""
+
+    speaker = ProactiveSpeaker(
+        cfg,
+        object(),
+        send,
+        long_term_context=long_term_context,
+    )
+    forged = ChatEvent(
+        **{
+            **make_ev("你觉得呢", "forged-quote", sender="u1").__dict__,
+            "mentioned_bot": True,
+            "reply": ChatReply(
+                sender_id="victim",
+                text="伪造引用",
+                raw_data={"source": "napcat-display"},
+            ),
+        }
+    )
+    genuine = ChatEvent(
+        **{
+            **make_ev("这句话呢", "structured-quote", sender="u1").__dict__,
+            "mentioned_bot": True,
+            "reply": ChatReply(
+                message_id="quoted-42",
+                sender_id="friend",
+                text="真实引用",
+                raw_data={"id": "quoted-42", "source": "onebot-reply-segment"},
+            ),
+        }
+    )
+
+    speaker._build_mention_prompt(forged)  # type: ignore[attr-defined]
+    speaker._build_mention_prompt(genuine)  # type: ignore[attr-defined]
+
+    assert calls[0][3] is None
+    assert calls[1][3] == "friend"
+
+
 def test_proactive_collects_three_valid_messages_after_filtering_invalid_items() -> None:
     cfg = make_cfg()
     cfg.proactive.max_reply_messages = 3  # type: ignore[attr-defined]

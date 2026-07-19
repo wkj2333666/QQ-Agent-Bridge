@@ -208,6 +208,38 @@ def test_retrieval_uses_fts_relevance_before_confidence_and_reinforcement(
     assert text.index("正在准备火星项目发布") < text.index("喜欢简洁回答")
 
 
+def test_cjk_relevance_is_ranked_before_the_score_fallback_cutoff(
+    store: LongTermMemoryStore,
+) -> None:
+    for index in range(121):
+        add_memory(
+            store,
+            GROUP,
+            subject_kind="user",
+            subject_id="u1",
+            content=f"高分无关条目 {index:03d}：正在整理普通周报",
+            confidence=0.99,
+        )
+    add_memory(
+        store,
+        GROUP,
+        subject_kind="user",
+        subject_id="u1",
+        content="正在准备火星项目发布",
+        confidence=0.7,
+    )
+
+    text = make_retriever(store, max_items=3).retrieve(
+        GROUP,
+        "u1",
+        (),
+        None,
+        "火星计划进度",
+    )
+
+    assert "正在准备火星项目发布" in text
+
+
 def test_retrieval_is_bounded_and_includes_exact_untrusted_prompt_contract(
     store: LongTermMemoryStore,
 ) -> None:

@@ -152,7 +152,10 @@ def _reply_from_cq_text(text: str) -> ChatReply | None:
     match = _CQ_REPLY_RE.search(text)
     if not match:
         return None
-    return ChatReply(message_id=match.group(1), raw_data={"id": match.group(1)})
+    return ChatReply(
+        message_id=match.group(1),
+        raw_data={"id": match.group(1), "source": "onebot-cq-reply"},
+    )
 
 
 def _reply_from_napcat_display_text(text: str) -> ChatReply | None:
@@ -184,6 +187,8 @@ def _reply_from_segment_data(data: dict[str, Any]) -> ChatReply | None:
         text = text or nested_text
         segments = nested_segments
         resources = nested_resources
+    raw_data = dict(data)
+    raw_data["source"] = "onebot-reply-segment"
     return ChatReply(
         message_id=message_id,
         sender_id=sender,
@@ -191,7 +196,7 @@ def _reply_from_segment_data(data: dict[str, Any]) -> ChatReply | None:
         raw_message=raw_message,
         segments=segments,
         resources=resources,
-        raw_data=data,
+        raw_data=raw_data,
     )
 
 
@@ -207,6 +212,8 @@ def _reply_from_message_data(data: dict[str, Any], fallback_id: str = "") -> Cha
     message = data.get("message")
     if message is not None:
         text, segments, resources, _ = _extract_segments_and_resources(message)
+    raw_data = dict(data)
+    raw_data["source"] = "onebot-get-msg"
     return ChatReply(
         message_id=message_id,
         sender_id=sender,
@@ -214,7 +221,7 @@ def _reply_from_message_data(data: dict[str, Any], fallback_id: str = "") -> Cha
         raw_message=raw_message,
         segments=segments,
         resources=resources,
-        raw_data=data,
+        raw_data=raw_data,
     )
 
 
@@ -741,6 +748,7 @@ class OneBotAdapter:
             raw_message=ev.raw_message,
             segments=ev.segments,
             resources=ev.resources,
+            raw_data={"source": "onebot-recent-cache"},
         )
         self._recent_message_ids.append(ev.id)
         while len(self._recent_message_ids) > self._max_recent_messages:
