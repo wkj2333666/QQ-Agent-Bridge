@@ -23,6 +23,7 @@ commands:
   help: user
   permission: user # view group command overrides; only group owners may change them
   schedule: user # schedule viewing; group mutations remain owner-only
+  memory: user   # scoped long-term memory; sensitive operations recheck subject authority
   profile: user  # viewing; group edits remain owner-only
   mode: user     # viewing; only owners may change a group's mode
   reset: owner   # clears current conversation memory
@@ -57,6 +58,33 @@ ambient_memory:
   max_age_seconds: 900
   min_chars: 4
   ignored_prefixes: ["/", "／", "!", "！"]
+
+# Persistent memory is available globally, but every group/private scope opts in.
+long_term_memory:
+  enabled: true
+  default_scope_enabled: false
+  groups: {}
+  users: {}
+  database_path: "data/long-term-memory.sqlite3" # changing this requires a restart
+  review:
+    message_threshold: 40
+    minimum_messages: 10
+    idle_seconds: 600
+    interval_seconds: 21600
+    raw_ttl_seconds: 604800
+    max_concurrent: 1
+    model: "auto"
+    timeout_seconds: 90
+    max_attempts: 3
+  retrieval:
+    max_items: 12
+    max_chars: 1500
+    minimum_score: 0.45
+  decay:
+    enabled: true
+    interval_seconds: 86400
+    grace_seconds: 2592000
+    dormant_threshold: 0.40
 
 resources:
   enabled: true
