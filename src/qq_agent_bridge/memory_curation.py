@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import re
+import time
 import unicodedata
 from typing import Mapping, Sequence
 
@@ -69,7 +70,9 @@ _ENGLISH_CREDENTIAL_LABEL = (
     rf"credentials?"
 )
 _ENGLISH_SECRET_LABEL = (
-    rf"(?:(?:api|oauth2?|session|client){_SECRET_LABEL_SEPARATOR}"
+    rf"(?:(?:aws{_SECRET_LABEL_SEPARATOR})?access{_SECRET_LABEL_SEPARATOR}"
+    rf"key{_SECRET_LABEL_SEPARATOR}id|"
+    rf"(?:api|oauth2?|session|client){_SECRET_LABEL_SEPARATOR}"
     rf"(?:(?:access|refresh){_SECRET_LABEL_SEPARATOR})?(?:token|key|secret)|"
     rf"(?:access|refresh|auth){_SECRET_LABEL_SEPARATOR}(?:token|key)|"
     rf"bearer(?:{_SECRET_LABEL_SEPARATOR}token)?|"
@@ -81,14 +84,15 @@ _ENGLISH_SECRET_LABEL = (
     rf"{_ENGLISH_CREDENTIAL_LABEL}|"
     r"password|passwd|secret|cookie)"
 )
-_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|(?:是|为|等于)|[=:：])"
+_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|(?:就是|是|为|等于)|[=:：])"
 _CHINESE_SECRET_LABEL = (
     r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
     r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码)|"
     r"(?:登录|认证|身份)?(?:凭据|凭证)|认证信息)"
 )
 _ENV_SECRET_SUFFIX = (
-    r"(?:(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
+    r"(?:(?:aws_)?access_key_id|"
+    r"(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
     r"secret_access_key|(?:access|refresh|auth)_(?:token|key)|bearer(?:_token)?|"
     r"private_key|secret_key|password|passwd|cookie|token|secret|"
     r"credentials?|"
@@ -184,9 +188,10 @@ _SENSITIVE_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?:我家在|收件地址|邮寄地址|通信地址)[^\n]{0,80}"
+        r"(?:我\s*家\s*(?:住|在)|收件地址|邮寄地址|通信地址)"
+        r"\s*[：:=,，]?\s*[^\n]{0,80}"
         r"(?:省|市)[^\n]{0,40}(?:区|县)[^\n]{0,40}"
-        r"(?:路|街|大道|巷)[^\n]{0,20}\d+号",
+        r"(?:路|街|大道|大街|巷)[^\n]{0,20}\d+\s*号",
         re.IGNORECASE,
     ),
     re.compile(
@@ -198,8 +203,8 @@ _SENSITIVE_PATTERNS = (
     # Legal identity and financial information.
     re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
     re.compile(
-        r"(?:我叫|我的?名字(?:是|叫|为)|姓名(?:是|叫|为))"
-        r"[\u3400-\u9fff\u00b7]{2,12}",
+        r"(?:我\s*叫|我\s*的?\s*名字\s*(?:是|叫|为)|姓名\s*(?:是|叫|为))"
+        r"[\s:：,，;；-]*(?:[\u3400-\u9fff\u00b7]\s*){2,12}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -384,10 +389,14 @@ class MemoryCollector:
 def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
     """Parse the curator's exact JSON envelope without coercing field types."""
     try:
-        payload = json.loads(text, object_pairs_hook=_unique_object)
+        payload = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
     except _DuplicateKeyError as exc:
         raise ValueError("curator output contains duplicate key") from exc
-    except (TypeError, json.JSONDecodeError) as exc:
+    except (TypeError, json.JSONDecodeError, _NonJsonConstantError) as exc:
         raise ValueError("curator output is not valid JSON") from exc
     if not isinstance(payload, dict) or set(payload) != {"operations"}:
         raise ValueError("curator output must contain only operations")
@@ -526,10 +535,11 @@ class MemoryValidator:
             if self._target_metadata_mismatch(proposal, target):
                 return None, "target_metadata_mismatch"
             proposal = self._with_target_metadata(proposal, target)
-            if proposal.operation == "merge" and not self._valid_related_targets(
-                scope, proposal, target, staged_items
-            ):
-                return None, "invalid_related_target"
+            if proposal.operation in {"merge", "forget"} and proposal.related_item_ids:
+                if not self._valid_related_targets(
+                    scope, proposal, target, staged_items
+                ):
+                    return None, "invalid_related_target"
         elif proposal.sensitivity is None:
             proposal = replace(proposal, sensitivity="normal")
 
@@ -562,17 +572,42 @@ class MemoryValidator:
             )
             owner_supports_content = actor is not None and any(
                 source.sender_id == actor.id
-                and _content_supported_by_source(evidence_content, source.text)
+                and _content_affirmatively_supported_by_source(
+                    evidence_content, source.text
+                )
                 for source in evidence_sources
             )
             if not explicit_item_confirmation and not owner_supports_content:
                 return None, "owner_confirmation_required"
         elif cited_sources is not None and evidence_content is not None:
-            if not any(
-                _content_supported_by_source(evidence_content, source.text)
+            matching_sources = tuple(
+                source
                 for source in cited_sources
-            ):
+                if _content_supported_by_source(evidence_content, source.text)
+            )
+            if not matching_sources:
                 return None, "source_content_mismatch"
+            if not any(
+                _content_affirmatively_supported_by_source(
+                    evidence_content, source.text
+                )
+                for source in matching_sources
+            ):
+                return None, "source_evidence_disallowed"
+        if (
+            proposal.operation == "forget"
+            and target is not None
+            and (actor is None or proposal.evidence_required)
+        ):
+            if not self._background_forget_authorized(
+                scope,
+                proposal,
+                target,
+                staged_items,
+                evidence_sources,
+            ):
+                return None, "actor_not_authorized"
+            proposal = replace(proposal, expires_at=target.expires_at)
         reason = self._validate_subject(scope, evidence_sources, proposal, actor)
         if reason is not None:
             return None, reason
@@ -711,8 +746,6 @@ class MemoryValidator:
         elif operation == "forget":
             if not proposal.item_id:
                 return "missing_required_field"
-            if actor is None and proposal.expires_at is None and not proposal.related_item_ids:
-                return "actor_not_authorized"
         return None
 
     def _resolve_operation_ids(
@@ -726,7 +759,7 @@ class MemoryValidator:
             return None, None, "target_not_found"
 
         related_ids = proposal.related_item_ids
-        if proposal.operation == "merge":
+        if proposal.operation in {"merge", "forget"} and related_ids:
             canonical_related: list[str] = []
             for related_id in related_ids:
                 related = self.store.get_item(scope, related_id)
@@ -849,6 +882,33 @@ class MemoryValidator:
                 or related.subject_id != target.subject_id
                 or related.category != target.category
                 or related.status in {"contradicted", "rejected"}
+            ):
+                return False
+        return True
+
+    def _background_forget_authorized(
+        self,
+        scope: MemoryScope,
+        proposal: MemoryProposal,
+        target: MemoryItem,
+        staged_items: Mapping[str, MemoryItem | None],
+        sources: tuple[MemorySource, ...],
+    ) -> bool:
+        if target.expires_at is not None and target.expires_at <= int(time.time()):
+            return True
+        if self.store is None or not proposal.related_item_ids:
+            return False
+        for related_id in proposal.related_item_ids:
+            related = (
+                staged_items[related_id]
+                if related_id in staged_items
+                else self.store.get_item(scope, related_id)
+            )
+            if related is None or not any(
+                _content_affirmatively_supported_by_source(
+                    related.content, source.text
+                )
+                for source in sources
             ):
                 return False
         return True
@@ -1009,7 +1069,9 @@ class MemoryValidator:
                 return "owner_confirmation_required"
             if proposal.content is not None and not any(
                 source.sender_id == actor.id
-                and _content_supported_by_source(proposal.content, source.text)
+                and _content_affirmatively_supported_by_source(
+                    proposal.content, source.text
+                )
                 for source in sources
             ):
                 return "owner_confirmation_required"
@@ -1115,6 +1177,10 @@ class _DuplicateKeyError(ValueError):
     pass
 
 
+class _NonJsonConstantError(ValueError):
+    pass
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -1122,6 +1188,10 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise _DuplicateKeyError(key)
         result[key] = value
     return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise _NonJsonConstantError(value)
 
 
 def _evidence_normal_form(text: str) -> str:
@@ -1133,6 +1203,95 @@ def _content_supported_by_source(content: str, source_text: str) -> bool:
     proposed = _evidence_normal_form(content)
     source = _evidence_normal_form(source_text)
     return bool(proposed and proposed in source)
+
+
+def _content_affirmatively_supported_by_source(content: str, source_text: str) -> bool:
+    proposed = _evidence_normal_form(content)
+    normalized_source, compact_source, positions = _evidence_source_map(source_text)
+    if not proposed:
+        return False
+    offset = compact_source.find(proposed)
+    while offset >= 0:
+        start = positions[offset]
+        end = positions[offset + len(proposed) - 1] + 1
+        if not _evidence_occurrence_disallowed(normalized_source, start, end):
+            return True
+        offset = compact_source.find(proposed, offset + 1)
+    return False
+
+
+def _evidence_source_map(text: str) -> tuple[str, str, tuple[int, ...]]:
+    normalized = unicodedata.normalize("NFKC", _normalize_text(text)).casefold()
+    compact: list[str] = []
+    positions: list[int] = []
+    for index, character in enumerate(normalized):
+        if character.isalnum():
+            compact.append(character)
+            positions.append(index)
+    return normalized, "".join(compact), tuple(positions)
+
+
+def _evidence_occurrence_disallowed(source: str, start: int, end: int) -> bool:
+    for pattern in (
+        r'"[^"\n]*"',
+        r"'[^'\n]*'",
+        r"“[^”\n]*”",
+        r"‘[^’\n]*’",
+        r"「[^」\n]*」",
+        r"『[^』\n]*』",
+    ):
+        if any(
+            match.start() < start and end < match.end()
+            for match in re.finditer(pattern, source)
+        ):
+            return True
+
+    window_start = max(0, start - 120)
+    window_end = min(len(source), end + 120)
+    window = source[window_start:window_end]
+    prefix = source[max(0, start - 80):start]
+    suffix = source[end:min(len(source), end + 80)]
+    if re.search(
+        r"\b(?:do\s+not|don['’]t|dont|never|must\s+not|should\s+not)\b"
+        r".{0,80}\b(?:store|remember|save|retain|memorize|record)\b",
+        window,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"\b(?:forget|delete|erase)\b.{0,80}$", prefix, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:it\s+is\s+)?(?:not\s+true|false|untrue|incorrect)(?:\s+that)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    ) or re.search(
+        r"\b(?:i\s+)?(?:deny|denied|denies)(?:\s+that)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    ) or re.match(
+        r"\s+(?:is\s+)?(?:not\s+true|false|untrue|incorrect)\b", suffix
+    ):
+        return True
+    if re.search(
+        r"\b(?:say|repeat|output|print|write)(?:\s+(?:the\s+)?(?:phrase|sentence|words?))?\s*$",
+        prefix,
+        re.IGNORECASE,
+    ):
+        return True
+    compact_window = re.sub(r"\s+", "", window)
+    if re.search(r"(?:不要|别|勿|无需|禁止|不许)", compact_window) and re.search(
+        r"(?:记住|记为|记录|存储|保存|保留)", compact_window
+    ):
+        return True
+    if re.search(r"(?:忘记|忘掉|删除|清除)[^。！？\n]{0,80}$", prefix):
+        return True
+    if re.search(r"(?:并非|不是|不是真的|不属实|否认)\s*$", prefix) or re.match(
+        r"\s*(?:并非事实|不是真的|不属实)", suffix
+    ):
+        return True
+    if re.search(r"(?:说|重复|输出|打印|写下)\s*$", prefix):
+        return True
+    return False
 
 
 def _normalize_actor(actor: object | None) -> MemoryActor | None:
@@ -1174,12 +1333,13 @@ def _normalize_text(text: object) -> str:
 
 
 def _contains_secret(text: str) -> bool:
-    return any(pattern.search(text) is not None for pattern in _SECRET_PATTERNS)
+    normalized = unicodedata.normalize("NFKC", _normalize_text(text)).casefold()
+    return any(pattern.search(normalized) is not None for pattern in _SECRET_PATTERNS)
 
 
 def classify_memory_sensitivity(text: str) -> str:
     """Conservatively classify personal content without delegating policy to a model."""
-    normalized = _normalize_text(text)
+    normalized = _normalize_text(text).casefold()
     if _contains_structured_sensitive_identifier(normalized) or any(
         pattern.search(normalized) is not None for pattern in _SENSITIVE_PATTERNS
     ):

@@ -422,6 +422,21 @@ def test_parse_curator_output_rejects_duplicate_keys_at_every_level(
         parse_curator_output(payload)
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_parse_curator_output_rejects_non_json_numeric_constants(
+    constant: str,
+) -> None:
+    payload = (
+        '{"operations":[{"operation":"add","source_ids":[1],'
+        '"subject_kind":"user","subject_id":"u1","content":"fact",'
+        f'"confidence":{constant}'
+        "}]}"
+    )
+
+    with pytest.raises(ValueError, match="valid JSON"):
+        parse_curator_output(payload)
+
+
 def test_curator_proposals_require_cited_sources_with_normalized_content_support(
     cfg: BridgeConfig,
 ) -> None:
@@ -504,6 +519,121 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "source_content_mismatch",
         "source_content_mismatch",
     ]
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        'Do not store the test phrase "u1 prefers paper reports" as memory.',
+        "Please do not remember u1 prefers paper reports.",
+        "Never save u1 prefers paper reports to memory.",
+        "Don’t remember u1 prefers paper reports.",
+        'The sentence "u1 prefers paper reports" is only an example.',
+        "It is false that u1 prefers paper reports.",
+        "I deny that u1 prefers paper reports.",
+        "不要把“u1 prefers paper reports”记为长期记忆。",
+        "不 要 记 住 u1 prefers paper reports。",
+        "请忘记 u1 prefers paper reports。",
+        "并非 u1 prefers paper reports。",
+    ],
+    ids=[
+        "quoted-opt-out",
+        "do-not-remember",
+        "never-save",
+        "curly-dont",
+        "quoted-example",
+        "false-that",
+        "deny-that",
+        "chinese-opt-out",
+        "spaced-chinese-opt-out",
+        "chinese-forget",
+        "chinese-negation",
+    ],
+)
+def test_evidence_binding_rejects_non_affirmative_context_regardless_of_confidence(
+    cfg: BridgeConfig,
+    source_text: str,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=source_text,
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [41],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "u1 prefers paper reports",
+                        "confidence": 0.99,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), proposal, actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "u1 prefers paper reports",
+        "Please remember that u1 prefers paper reports.",
+        "请记住 u1 prefers paper reports。",
+    ],
+)
+def test_evidence_binding_accepts_affirmative_or_positive_memory_context(
+    cfg: BridgeConfig,
+    source_text: str,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=source_text,
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [41],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "u1 prefers paper reports",
+                        "confidence": 0.99,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), proposal, actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].status == "active"
 
 
 def test_curator_proposal_rejects_uncited_and_out_of_batch_sources(
@@ -859,6 +989,60 @@ def test_mixed_language_credential_assignments_are_unconditionally_rejected(
 @pytest.mark.parametrize(
     "content",
     [
+        "我的密码就是 hunter2value",
+        "ＡＰＩ ｋｅｙ 是 abcdefghijklmnop",
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+        "aws_access_key_id equals AKIAIOSFODNN7EXAMPLE",
+        "ＡＷＳ＿ＡＣＣＥＳＳ＿ＫＥＹ＿ＩＤ＝ＡＫＩＡＩＯＳＦＯＤＮＮ７ＥＸＡＭＰＬＥ",
+        "Access Key ID is AKIAIOSFODNN7EXAMPLE",
+        "客户端密钥就是 opaque-client-secret",
+    ],
+    ids=[
+        "chinese-jiushi",
+        "fullwidth-api-key",
+        "aws-access-key-id",
+        "lowercase-aws-access-key-id",
+        "fullwidth-aws-access-key-id",
+        "access-key-id-label",
+        "chinese-client-secret-jiushi",
+    ],
+)
+def test_unicode_and_access_key_credentials_are_unconditionally_rejected(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    content: str,
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    assert not MemoryCollector(store, cfg).collect_event(
+        make_event(content, group="g"),
+        command_name="memory",
+        explicit=True,
+    )
+    assert store.pending_sources(GROUP, 10) == ()
+
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content=content,
+        sensitivity="normal",
+        source_kind="explicit_request",
+        explicit_memory=True,
+        actor_class="user",
+    )
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content, explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "secret_content"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         "api_token=abcdefgh",
         "api-token: abcdefgh",
         "api token equals abcdefgh",
@@ -1081,6 +1265,55 @@ def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
 
     assert background.accepted == ()
     assert background.rejected[0].reason == "sensitivity_consent_required"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我叫：张三",
+        "我叫 张三",
+        "我的名字叫：张三",
+        "我 叫 ： 张三",
+        "我的 名字 叫 : 张三",
+        "我家住北京市海淀区中关村大街27号",
+        "我家住：北京市海淀区中关村大街27号",
+        "我家住 北京市 海淀区 中关村大街 27号",
+    ],
+    ids=[
+        "name-colon",
+        "name-space",
+        "name-verb-colon",
+        "name-token-spacing",
+        "name-phrase-spacing",
+        "home-lives",
+        "home-lives-colon",
+        "home-lives-spacing",
+    ],
+)
+def test_punctuated_legal_names_and_precise_home_addresses_are_sensitive(
+    cfg: BridgeConfig,
+    content: str,
+) -> None:
+    assert classify_memory_sensitivity(content) == "sensitive"
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        category="identity",
+        content=content,
+        sensitivity="normal",
+        source_kind="self_statement",
+        confidence=0.99,
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content),),
+        (proposal,),
+        actor=None,
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "sensitivity_consent_required"
 
 
 @pytest.mark.parametrize(
@@ -2340,6 +2573,205 @@ def test_stateful_operations_require_target_resolver(
 
     assert result.accepted == ()
     assert result.rejected[0].reason == "target_resolver_required"
+
+
+@pytest.mark.parametrize(
+    ("related_kind", "proposal_expires_at", "expected_reason"),
+    [
+        ("bogus", None, "invalid_related_target"),
+        ("wrong-subject", None, "invalid_related_target"),
+        ("unproved-replacement", None, "actor_not_authorized"),
+        ("none", 1, "actor_not_authorized"),
+    ],
+    ids=[
+        "fabricated-replacement",
+        "unrelated-item",
+        "unproved-replacement",
+        "curator-expiry",
+    ],
+)
+def test_background_forget_requires_resolved_deterministic_authority(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    related_kind: str,
+    proposal_expires_at: int | None,
+    expected_reason: str,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="u1",
+            category="preference",
+            content="u1 prefers paper reports",
+        ),
+    )
+    related_ids: tuple[str, ...] = ()
+    if related_kind == "bogus":
+        related_ids = ("bogus-replacement",)
+    elif related_kind == "wrong-subject":
+        unrelated = seed_item(
+            store,
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="u2",
+                category="preference",
+                content="u2 prefers paper reports",
+            ),
+            message_id="unrelated-replacement",
+        )
+        related_ids = (unrelated.id,)
+    elif related_kind == "unproved-replacement":
+        unproved = seed_item(
+            store,
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="u1",
+                category="preference",
+                content="u1 prefers digital reports",
+            ),
+            message_id="unproved-replacement",
+        )
+        related_ids = (unproved.id,)
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="u1 prefers paper reports",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "forget",
+                        "source_ids": [41],
+                        "item_id": target.id,
+                        "related_item_ids": list(related_ids),
+                        "expires_at": proposal_expires_at,
+                        "source_kind": "self_statement",
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), (proposal,), actor=None
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == expected_reason
+    assert store.get_item(GROUP, target.id) is not None
+
+
+@pytest.mark.parametrize("authority", ["expired", "replacement"])
+def test_background_forget_accepts_resolved_expiry_or_replacement_proof(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    authority: str,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="u1",
+            category="preference",
+            content="u1 prefers paper reports",
+            expires_at=1 if authority == "expired" else None,
+        ),
+    )
+    related_ids: tuple[str, ...] = ()
+    if authority == "replacement":
+        replacement = seed_item(
+            store,
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="u1",
+                category="preference",
+                content="u1 prefers digital reports",
+            ),
+            message_id="valid-replacement",
+        )
+        related_ids = (replacement.id,)
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=(
+            "u1 prefers digital reports; this replaces u1 prefers paper reports"
+            if authority == "replacement"
+            else "u1 prefers paper reports"
+        ),
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal(
+        operation="forget",
+        source_ids=(41,),
+        item_id=target.id,
+        related_item_ids=related_ids,
+        source_kind="self_statement",
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), (proposal,), actor=None
+    )
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "forget"
+    assert result.accepted[0].item_id == target.id
+    assert result.accepted[0].related_item_ids == related_ids
+
+
+def test_curator_forget_requires_proof_even_when_review_has_an_actor(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="owner",
+            category="preference",
+            content="owner prefers paper reports",
+        ),
+    )
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="owner",
+        text="owner prefers paper reports",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "forget",
+                        "source_ids": [41],
+                        "item_id": target.id,
+                        "source_kind": "owner_confirmed",
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (evidence,),
+        (proposal,),
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "actor_not_authorized"
 
 
 def test_missing_target_rejection_preserves_committable_add_sibling(

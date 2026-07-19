@@ -166,7 +166,7 @@ class ProactiveSpeaker:
 
     async def decide_mention(self, ev: ChatEvent) -> MentionDecision:
         """Classify a direct no-command group mention as chat, ask, or silent."""
-        prompt = self._build_mention_prompt(ev)
+        prompt, memory_redactions = self._build_mention_prompt_with_redactions(ev)
         self._debug("mention_decide", chat_id=ev.chat_id, mid=ev.id, model=self.cfg.proactive.model)
         try:
             raw = await run_agent(
@@ -176,6 +176,7 @@ class ProactiveSpeaker:
                 "ask",
                 model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
                 trace_id=f"proactive-mention-{ev.id}",
+                redact_extra=memory_redactions,
             )
         except Exception:  # noqa: BLE001 - mentioned casual routing should fail silent
             logger.exception("mention decision run failed")
@@ -467,7 +468,7 @@ class ProactiveSpeaker:
         if work.replies is None:
             if not self._work_may_side_effect(chat_id, work.generation):
                 return
-            prompt = self._build_prompt(batch)
+            prompt, memory_redactions = self._build_prompt_with_redactions(batch)
             self._debug("decide", chat_id=chat_id, messages=len(batch), model=self.cfg.proactive.model)
             try:
                 raw = await run_agent(
@@ -477,6 +478,7 @@ class ProactiveSpeaker:
                     "ask",
                     model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
                     trace_id=f"proactive-{batch[-1].id}",
+                    redact_extra=memory_redactions,
                 )
             except asyncio.CancelledError:
                 raise
@@ -628,6 +630,11 @@ class ProactiveSpeaker:
         self._hourly_sent.setdefault(chat_id, deque()).append(now)
 
     def _build_prompt(self, batch: list[_QueuedMessage]) -> str:
+        return self._build_prompt_with_redactions(batch)[0]
+
+    def _build_prompt_with_redactions(
+        self, batch: list[_QueuedMessage]
+    ) -> tuple[str, tuple[str, ...]]:
         max_chars = max(200, self.cfg.proactive.max_prompt_chars)
         ambient = ""
         if batch and self.ambient_context:
@@ -648,14 +655,15 @@ class ProactiveSpeaker:
             transcript = transcript[-max_chars:]
         clear_question = "是" if self._has_clear_question(batch) else "否"
         profile_section = self._profile_section(batch[-1].chat_id if batch else "")
-        long_term_section = self._long_term_section_for_batch(batch, transcript)
+        long_term_context = self._long_term_context_for_batch(batch, transcript)
+        long_term_section = self._format_long_term_section(long_term_context)
         reply_section = self._reply_section_for_batch(batch, max_chars)
         ambient_section = (
             f"\n最近群聊背景（低优先级，只用来理解代词和上下文，可能和最近聊天有少量重合）：\n{ambient}\n"
             if ambient
             else ""
         )
-        return f"""你是在 QQ 群里的轻量助手。下面是群友最近几条未 @ 你的聊天。
+        prompt = f"""你是在 QQ 群里的轻量助手。下面是群友最近几条未 @ 你的聊天。
 
 {profile_section}
 {long_term_section}
@@ -687,8 +695,14 @@ class ProactiveSpeaker:
 {reply_section}
 {ambient_section}
 """
+        return prompt, self._memory_redactions(long_term_context)
 
     def _build_mention_prompt(self, ev: ChatEvent) -> str:
+        return self._build_mention_prompt_with_redactions(ev)[0]
+
+    def _build_mention_prompt_with_redactions(
+        self, ev: ChatEvent
+    ) -> tuple[str, tuple[str, ...]]:
         max_chars = max(200, self.cfg.proactive.max_prompt_chars)
         content = self._strip_bot_mentions(ev.text)
         if len(content) > max_chars:
@@ -707,7 +721,8 @@ class ProactiveSpeaker:
             else ""
         )
         profile_section = self._profile_section(ev.chat_id)
-        long_term_section = self._long_term_section_for_mention(ev, content)
+        long_term_context = self._long_term_context_for_mention(ev, content)
+        long_term_section = self._format_long_term_section(long_term_context)
         reply_context = self._format_reply_context(ev.reply)
         quoted_self = self._is_self_reply(ev.reply)
         reply_section = (
@@ -723,7 +738,7 @@ class ProactiveSpeaker:
             if quoted_self
             else ""
         )
-        return f"""你是在 QQ 群里的轻量助手。下面是一条无命令 @bot 消息。
+        prompt = f"""你是在 QQ 群里的轻量助手。下面是一条无命令 @bot 消息。
 
 {profile_section}
 {long_term_section}
@@ -761,8 +776,9 @@ class ProactiveSpeaker:
 {reply_section}
 {ambient_section}
 """
+        return prompt, self._memory_redactions(long_term_context)
 
-    def _long_term_section_for_batch(
+    def _long_term_context_for_batch(
         self,
         batch: list[_QueuedMessage],
         query: str,
@@ -781,9 +797,9 @@ class ProactiveSpeaker:
             None,
             query,
         ).strip()
-        return f"\n长期记忆背景：\n{context}\n" if context else ""
+        return context
 
-    def _long_term_section_for_mention(self, ev: ChatEvent, query: str) -> str:
+    def _long_term_context_for_mention(self, ev: ChatEvent, query: str) -> str:
         if self.long_term_context is None:
             return ""
         mentions = tuple(
@@ -807,7 +823,23 @@ class ProactiveSpeaker:
             quoted_sender,
             query,
         ).strip()
+        return context
+
+    @staticmethod
+    def _format_long_term_section(context: str) -> str:
         return f"\n长期记忆背景：\n{context}\n" if context else ""
+
+    @staticmethod
+    def _memory_redactions(context: str) -> tuple[str, ...]:
+        values = [context] if context else []
+        for line in context.splitlines():
+            item = re.fullmatch(
+                r"- \[category=[^\]\r\n]+\]\[subject=(?:group|user):[^\]\r\n]+\] (.+)",
+                line,
+            )
+            if item and item.group(1):
+                values.append(item.group(1))
+        return tuple(dict.fromkeys(value for value in values if value))
 
     def _profile_section(self, chat_id: str) -> str:
         profile = ""
