@@ -1,0 +1,872 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+
+import pytest
+
+from qq_agent_bridge.config import BridgeConfig
+from qq_agent_bridge.long_term_memory import LongTermMemoryStore
+from qq_agent_bridge.long_term_memory_models import (
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+)
+from qq_agent_bridge.memory_curation import (
+    MAX_MEMORY_CONTENT_CHARS,
+    MAX_PROPOSALS_PER_REVIEW,
+    MAX_SOURCE_TEXT_CHARS,
+    MemoryActor,
+    MemoryCollector,
+    MemoryValidator,
+    parse_curator_output,
+)
+from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource, ChatSegment
+
+
+GROUP = MemoryScope("group", "g")
+PRIVATE = MemoryScope("private", "123")
+
+
+@pytest.fixture
+def cfg() -> BridgeConfig:
+    config = BridgeConfig()
+    config.bot.self_id = "999"
+    return config
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> LongTermMemoryStore:
+    result = LongTermMemoryStore(tmp_path / "memory.sqlite3")
+    result.initialize()
+    yield result
+    result.close()
+
+
+def make_event(
+    text: str,
+    *,
+    sender: str = "123",
+    group: str | None = None,
+    mentioned_bot: bool = False,
+    segments: tuple[ChatSegment, ...] = (),
+    resources: tuple[ChatResource, ...] = (),
+    reply: ChatReply | None = None,
+    timestamp: int = 100,
+) -> ChatEvent:
+    return ChatEvent(
+        id=f"m-{sender}-{timestamp}",
+        platform="qq",
+        chat_id=group or sender,
+        sender_id=sender,
+        is_group=group is not None,
+        mentioned_bot=mentioned_bot or group is None,
+        text=text,
+        timestamp=timestamp,
+        segments=segments,
+        resources=resources,
+        reply=reply,
+        raw_message=text,
+    )
+
+
+def source(
+    *,
+    scope: MemoryScope = GROUP,
+    sender: str = "123",
+    text: str = "我喜欢简洁的回答",
+    mentioned_ids: tuple[str, ...] = (),
+    quoted_sender_id: str | None = None,
+    direct: bool = False,
+    explicit: bool = False,
+) -> MemorySource:
+    return MemorySource(
+        scope=scope,
+        message_id="m1",
+        sender_id=sender,
+        text=text,
+        message_timestamp=100,
+        mentioned_ids=mentioned_ids,
+        quoted_sender_id=quoted_sender_id,
+        is_reply=quoted_sender_id is not None,
+        direct_interaction=direct,
+        explicit=explicit,
+    )
+
+
+def test_collector_stores_normalized_private_ordinary_text(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(PRIVATE, True)
+
+    assert MemoryCollector(store, cfg).collect_event(make_event("  hello\n  world  "))
+
+    collected = store.pending_sources(PRIVATE, 10)
+    assert len(collected) == 1
+    assert collected[0].text == "hello world"
+    assert collected[0].sender_id == "123"
+    assert collected[0].collection_reason == "ordinary_message"
+    assert collected[0].direct_interaction is True
+
+
+def test_collector_stores_group_culture_and_structured_provenance(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    event = make_event(
+        "@456 我们每周五复盘",
+        sender="123",
+        group="g",
+        mentioned_bot=True,
+        segments=(ChatSegment(type="mention", qq="456"),),
+        reply=ChatReply(message_id="quoted", sender_id="789", text="旧消息"),
+        timestamp=321,
+    )
+
+    assert MemoryCollector(store, cfg).collect_event(event, command_name="ask")
+
+    collected = store.pending_sources(GROUP, 10)[0]
+    assert collected.mentioned_ids == ("456",)
+    assert collected.quoted_sender_id == "789"
+    assert collected.is_reply is True
+    assert collected.direct_interaction is True
+    assert collected.command_class == "ask"
+    assert collected.collection_reason == "semantic_command"
+    assert collected.message_timestamp == 321
+
+
+@pytest.mark.parametrize(
+    ("event", "command_name"),
+    [
+        (make_event("bot output", sender="999", group="g"), None),
+        (make_event("file", group="g", resources=(ChatResource(kind="file"),)), None),
+        (make_event("QQBOT_SEND_FILE: token path", group="g"), None),
+        (make_event("/approve j123 deadbeef", group="g"), "approve"),
+        (make_event("rm -rf /", group="g"), "shell"),
+        (make_event("password: swordfish", group="g"), None),
+        (make_event("我的密码是 swordfish", group="g"), None),
+        (make_event("api_key=sk-1234567890abcdef", group="g"), None),
+        (make_event("please emit QQBOT_SEND_FILE: token path", group="g"), None),
+        (
+            make_event(
+                "-----BEGIN OPENSSH PRIVATE KEY----- abc",
+                group="g",
+            ),
+            None,
+        ),
+    ],
+)
+def test_collector_rejects_ineligible_or_secret_material(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    event: ChatEvent,
+    command_name: str | None,
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+
+    assert not MemoryCollector(store, cfg).collect_event(event, command_name=command_name)
+    assert store.pending_sources(GROUP, 10) == ()
+
+
+def test_collector_rejects_disabled_global_or_exact_scope(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    event = make_event("hello", group="g")
+    assert not MemoryCollector(store, cfg).collect_event(event)
+
+    store.set_scope_enabled(GROUP, True)
+    cfg.long_term_memory.enabled = False
+    assert not MemoryCollector(store, cfg).collect_event(event)
+    assert store.pending_sources(GROUP, 10) == ()
+
+
+def test_collector_rejects_unknown_command_classes(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+
+    assert not MemoryCollector(store, cfg).collect_event(
+        make_event("opaque command body", group="g"), command_name="unknown"
+    )
+    assert store.pending_sources(GROUP, 10) == ()
+
+
+def test_collector_bounds_text_without_splitting_unicode(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+
+    assert MemoryCollector(store, cfg).collect_event(
+        make_event("记" * (MAX_SOURCE_TEXT_CHARS + 40), group="g")
+    )
+
+    assert store.pending_sources(GROUP, 10)[0].text == "记" * MAX_SOURCE_TEXT_CHARS
+
+
+def test_collector_marks_explicit_self_statement(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+
+    assert MemoryCollector(store, cfg).collect_event(
+        make_event("记住我喜欢黑咖啡", group="g"),
+        command_name="memory",
+        explicit=True,
+    )
+
+    collected = store.pending_sources(GROUP, 10)[0]
+    assert collected.explicit is True
+    assert collected.collection_reason == "explicit_memory_request"
+
+
+def test_parse_curator_output_accepts_only_exact_json_schema() -> None:
+    parsed = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "subject_kind": "user",
+                        "subject_id": "123",
+                        "category": "preference",
+                        "content": "喜欢黑咖啡",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    }
+                ]
+            }
+        )
+    )
+
+    assert parsed == (
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="preference",
+            content="喜欢黑咖啡",
+            confidence=0.91,
+            status="active",
+            source_kind="self_statement",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not json",
+        "[]",
+        '{"operations": [], "comment": "no"}',
+        '{"operations": [{"operation": "add", "scope_id": "other"}]}',
+        '{"operations": [{"operation": "execute"}]}',
+        '{"operations": [{"operation": "add", "confidence": true}]}',
+        '{"operations": [{"operation": "add", "related_item_ids": "x"}]}',
+    ],
+)
+def test_parse_curator_output_rejects_malformed_unknown_or_wrong_types(
+    payload: str,
+) -> None:
+    with pytest.raises(ValueError):
+        parse_curator_output(payload)
+
+
+def test_parse_curator_output_rejects_excessive_operation_count() -> None:
+    payload = {
+        "operations": [
+            {"operation": "reinforce", "item_id": str(index)}
+            for index in range(MAX_PROPOSALS_PER_REVIEW + 1)
+        ]
+    }
+
+    with pytest.raises(ValueError, match="too many"):
+        parse_curator_output(json.dumps(payload))
+
+
+def test_validator_accepts_sender_self_statement_and_group_culture(
+    cfg: BridgeConfig,
+) -> None:
+    proposals = (
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="喜欢简洁的回答",
+            confidence=0.9,
+            source_kind="self_statement",
+        ),
+        MemoryProposal.add(
+            subject_kind="group",
+            subject_id="g",
+            category="group_norm",
+            content="每周五复盘",
+            confidence=0.9,
+        ),
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source(),), proposals, actor=None)
+
+    assert result.accepted == proposals
+    assert result.rejected == ()
+
+
+def test_textual_mention_cannot_become_personal_memory(cfg: BridgeConfig) -> None:
+    proposals = (
+        MemoryProposal.add(subject_kind="user", subject_id="123", content="住在北京"),
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(sender="456", text="@123 他住在北京"),),
+        proposals,
+        actor=None,
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "third_party_personal_claim"
+
+
+def test_structured_mention_and_quote_do_not_grant_subject_provenance(
+    cfg: BridgeConfig,
+) -> None:
+    proposals = (
+        MemoryProposal.add(subject_kind="user", subject_id="123", content="喜欢跑步"),
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (
+            source(
+                sender="456",
+                mentioned_ids=("123",),
+                quoted_sender_id="123",
+            ),
+        ),
+        proposals,
+        actor=None,
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "third_party_personal_claim"
+
+
+def test_validator_rejects_cross_scope_sources(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="group",
+        subject_id="g",
+        category="group_norm",
+        content="保持简洁",
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP, (source(scope=MemoryScope("group", "other")),), (proposal,), actor=None
+    )
+
+    assert result.rejected[0].reason == "cross_scope_source"
+
+
+def test_low_confidence_valid_add_becomes_candidate(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="可能喜欢爵士乐",
+        confidence=0.51,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source(),), (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+
+
+@pytest.mark.parametrize(
+    ("proposal", "reason"),
+    [
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                category="unknown",
+                content="value",
+            ),
+            "invalid_category",
+        ),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="x" * (MAX_MEMORY_CONTENT_CHARS + 1),
+            ),
+            "content_too_long",
+        ),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+            ),
+            "secret_content",
+        ),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="住在上海市静安区",
+                sensitivity="sensitive",
+            ),
+            "sensitivity_consent_required",
+        ),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id="missing",
+                content="new",
+                status="rejected",
+            ),
+            "invalid_state_transition",
+        ),
+    ],
+)
+def test_validator_rejects_invalid_content_and_state(
+    cfg: BridgeConfig, proposal: MemoryProposal, reason: str
+) -> None:
+    result = MemoryValidator(cfg).validate(GROUP, (source(),), (proposal,), actor=None)
+    assert result.accepted == ()
+    assert result.rejected[0].reason == reason
+
+
+def test_sensitive_personal_fact_requires_explicit_request_by_subject(
+    cfg: BridgeConfig,
+) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        category="identity",
+        content="住在上海市静安区",
+        confidence=0.95,
+        sensitivity="sensitive",
+        source_kind="self_statement",
+        explicit_memory=True,
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP, (source(explicit=True),), (proposal,), actor=MemoryActor("123", "member")
+    )
+
+    assert result.accepted == (proposal,)
+
+
+@pytest.mark.parametrize(
+    ("proposal", "reason"),
+    [
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                category="identity",
+                content="名字是小明",
+                explicit_memory=True,
+            ),
+            "explicit_consent_required",
+        ),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                category="identity",
+                content="名字是小明",
+                decay_exempt=True,
+            ),
+            "decay_exempt_not_allowed",
+        ),
+    ],
+)
+def test_explicit_and_decay_exempt_flags_require_structured_explicit_evidence(
+    cfg: BridgeConfig, proposal: MemoryProposal, reason: str
+) -> None:
+    result = MemoryValidator(cfg).validate(GROUP, (source(),), (proposal,), actor=None)
+
+    assert result.rejected[0].reason == reason
+
+
+def test_group_owner_can_confirm_only_non_sensitive_third_party_candidate(
+    cfg: BridgeConfig,
+) -> None:
+    normal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="负责每周发布纪要",
+        confidence=0.9,
+        source_kind="owner_confirmed",
+    )
+    sensitive = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        category="identity",
+        content="住在上海市静安区",
+        confidence=0.9,
+        sensitivity="sensitive",
+        source_kind="owner_confirmed",
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(sender="owner"),),
+        (normal, sensitive),
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == (normal,)
+    assert result.rejected[0].reason == "sensitivity_consent_required"
+
+
+def test_group_member_cannot_mutate_another_subject(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user", subject_id="456", content="喜欢茶"
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(sender="123", explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.rejected[0].reason == "actor_not_authorized"
+
+
+def test_private_actor_role_cannot_authorize_group_memory(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="喜欢茶",
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(sender="123", explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "private_user"),
+    )
+
+    assert result.rejected[0].reason == "actor_not_authorized"
+
+
+def test_private_scope_rejects_another_user_subject(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user", subject_id="456", content="喜欢茶"
+    )
+
+    result = MemoryValidator(cfg).validate(
+        PRIVATE, (source(scope=PRIVATE),), (proposal,), actor=None
+    )
+
+    assert result.rejected[0].reason == "invalid_subject"
+
+
+def test_validator_rejects_more_than_maximum_operations(cfg: BridgeConfig) -> None:
+    proposals = tuple(
+        MemoryProposal.add(
+            subject_kind="group",
+            subject_id="g",
+            category="recurring_topic",
+            content=f"topic {index}",
+        )
+        for index in range(MAX_PROPOSALS_PER_REVIEW + 1)
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source(),), proposals, actor=None)
+
+    assert result.accepted == ()
+    assert len(result.rejected) == len(proposals)
+    assert {rejection.reason for rejection in result.rejected} == {"too_many_operations"}
+
+
+def test_exact_duplicate_add_reinforces_existing_item(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    first_id = store.collect(source(text="first"))
+    second_id = store.collect(
+        MemorySource(
+            scope=GROUP,
+            message_id="m2",
+            sender_id="123",
+            text="again",
+            message_timestamp=101,
+        )
+    )
+    assert first_id is not None and second_id is not None
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="喜欢简洁的回答",
+        confidence=0.8,
+        source_kind="self_statement",
+    )
+    accepted = MemoryValidator(cfg).validate(
+        GROUP, (source(),), (proposal,), actor=None
+    ).accepted
+    original = store.commit_review(GROUP, (first_id,), accepted)[0]
+
+    reinforced = store.commit_review(GROUP, (second_id,), accepted)[0]
+
+    assert reinforced.id == original.id
+    assert reinforced.source_count == 2
+    assert len(store.list_items(GROUP)) == 1
+
+
+def test_validator_converts_known_duplicate_to_reinforcement(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    source_id = store.collect(source(text="first"))
+    assert source_id is not None
+    original = store.commit_review(
+        GROUP,
+        (source_id,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="喜欢简洁的回答",
+                confidence=0.8,
+                source_kind="self_statement",
+            ),
+        ),
+    )[0]
+    duplicate = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content="喜欢简洁的回答",
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(),), (duplicate,), actor=None
+    )
+
+    assert result.accepted == (
+        MemoryProposal.reinforce(
+            original.id, confidence=0.9, source_kind="self_statement"
+        ),
+    )
+
+
+def test_merge_rejects_related_item_from_another_scope(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    other_scope = MemoryScope("group", "other")
+    for scope_value, message_id in ((GROUP, "group-source"), (other_scope, "other-source")):
+        store.set_scope_enabled(scope_value, True)
+        source_id = store.collect(
+            MemorySource(
+                scope=scope_value,
+                message_id=message_id,
+                sender_id="123",
+                text="evidence",
+                message_timestamp=100,
+            )
+        )
+        assert source_id is not None
+        store.commit_review(
+            scope_value,
+            (source_id,),
+            (
+                MemoryProposal.add(
+                    subject_kind="user",
+                    subject_id="123",
+                    content=f"memory in {scope_value.id}",
+                    source_kind="self_statement",
+                ),
+            ),
+        )
+    target = store.list_items(GROUP)[0]
+    other = store.list_items(other_scope)[0]
+    proposal = MemoryProposal(
+        operation="merge",
+        item_id=target.id,
+        related_item_ids=(other.id,),
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(),), (proposal,), actor=None
+    )
+
+    assert result.rejected[0].reason == "invalid_related_target"
+
+
+def test_contradiction_marks_old_item_and_creates_a_revision_replacement(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    first_id = store.collect(source(text="old"))
+    second_id = store.collect(
+        MemorySource(
+            scope=GROUP,
+            message_id="m2",
+            sender_id="123",
+            text="new",
+            message_timestamp=101,
+        )
+    )
+    assert first_id is not None and second_id is not None
+    original = store.commit_review(
+        GROUP,
+        (first_id,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="喜欢详细回答",
+                confidence=0.8,
+                source_kind="self_statement",
+            ),
+        ),
+    )[0]
+    contradiction = MemoryProposal(
+        operation="contradict",
+        item_id=original.id,
+        subject_kind="user",
+        subject_id="123",
+        category="preference",
+        content="喜欢简洁的回答",
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+    accepted = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(text="我现在喜欢简洁的回答"),), (contradiction,), actor=None
+    ).accepted
+
+    committed = store.commit_review(GROUP, (second_id,), accepted)
+
+    old = store.get_item(GROUP, original.id)
+    assert old is not None and old.status == "contradicted"
+    assert len(committed) == 2
+    assert {item.content for item in store.list_items(GROUP)} == {
+        "喜欢详细回答",
+        "喜欢简洁的回答",
+    }
+
+
+def test_low_confidence_contradiction_becomes_candidate_without_overwriting(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    first_id = store.collect(source(text="old"))
+    second_id = store.collect(
+        MemorySource(
+            scope=GROUP,
+            message_id="m2",
+            sender_id="123",
+            text="uncertain",
+            message_timestamp=101,
+        )
+    )
+    assert first_id is not None and second_id is not None
+    original = store.commit_review(
+        GROUP,
+        (first_id,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="喜欢详细回答",
+                confidence=0.9,
+                source_kind="self_statement",
+            ),
+        ),
+    )[0]
+    proposal = MemoryProposal(
+        operation="contradict",
+        item_id=original.id,
+        content="可能喜欢简洁回答",
+        confidence=0.5,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(text="我可能更喜欢简洁回答"),), (proposal,), actor=None
+    )
+
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+    store.commit_review(GROUP, (second_id,), result.accepted)
+    unchanged = store.get_item(GROUP, original.id)
+    assert unchanged is not None and unchanged.status == "active"
+
+
+def test_low_confidence_revision_creates_candidate_without_mutating_active_item(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    first_id = store.collect(source(text="old"))
+    second_id = store.collect(
+        MemorySource(
+            scope=GROUP,
+            message_id="m2",
+            sender_id="123",
+            text="uncertain",
+            message_timestamp=101,
+        )
+    )
+    assert first_id is not None and second_id is not None
+    original = store.commit_review(
+        GROUP,
+        (first_id,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="123",
+                content="喜欢详细回答",
+                confidence=0.9,
+                source_kind="self_statement",
+            ),
+        ),
+    )[0]
+    proposal = MemoryProposal(
+        operation="revise",
+        item_id=original.id,
+        content="可能喜欢简洁回答",
+        confidence=0.5,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(text="我可能更喜欢简洁回答"),), (proposal,), actor=None
+    )
+
+    assert result.accepted[0].operation == "mark_candidate"
+    store.commit_review(GROUP, (second_id,), result.accepted)
+    unchanged = store.get_item(GROUP, original.id)
+    assert unchanged is not None
+    assert unchanged.status == "active"
+    assert unchanged.content == "喜欢详细回答"
+
+
+@dataclass(frozen=True)
+class MappingLikeActor:
+    id: str
+    role: str
+
+
+def test_validator_accepts_actor_objects_with_id_and_role(cfg: BridgeConfig) -> None:
+    proposal = MemoryProposal.add(
+        subject_kind="user", subject_id="123", content="喜欢茶", source_kind="self_statement"
+    )
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(explicit=True),),
+        (proposal,),
+        actor=MappingLikeActor("123", "member"),
+    )
+    assert result.accepted == (proposal,)
