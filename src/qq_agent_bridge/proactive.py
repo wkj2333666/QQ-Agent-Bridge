@@ -17,7 +17,7 @@ from .config import BridgeConfig
 from .long_term_memory_models import MemoryScope
 from .output_guard import guard_internal_output
 from .redactor import redact, strip_ansi
-from .types import ChatEvent, ChatReply
+from .types import ChatEvent, ChatReply, trusted_reply_sender_id
 
 logger = logging.getLogger(__name__)
 
@@ -543,7 +543,7 @@ class ProactiveSpeaker:
                 and str(segment.qq) != str(self.cfg.bot.self_id or "")
             )
         )
-        quoted_sender = ev.reply.sender_id if ev.reply is not None else None
+        quoted_sender = trusted_reply_sender_id(ev.reply)
         context = self.long_term_context(
             MemoryScope("group", ev.chat_id),
             ev.sender_id,
