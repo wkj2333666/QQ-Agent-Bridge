@@ -440,6 +440,23 @@ def test_intent_specific_schema_rejects_malformed_output_without_mutation(
         "APP_RECOVERY_CODES are opaquevalue123456",
         "APP_BACKUP_CODE equals opaquevalue123456",
         "MY_APP_REFRESH_TOKEN is opaquevalue123456",
+        "private key: opaquevalue123456",
+        "private-key equals opaquevalue123456",
+        "私钥：opaquevalue123456",
+        "recovery phrase is alpha beta gamma",
+        "recovery-key: opaquevalue123456",
+        "backup phrase are alpha beta gamma",
+        "backup code equals opaquevalue123456",
+        "seed phrase is alpha beta gamma",
+        "seed-key: opaquevalue123456",
+        "seed code equals opaquevalue123456",
+        "mnemonic: alpha beta gamma",
+        "mnemonic phrase equals alpha beta gamma",
+        "_SEED_PHRASE=alpha beta gamma",
+        "__MNEMONIC_PHRASE is alpha beta gamma",
+        "助记词是 甲乙丙丁",
+        "恢复短语：甲乙丙丁",
+        "种子短语等于 甲乙丙丁",
     ],
 )
 def test_remember_and_correct_reject_extended_credential_labels(
@@ -505,6 +522,10 @@ def test_forget_scrubs_credential_fixture_from_items_fts_and_revisions(tmp_path:
         "110101-19900101-1234",
         "6222 0202 0000 0000",
         "6222-0202-0000-0000",
+        "+86 (138) 0013-8000",
+        "138.0013.8000",
+        "(138) 0013 8000",
+        "+86-(138)-0013.8000",
     ],
 )
 def test_remember_and_correct_conservatively_escalate_sensitive_content(
@@ -546,8 +567,20 @@ def test_correcting_sensitive_item_to_benign_text_does_not_downgrade(tmp_path: P
 
 @pytest.mark.parametrize(
     "content",
-    ["+86 138 0013 8000", "110101-19900101-1234", "6222-0202-0000-0000"],
-    ids=["formatted-mobile", "formatted-id", "formatted-card"],
+    [
+        "+86 138 0013 8000",
+        "+86 (138) 0013-8000",
+        "138.0013.8000",
+        "110101-19900101-1234",
+        "6222-0202-0000-0000",
+    ],
+    ids=[
+        "formatted-mobile",
+        "parenthesized-mobile",
+        "dotted-mobile",
+        "formatted-id",
+        "formatted-card",
+    ],
 )
 def test_formatted_identifier_remains_sensitive_after_benign_correction(
     tmp_path: Path, content: str
