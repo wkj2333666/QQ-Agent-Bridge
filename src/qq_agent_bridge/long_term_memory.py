@@ -830,6 +830,10 @@ class LongTermMemoryStore:
         proposal = self._isolate_ambiguous_content(conn, scope, proposal)
         if proposal.operation in {"add", "mark_candidate"}:
             return [self._insert_item(conn, scope, proposal, now)]
+        if proposal.operation == "forget" and (
+            proposal.actor_class != "user" or proposal.evidence_required
+        ):
+            raise ValueError("curator forget cannot hard-delete memory")
         if not proposal.item_id:
             raise ValueError(f"{proposal.operation} operation requires item_id")
         row = self._get_item_row(conn, scope, proposal.item_id)

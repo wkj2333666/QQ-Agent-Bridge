@@ -171,6 +171,8 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert "QQ_UNTRUSTED_DATA_JSON" in call.prompt
         assert '"operations"' in call.prompt
         assert "Return JSON only" in call.prompt
+        assert "|forget" not in call.prompt
+        assert "Never propose hard deletion" in call.prompt
 
     asyncio.run(go())
 

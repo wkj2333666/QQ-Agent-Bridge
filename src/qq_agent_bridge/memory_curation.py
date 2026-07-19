@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import re
-import time
 import unicodedata
 from typing import Mapping, Sequence
 
@@ -84,11 +83,27 @@ _ENGLISH_SECRET_LABEL = (
     rf"{_ENGLISH_CREDENTIAL_LABEL}|"
     r"password|passwd|secret|cookie)"
 )
-_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|(?:就是|是|为|等于)|[=:：])"
+_SECRET_ASSIGNMENT = (
+    r"(?:(?:is|are|equals|changed?\s+to|set\s+to)\b|"
+    r"(?:es|son|igual\s+a|cambi[oó]\s+a)\b|"
+    r"(?:est|sont)\b|(?:ist|sind)\b|(?:é|são)\b|"
+    r"(?:это|равен)\b|"
+    r"(?:就是|是|为|等于|改成(?:了)?|改为|变成|设为|更新为)|"
+    r"(?:は|です|に変更(?:した)?|은|는|입니다)|[=:：])"
+)
 _CHINESE_SECRET_LABEL = (
     r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
     r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码)|"
     r"(?:登录|认证|身份)?(?:凭据|凭证)|认证信息)"
+)
+_MULTILINGUAL_SECRET_LABEL = (
+    r"(?:contraseña|clave(?:\s+(?:de\s+acceso|secreta))?|credenciales|"
+    r"mot\s+de\s+passe|clé\s+api|jeton\s+d['’]accès|identifiants|"
+    r"passwort|api[-\s_]*schlüssel|zugangstoken|anmeldedaten|"
+    r"senha|chave\s+api|token\s+de\s+acesso|credenciais|"
+    r"пароль|ключ\s+api|токен\s+доступа|учетные\s+данные|"
+    r"パスワード|暗証番号|秘密鍵|api\s*キー|アクセストークン|認証情報|"
+    r"비밀번호|암호|api\s*키|액세스\s*토큰|인증\s*정보)"
 )
 _ENV_SECRET_SUFFIX = (
     r"(?:(?:aws_)?access_key_id|"
@@ -115,6 +130,10 @@ _SECRET_PATTERNS = (
     ),
     re.compile(
         rf"{_CHINESE_SECRET_LABEL}\s*{_SECRET_ASSIGNMENT}\s*\S",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_MULTILINGUAL_SECRET_LABEL}\s*{_SECRET_ASSIGNMENT}\s*\S",
         re.IGNORECASE,
     ),
     re.compile(
@@ -188,8 +207,9 @@ _SENSITIVE_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?:我\s*家\s*(?:住|在)|收件地址|邮寄地址|通信地址)"
-        r"\s*[：:=,，]?\s*[^\n]{0,80}"
+        r"(?:我\s*家\s*(?:住|在)|家庭\s*(?:住址|地址)|"
+        r"收件\s*地址|邮寄\s*地址|通信\s*地址)"
+        r"\s*[：:=＝,，]?\s*[^\n]{0,80}"
         r"(?:省|市)[^\n]{0,40}(?:区|县)[^\n]{0,40}"
         r"(?:路|街|大道|大街|巷)[^\n]{0,20}\d+\s*号",
         re.IGNORECASE,
@@ -203,8 +223,9 @@ _SENSITIVE_PATTERNS = (
     # Legal identity and financial information.
     re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
     re.compile(
-        r"(?:我\s*叫|我\s*的?\s*名字\s*(?:是|叫|为)|姓名\s*(?:是|叫|为))"
-        r"[\s:：,，;；-]*(?:[\u3400-\u9fff\u00b7]\s*){2,12}",
+        r"(?:我\s*叫|我\s*的?\s*名字\s*(?:是|叫|为)|"
+        r"(?:我\s*的?\s*)?姓\s*名\s*(?:(?:是|叫|为)|[：:=＝]))"
+        r"[\s:：=＝,，;；-]*(?:[\u3400-\u9fff\u00b7]\s*){2,12}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -552,6 +573,11 @@ class MemoryValidator:
         if proposal.sensitivity == "secret":
             return None, "secret_content"
 
+        if proposal.operation == "forget" and (
+            actor is None or proposal.evidence_required
+        ):
+            return None, "actor_not_authorized"
+
         cited_sources, reason = self._cited_sources(sources, proposal)
         if reason is not None:
             return None, reason
@@ -594,20 +620,6 @@ class MemoryValidator:
                 for source in matching_sources
             ):
                 return None, "source_evidence_disallowed"
-        if (
-            proposal.operation == "forget"
-            and target is not None
-            and (actor is None or proposal.evidence_required)
-        ):
-            if not self._background_forget_authorized(
-                scope,
-                proposal,
-                target,
-                staged_items,
-                evidence_sources,
-            ):
-                return None, "actor_not_authorized"
-            proposal = replace(proposal, expires_at=target.expires_at)
         reason = self._validate_subject(scope, evidence_sources, proposal, actor)
         if reason is not None:
             return None, reason
@@ -882,33 +894,6 @@ class MemoryValidator:
                 or related.subject_id != target.subject_id
                 or related.category != target.category
                 or related.status in {"contradicted", "rejected"}
-            ):
-                return False
-        return True
-
-    def _background_forget_authorized(
-        self,
-        scope: MemoryScope,
-        proposal: MemoryProposal,
-        target: MemoryItem,
-        staged_items: Mapping[str, MemoryItem | None],
-        sources: tuple[MemorySource, ...],
-    ) -> bool:
-        if target.expires_at is not None and target.expires_at <= int(time.time()):
-            return True
-        if self.store is None or not proposal.related_item_ids:
-            return False
-        for related_id in proposal.related_item_ids:
-            related = (
-                staged_items[related_id]
-                if related_id in staged_items
-                else self.store.get_item(scope, related_id)
-            )
-            if related is None or not any(
-                _content_affirmatively_supported_by_source(
-                    related.content, source.text
-                )
-                for source in sources
             ):
                 return False
         return True
@@ -1265,11 +1250,30 @@ def _evidence_occurrence_disallowed(source: str, start: int, end: int) -> bool:
         prefix,
         re.IGNORECASE,
     ) or re.search(
+        r"\b(?:it\s+)?(?:is|are|was|were)n['’]t\s+"
+        r"(?:true|correct)(?:\s+that)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    ) or re.search(
         r"\b(?:i\s+)?(?:deny|denied|denies)(?:\s+that)?\s*$",
         prefix,
         re.IGNORECASE,
     ) or re.match(
         r"\s+(?:is\s+)?(?:not\s+true|false|untrue|incorrect)\b", suffix
+    ):
+        return True
+    if re.search(
+        r"(?:^|[.!?;:]\s*)"
+        r"(?:for\s+(?:example|instance)|e\.\s*g\.|hypothetically|"
+        r"suppose|supposing|assuming|imagine|if)\b[^.!?;]{0,80}$",
+        prefix,
+        re.IGNORECASE,
+    ) or re.match(
+        r"\s*(?:,\s*)?(?:if|unless)\b|"
+        r"\s+(?:is|was|would\s+be)\s+(?:only\s+)?"
+        r"(?:an?\s+)?(?:example|hypothetical)\b",
+        suffix,
+        re.IGNORECASE,
     ):
         return True
     if re.search(
@@ -1279,6 +1283,8 @@ def _evidence_occurrence_disallowed(source: str, start: int, end: int) -> bool:
     ):
         return True
     compact_window = re.sub(r"\s+", "", window)
+    compact_prefix = re.sub(r"\s+", "", prefix)
+    compact_suffix = re.sub(r"\s+", "", suffix)
     if re.search(r"(?:不要|别|勿|无需|禁止|不许)", compact_window) and re.search(
         r"(?:记住|记为|记录|存储|保存|保留)", compact_window
     ):
@@ -1287,6 +1293,14 @@ def _evidence_occurrence_disallowed(source: str, start: int, end: int) -> bool:
         return True
     if re.search(r"(?:并非|不是|不是真的|不属实|否认)\s*$", prefix) or re.match(
         r"\s*(?:并非事实|不是真的|不属实)", suffix
+    ):
+        return True
+    if re.search(
+        r"(?:例如|比如|举例(?:来说)?|假设|假如|如果|倘若)[：:,，]?$",
+        compact_prefix,
+    ) or re.match(
+        r"[，,]?(?:如果|除非)|(?:只是|仅是)?(?:一个)?(?:例子|示例|假设)",
+        compact_suffix,
     ):
         return True
     if re.search(r"(?:说|重复|输出|打印|写下)\s*$", prefix):
@@ -1333,7 +1347,13 @@ def _normalize_text(text: object) -> str:
 
 
 def _contains_secret(text: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", _normalize_text(text)).casefold()
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    normalized = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+    normalized = _normalize_text(normalized).casefold()
     return any(pattern.search(normalized) is not None for pattern in _SECRET_PATTERNS)
 
 
