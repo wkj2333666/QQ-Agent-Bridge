@@ -96,6 +96,22 @@ whisper:
   cache_ttl_seconds: 86400
   cache_max_items: 256
 
+# Built-in cleanup for Agent state, traces, and cached QQ resources.
+storage_maintenance:
+  enabled: true
+  interval_seconds: 21600
+  min_free_bytes: 5368709120
+  sandbox:
+    max_bytes: 2147483648
+    retention_seconds: 1209600
+  traces:
+    max_bytes: 536870912
+    retention_seconds: 1209600
+  resources:
+    max_bytes: 5368709120
+    retention_seconds: 604800
+    transient_retention_seconds: 86400
+
 progress:
   enabled: true
   first_heartbeat_seconds: 30

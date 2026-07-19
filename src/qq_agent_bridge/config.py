@@ -116,6 +116,37 @@ class WhisperConfig:
 
 
 @dataclass
+class StorageAreaMaintenanceConfig:
+    max_bytes: int
+    retention_seconds: int
+
+
+@dataclass
+class StorageResourceMaintenanceConfig(StorageAreaMaintenanceConfig):
+    transient_retention_seconds: int = 86_400
+
+
+@dataclass
+class StorageMaintenanceConfig:
+    enabled: bool = True
+    interval_seconds: int = 21_600
+    min_free_bytes: int = 5 * 1024**3
+    sandbox: StorageAreaMaintenanceConfig = field(
+        default_factory=lambda: StorageAreaMaintenanceConfig(2 * 1024**3, 14 * 86_400)
+    )
+    traces: StorageAreaMaintenanceConfig = field(
+        default_factory=lambda: StorageAreaMaintenanceConfig(512 * 1024**2, 14 * 86_400)
+    )
+    resources: StorageResourceMaintenanceConfig = field(
+        default_factory=lambda: StorageResourceMaintenanceConfig(
+            5 * 1024**3,
+            7 * 86_400,
+            86_400,
+        )
+    )
+
+
+@dataclass
 class ProgressConfig:
     enabled: bool = True
     first_heartbeat_seconds: int = 30
@@ -203,6 +234,9 @@ class BridgeConfig:
     ambient_memory: AmbientMemoryConfig = field(default_factory=AmbientMemoryConfig)
     resources: ResourcesConfig = field(default_factory=ResourcesConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
+    storage_maintenance: StorageMaintenanceConfig = field(
+        default_factory=StorageMaintenanceConfig
+    )
     progress: ProgressConfig = field(default_factory=ProgressConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -256,6 +290,7 @@ class BridgeConfig:
         )
         whisper.cache_ttl_seconds = max(1, int(whisper.cache_ttl_seconds))
         whisper.cache_max_items = max(1, int(whisper.cache_max_items))
+        storage_maintenance = _load_storage_maintenance(raw.get("storage_maintenance", {}))
         progress = ProgressConfig(**raw.get("progress", {}))
         proactive = ProactiveConfig(**raw.get("proactive", {}))
         scheduler = SchedulerConfig(**raw.get("scheduler", {}))
@@ -281,6 +316,7 @@ class BridgeConfig:
             ambient_memory=ambient_memory,
             resources=resources,
             whisper=whisper,
+            storage_maintenance=storage_maintenance,
             progress=progress,
             proactive=proactive,
             scheduler=scheduler,
@@ -332,6 +368,71 @@ class BridgeConfig:
 
     def effective_max_chars(self) -> int:
         return min(self.max_output_chars, self.agent.max_output_chars)
+
+
+def _load_storage_maintenance(raw: Any) -> StorageMaintenanceConfig:
+    defaults = StorageMaintenanceConfig()
+    values = raw if isinstance(raw, dict) else {}
+    enabled = values.get("enabled", defaults.enabled)
+    sandbox = _load_storage_area(values.get("sandbox"), defaults.sandbox)
+    traces = _load_storage_area(values.get("traces"), defaults.traces)
+    resources = _load_storage_resources(values.get("resources"), defaults.resources)
+    return StorageMaintenanceConfig(
+        enabled=enabled if isinstance(enabled, bool) else defaults.enabled,
+        interval_seconds=_bounded_int(
+            values.get("interval_seconds"), defaults.interval_seconds, 60, 7 * 86_400
+        ),
+        min_free_bytes=_bounded_int(
+            values.get("min_free_bytes"), defaults.min_free_bytes, 0, 1024**4
+        ),
+        sandbox=sandbox,
+        traces=traces,
+        resources=resources,
+    )
+
+
+def _load_storage_area(
+    raw: Any,
+    defaults: StorageAreaMaintenanceConfig,
+) -> StorageAreaMaintenanceConfig:
+    values = raw if isinstance(raw, dict) else {}
+    return StorageAreaMaintenanceConfig(
+        max_bytes=_bounded_int(values.get("max_bytes"), defaults.max_bytes, 0, 1024**4),
+        retention_seconds=_bounded_int(
+            values.get("retention_seconds"),
+            defaults.retention_seconds,
+            0,
+            365 * 86_400,
+        ),
+    )
+
+
+def _load_storage_resources(
+    raw: Any,
+    defaults: StorageResourceMaintenanceConfig,
+) -> StorageResourceMaintenanceConfig:
+    area = _load_storage_area(raw, defaults)
+    values = raw if isinstance(raw, dict) else {}
+    return StorageResourceMaintenanceConfig(
+        max_bytes=area.max_bytes,
+        retention_seconds=area.retention_seconds,
+        transient_retention_seconds=_bounded_int(
+            values.get("transient_retention_seconds"),
+            defaults.transient_retention_seconds,
+            0,
+            365 * 86_400,
+        ),
+    )
+
+
+def _bounded_int(value: Any, default: int, lower: int, upper: int) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(upper, max(lower, int(number)))
 
 
 def _load_profiles(raw: Any) -> ProfileConfig:
