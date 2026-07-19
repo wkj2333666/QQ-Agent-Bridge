@@ -65,6 +65,19 @@ class MemoryScope:
         object.__setattr__(self, "id", normalized_id)
 
 
+def exact_memory_scope(
+    *,
+    is_group: bool,
+    chat_id: object,
+    sender_id: object,
+) -> MemoryScope:
+    """Derive the sole allowed scope from trusted normalized event fields."""
+    return MemoryScope(
+        "group" if is_group else "private",
+        str(chat_id) if is_group else str(sender_id),
+    )
+
+
 @dataclass(frozen=True)
 class MemorySource:
     scope: MemoryScope

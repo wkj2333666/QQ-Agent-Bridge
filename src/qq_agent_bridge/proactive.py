@@ -14,7 +14,7 @@ from typing import Any
 
 from .agent_runtime import run_agent
 from .config import BridgeConfig
-from .long_term_memory_models import MemoryScope
+from .long_term_memory_models import MemoryScope, exact_memory_scope
 from .output_guard import guard_internal_output
 from .redactor import redact, strip_ansi
 from .types import ChatEvent, ChatReply, trusted_reply_sender_id
@@ -523,7 +523,11 @@ class ProactiveSpeaker:
             return ""
         participants = tuple(dict.fromkeys(msg.sender_id for msg in batch if msg.sender_id))
         context = self.long_term_context(
-            MemoryScope("group", batch[-1].chat_id),
+            exact_memory_scope(
+                is_group=True,
+                chat_id=batch[-1].chat_id,
+                sender_id=batch[-1].sender_id,
+            ),
             batch[-1].sender_id,
             participants,
             None,
@@ -545,7 +549,11 @@ class ProactiveSpeaker:
         )
         quoted_sender = trusted_reply_sender_id(ev.reply)
         context = self.long_term_context(
-            MemoryScope("group", ev.chat_id),
+            exact_memory_scope(
+                is_group=ev.is_group,
+                chat_id=ev.chat_id,
+                sender_id=ev.sender_id,
+            ),
             ev.sender_id,
             mentions,
             quoted_sender,

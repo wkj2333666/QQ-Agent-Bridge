@@ -17,6 +17,7 @@ from .long_term_memory_models import (
     MemoryProposal,
     MemoryScope,
     MemorySource,
+    exact_memory_scope,
     memory_identity_key,
 )
 from .types import ChatEvent, trusted_reply_sender_id
@@ -40,6 +41,7 @@ CONTENT_OPERATIONS = frozenset({"add", "mark_candidate", "revise", "contradict"}
 TARGET_METADATA_FIELDS = ("subject_kind", "subject_id", "category", "sensitivity")
 
 _SEMANTIC_COMMANDS = frozenset({"ask", "plan", "task"})
+_SLASH_COMMAND_RE = re.compile(r"^\s*[/／]")
 _DANGEROUS_COMMAND_RE = re.compile(
     r"^\s*/(?:approve|code|mode|permission|profile|reload|reset|schedule|shell|stop)\b",
     re.IGNORECASE,
@@ -290,9 +292,10 @@ class MemoryCollector:
         command_name: str | None = None,
         explicit: bool = False,
     ) -> bool:
-        scope = MemoryScope(
-            "group" if ev.is_group else "private",
-            ev.chat_id if ev.is_group else ev.sender_id,
+        scope = exact_memory_scope(
+            is_group=ev.is_group,
+            chat_id=ev.chat_id,
+            sender_id=ev.sender_id,
         )
         command = str(command_name).strip().lower() if command_name else None
         if not self.memory_cfg.enabled or not self.store.is_scope_enabled(scope):
@@ -308,6 +311,8 @@ class MemoryCollector:
 
         text = _normalize_text(ev.text)
         if not text:
+            return False
+        if command is None and _SLASH_COMMAND_RE.match(text):
             return False
         if (
             _DANGEROUS_COMMAND_RE.search(text)

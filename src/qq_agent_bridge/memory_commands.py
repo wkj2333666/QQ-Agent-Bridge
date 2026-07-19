@@ -12,7 +12,13 @@ from typing import Any
 from .agent_runtime import run_agent
 from .config import BridgeConfig
 from .long_term_memory import LongTermMemoryStore
-from .long_term_memory_models import MemoryItem, MemoryProposal, MemoryScope, MemorySource
+from .long_term_memory_models import (
+    MemoryItem,
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+    exact_memory_scope,
+)
 from .memory_curation import MemoryActor, MemoryValidator
 from .storage_gate import StorageActivityGate, build_restricted_agent_adapter
 from .types import ChatEvent
@@ -799,8 +805,10 @@ class MemoryCommandService:
 
     @staticmethod
     def _scope(ev: ChatEvent) -> MemoryScope:
-        return MemoryScope("group", ev.chat_id) if ev.is_group else MemoryScope(
-            "private", ev.sender_id
+        return exact_memory_scope(
+            is_group=ev.is_group,
+            chat_id=ev.chat_id,
+            sender_id=ev.sender_id,
         )
 
     def _is_owner(self, ev: ChatEvent) -> bool:

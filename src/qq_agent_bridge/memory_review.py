@@ -229,6 +229,7 @@ class MemoryReviewCoordinator:
         self._active_review_task: asyncio.Task[Any] | None = None
         self._review_tasks: set[asyncio.Task[Any]] = set()
         self._commit_started = False
+        self._cancellation_epoch = 0
         self._running = False
         self._next_periodic = 0.0
         self._next_maintenance = 0.0
@@ -318,6 +319,7 @@ class MemoryReviewCoordinator:
         self._maintenance_wake.set()
 
     def cancel_background_for_interactive(self) -> None:
+        self._cancellation_epoch += 1
         task = self._background_task
         if task is not None and not task.done() and not self._commit_started:
             task.cancel()
@@ -421,6 +423,7 @@ class MemoryReviewCoordinator:
             async with self._review_lock:
                 active_task = asyncio.current_task()
                 self._active_review_task = active_task
+                review_epoch = self._cancellation_epoch
                 try:
                     if not self.cfg.enabled or not self.store.is_scope_enabled(scope):
                         return CuratorOutcome(error="disabled")
@@ -446,6 +449,14 @@ class MemoryReviewCoordinator:
                         outcome = await self.curator.review(
                             scope, sources, existing, actor=actor
                         )
+                        if review_epoch != self._cancellation_epoch:
+                            return CuratorOutcome(
+                                accepted=outcome.accepted,
+                                rejected=outcome.rejected,
+                                error="cancelled",
+                                proposed_count=outcome.proposed_count,
+                                source_count=source_count,
+                            )
                         if outcome.error is not None:
                             return self._record_failure(
                                 scope, sources, outcome, trigger=trigger, now=current

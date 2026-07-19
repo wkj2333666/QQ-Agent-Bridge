@@ -160,13 +160,50 @@ def test_self_knowledge_describes_opt_in_scoped_long_term_memory() -> None:
     assert "显式开启" in help_reply
     assert "长期记忆" in prompt and "不会跨群" in prompt
     assert memory_reply is not None
-    assert "/memory enable" in memory_reply
+    assert "/memory enable" not in memory_reply
+    assert "/memory status" in memory_reply
+    assert "只有 owner" in memory_reply
     assert "/reset" in memory_reply and "长期记忆" in memory_reply
 
     cfg.memory.enabled = False
     no_short_term = build_prompt_self_knowledge(cfg, make_ev())
     assert "短期记忆" in no_short_term and "未开启" in no_short_term
     assert "长期记忆" in no_short_term and "不会跨群" in no_short_term
+
+
+def test_long_term_memory_self_knowledge_is_actor_aware() -> None:
+    cfg = make_cfg()
+    cfg.commands["memory"] = "user"
+    cfg.long_term_memory.enabled = True
+
+    member = maybe_self_reply("长期记忆怎么用", cfg, make_ev(sender="reader"))
+    owner = maybe_self_reply("长期记忆怎么用", cfg, make_ev(sender="owner"))
+    private = maybe_self_reply(
+        "长期记忆怎么用",
+        cfg,
+        make_ev(is_group=False, sender="reader"),
+    )
+
+    assert member is not None
+    assert "/memory status" in member and "/memory list" in member
+    assert "/memory enable" not in member and "/memory review now" not in member
+    assert "只有 owner" in member
+    assert owner is not None
+    assert "/memory enable" in owner and "/memory review now" in owner
+    assert private is not None
+    assert "/memory enable" in private and "/memory review now" in private
+
+
+def test_long_term_memory_self_knowledge_hides_owner_only_command_from_member() -> None:
+    cfg = make_cfg()
+    cfg.commands["memory"] = "owner"
+    cfg.long_term_memory.enabled = True
+
+    member = maybe_self_reply("长期记忆怎么用", cfg, make_ev(sender="reader"))
+    owner = maybe_self_reply("长期记忆怎么用", cfg, make_ev(sender="owner"))
+
+    assert member is not None and "/memory" not in member
+    assert owner is not None and "/memory enable" in owner
 
 
 def test_help_reply_hides_owner_commands_from_non_owner() -> None:
