@@ -571,6 +571,16 @@ class LongTermMemoryStore:
             content = self._content(proposal.content)
             category = str(row["category"])
             self._require_category(category)
+            self._find_duplicate_or_raise_collision(
+                conn,
+                scope,
+                subject_kind=row["subject_kind"],
+                subject_id=row["subject_id"],
+                category=category,
+                content=content,
+                sensitivity=row["sensitivity"],
+                exclude_item_id=item_id,
+            )
             confidence = self._confidence(
                 proposal.confidence
                 if proposal.confidence is not None
@@ -700,44 +710,15 @@ class LongTermMemoryStore:
         )
         created_at = int(proposal.created_at if proposal.created_at is not None else now)
         sensitivity = proposal.sensitivity or "normal"
-        proposal_key = memory_identity_key(
+        duplicate = self._find_duplicate_or_raise_collision(
+            conn,
+            scope,
             subject_kind=proposal.subject_kind,
             subject_id=proposal.subject_id,
             category=category,
             content=content,
             sensitivity=sensitivity,
         )
-        duplicate = None
-        duplicate_rows = conn.execute(
-            """
-            SELECT * FROM memory_items
-            WHERE scope_kind = ? AND scope_id = ?
-              AND subject_kind = ? AND subject_id = ? AND category = ?
-              AND status IN ('active', 'candidate', 'dormant')
-            ORDER BY updated_at DESC, id
-            """,
-            (
-                scope.kind,
-                scope.id,
-                str(proposal.subject_kind),
-                str(proposal.subject_id),
-                category,
-            ),
-        ).fetchall()
-        for row in duplicate_rows:
-            row_key = memory_identity_key(
-                subject_kind=row["subject_kind"],
-                subject_id=row["subject_id"],
-                category=row["category"],
-                content=row["content"],
-                sensitivity=row["sensitivity"],
-            )
-            if row_key[:-1] != proposal_key[:-1]:
-                continue
-            if row_key[-1] != proposal_key[-1]:
-                raise ValueError("memory sensitivity collision")
-            if duplicate is None:
-                duplicate = row
         if duplicate is not None:
             item_id = str(duplicate["id"])
             duplicate_status = str(duplicate["status"])
@@ -823,6 +804,60 @@ class LongTermMemoryStore:
         )
         self._sync_fts(conn, item_id)
         return item_id
+
+    @staticmethod
+    def _find_duplicate_or_raise_collision(
+        conn: sqlite3.Connection,
+        scope: MemoryScope,
+        *,
+        subject_kind: object,
+        subject_id: object,
+        category: object,
+        content: object,
+        sensitivity: object,
+        exclude_item_id: str | None = None,
+    ) -> sqlite3.Row | None:
+        proposal_key = memory_identity_key(
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            category=category,
+            content=content,
+            sensitivity=sensitivity,
+        )
+        duplicate = None
+        duplicate_rows = conn.execute(
+            """
+            SELECT * FROM memory_items
+            WHERE scope_kind = ? AND scope_id = ?
+              AND subject_kind = ? AND subject_id = ? AND category = ?
+              AND status IN ('active', 'candidate', 'dormant')
+            ORDER BY updated_at DESC, id
+            """,
+            (
+                scope.kind,
+                scope.id,
+                str(subject_kind),
+                str(subject_id),
+                category,
+            ),
+        ).fetchall()
+        for row in duplicate_rows:
+            if exclude_item_id is not None and str(row["id"]) == exclude_item_id:
+                continue
+            row_key = memory_identity_key(
+                subject_kind=row["subject_kind"],
+                subject_id=row["subject_id"],
+                category=row["category"],
+                content=row["content"],
+                sensitivity=row["sensitivity"],
+            )
+            if row_key[:-1] != proposal_key[:-1]:
+                continue
+            if row_key[-1] != proposal_key[-1]:
+                raise ValueError("memory sensitivity collision")
+            if duplicate is None:
+                duplicate = row
+        return duplicate
 
     def _hard_delete_row(
         self,

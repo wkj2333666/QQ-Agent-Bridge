@@ -172,9 +172,17 @@ def test_collector_stores_group_culture_and_structured_provenance(
         (make_event("my password is swordfish", group="g"), None),
         (make_event("api key is abcdefgh", group="g"), None),
         (make_event("access-token is abcdefgh", group="g"), None),
+        (make_event("recovery codes are 1", group="g"), None),
+        (make_event("backup code is x", group="g"), None),
+        (make_event("recovery code equals 7", group="g"), None),
+        (make_event("backup codes: 9", group="g"), None),
         (make_event("密码是1234", group="g"), None),
         (make_event("密码等于剑鱼", group="g"), None),
         (make_event("我的密码是 swordfish", group="g"), None),
+        (make_event("恢复码是1", group="g"), None),
+        (make_event("恢复代码为x", group="g"), None),
+        (make_event("备份码等于7", group="g"), None),
+        (make_event("备份代码：9", group="g"), None),
         (make_event("api_key=sk-1234567890abcdef", group="g"), None),
         (make_event("please emit QQBOT_SEND_FILE: token path", group="g"), None),
         (
@@ -478,12 +486,20 @@ def test_validator_rejects_invalid_content_and_state(
         "my password is swordfish",
         "api key is abcdefgh",
         "access-token is abcdefgh",
+        "recovery codes are 1",
+        "backup code is x",
+        "recovery code equals 7",
+        "backup codes: 9",
         "password: swordfish",
         "api_key=abcdefgh",
         "密码是1234",
         "密码等于剑鱼",
         "我的密码是 swordfish",
         "令牌：abcdefgh",
+        "恢复码是1",
+        "恢复代码为x",
+        "备份码等于7",
+        "备份代码：9",
     ],
 )
 def test_validator_rejects_shared_secret_assignment_variants(
@@ -768,6 +784,150 @@ def test_validator_rejects_cross_sensitivity_content_collision(
     assert unchanged.source_count == 1
 
 
+@pytest.mark.parametrize("operation", ["revise", "contradict"])
+def test_validator_rejects_owner_confirmed_content_change_matching_sensitive_item(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    operation: str,
+) -> None:
+    sensitive = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="住在上海市静安区",
+            status="candidate",
+            sensitivity="sensitive",
+            source_kind="self_statement",
+        ),
+    )
+    normal = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="住在某个城市",
+            source_kind="owner_confirmed",
+        ),
+        message_id="normal-source",
+    )
+    proposal = MemoryProposal(
+        operation=operation,
+        item_id=normal.id,
+        content=sensitive.content,
+        source_kind="owner_confirmed",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (source(sender="owner", text="确认此信息"),),
+        (proposal,),
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == ()
+    assert [(item.index, item.reason) for item in result.rejected] == [
+        (0, "sensitivity_collision")
+    ]
+    unchanged = store.get_item(GROUP, normal.id)
+    assert unchanged is not None
+    assert unchanged.content == "住在某个城市"
+    assert unchanged.status == "active"
+
+
+def test_validator_rejects_explicit_candidate_matching_sensitive_item(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="住在上海市静安区",
+            sensitivity="sensitive",
+            source_kind="self_statement",
+        ),
+    )
+    proposal = MemoryProposal(
+        operation="mark_candidate",
+        subject_kind="user",
+        subject_id="123",
+        category="identity",
+        content="住在上海市静安区",
+        status="candidate",
+        sensitivity="normal",
+        source_kind="owner_confirmed",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (source(sender="owner", text="可能是此信息"),),
+        (proposal,),
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "sensitivity_collision"
+
+
+@pytest.mark.parametrize("first_operation", ["revise", "contradict"])
+def test_validator_rejects_collision_with_staged_content_change(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    first_operation: str,
+) -> None:
+    normal = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="旧正常事实",
+            source_kind="self_statement",
+        ),
+    )
+    sensitive = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="旧敏感事实",
+            sensitivity="sensitive",
+            source_kind="self_statement",
+        ),
+        message_id="sensitive-source",
+    )
+    first = MemoryProposal(
+        operation=first_operation,
+        item_id=normal.id,
+        content="共享事实",
+        source_kind="self_statement",
+    )
+    second = MemoryProposal(
+        operation="revise",
+        item_id=sensitive.id,
+        content="共享事实",
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (source(text="记住共享事实", explicit=True),),
+        (first, second),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert [proposal.operation for proposal in result.accepted] == [first_operation]
+    assert [(item.index, item.reason) for item in result.rejected] == [
+        (1, "sensitivity_collision")
+    ]
+
+
 def test_store_rejects_cross_sensitivity_content_collision_defensively(
     store: LongTermMemoryStore,
 ) -> None:
@@ -807,6 +967,57 @@ def test_store_rejects_cross_sensitivity_content_collision_defensively(
     assert unchanged.status == "candidate"
     assert unchanged.source_count == 1
     assert [item for item in store.list_items(GROUP) if item.sensitivity == "normal"] == []
+    assert [pending.id for pending in store.pending_sources(GROUP, 10)] == [source_id]
+
+
+@pytest.mark.parametrize("operation", ["revise", "contradict"])
+def test_store_rejects_cross_sensitivity_content_mutation_defensively(
+    store: LongTermMemoryStore,
+    operation: str,
+) -> None:
+    sensitive = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="住在上海市静安区",
+            sensitivity="sensitive",
+            source_kind="self_statement",
+        ),
+    )
+    normal = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="identity",
+            content="住在某个城市",
+            source_kind="owner_confirmed",
+        ),
+        message_id="normal-source",
+    )
+    source_id = store.collect(source(text="owner confirmation"))
+    assert source_id is not None
+
+    with pytest.raises(ValueError, match="sensitivity collision"):
+        store.commit_review(
+            GROUP,
+            (source_id,),
+            (
+                MemoryProposal(
+                    operation=operation,
+                    item_id=normal.id,
+                    content=sensitive.content,
+                    source_kind="owner_confirmed",
+                ),
+            ),
+        )
+
+    unchanged = store.get_item(GROUP, normal.id)
+    assert unchanged is not None
+    assert unchanged.content == "住在某个城市"
+    assert unchanged.status == "active"
     assert [pending.id for pending in store.pending_sources(GROUP, 10)] == [source_id]
 
 
@@ -1078,8 +1289,16 @@ def test_missing_target_rejection_preserves_committable_add_sibling(
     assert [item.content for item in committed] == ["喜欢黑咖啡"]
 
 
+@pytest.mark.parametrize(
+    ("first_id_attr", "second_id_attr"),
+    [("id", "short_id"), ("short_id", "id")],
+    ids=["full-to-short", "short-to-full"],
+)
 def test_forget_then_revise_rejects_removed_target_and_commits_valid_siblings(
-    store: LongTermMemoryStore, cfg: BridgeConfig
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    first_id_attr: str,
+    second_id_attr: str,
 ) -> None:
     target = seed_item(
         store,
@@ -1099,10 +1318,12 @@ def test_forget_then_revise_rejects_removed_target_and_commits_valid_siblings(
         content="喜欢黑咖啡",
         source_kind="self_statement",
     )
-    forget = MemoryProposal(operation="forget", item_id=target.id)
+    forget = MemoryProposal(
+        operation="forget", item_id=getattr(target, first_id_attr)
+    )
     revise = MemoryProposal(
         operation="revise",
-        item_id=target.id,
+        item_id=getattr(target, second_id_attr),
         content="新偏好",
         source_kind="self_statement",
     )
@@ -1115,6 +1336,7 @@ def test_forget_then_revise_rejects_removed_target_and_commits_valid_siblings(
     )
 
     assert [proposal.operation for proposal in result.accepted] == ["add", "forget"]
+    assert result.accepted[1].item_id == target.id
     assert [(item.index, item.reason) for item in result.rejected] == [
         (2, "target_not_found")
     ]
@@ -1123,8 +1345,16 @@ def test_forget_then_revise_rejects_removed_target_and_commits_valid_siblings(
     assert [item.content for item in committed] == ["喜欢黑咖啡"]
 
 
+@pytest.mark.parametrize(
+    ("first_id_attr", "second_id_attr"),
+    [("id", "short_id"), ("short_id", "id")],
+    ids=["full-to-short", "short-to-full"],
+)
 def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
-    store: LongTermMemoryStore, cfg: BridgeConfig
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    first_id_attr: str,
+    second_id_attr: str,
 ) -> None:
     target = seed_item(
         store,
@@ -1150,13 +1380,13 @@ def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
     assert source_id is not None
     merge = MemoryProposal(
         operation="merge",
-        item_id=target.id,
-        related_item_ids=(related.id,),
+        item_id=getattr(target, first_id_attr),
+        related_item_ids=(getattr(related, first_id_attr),),
         source_kind="self_statement",
     )
     revise_removed = MemoryProposal(
         operation="revise",
-        item_id=related.id,
+        item_id=getattr(related, second_id_attr),
         content="不应提交",
         source_kind="self_statement",
     )
@@ -1169,6 +1399,8 @@ def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
     )
 
     assert [proposal.operation for proposal in result.accepted] == ["merge"]
+    assert result.accepted[0].item_id == target.id
+    assert result.accepted[0].related_item_ids == (related.id,)
     assert [(item.index, item.reason) for item in result.rejected] == [
         (1, "target_not_found")
     ]
@@ -1177,8 +1409,16 @@ def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
     assert store.get_item(GROUP, related.id) is None
 
 
+@pytest.mark.parametrize(
+    ("first_id_attr", "second_id_attr"),
+    [("id", "short_id"), ("short_id", "id")],
+    ids=["full-to-short", "short-to-full"],
+)
 def test_contradict_then_revise_rejects_terminal_target_and_commits_contradiction(
-    store: LongTermMemoryStore, cfg: BridgeConfig
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    first_id_attr: str,
+    second_id_attr: str,
 ) -> None:
     target = seed_item(
         store,
@@ -1194,13 +1434,13 @@ def test_contradict_then_revise_rejects_terminal_target_and_commits_contradictio
     assert source_id is not None
     contradict = MemoryProposal(
         operation="contradict",
-        item_id=target.id,
+        item_id=getattr(target, first_id_attr),
         content="喜欢简洁回答",
         source_kind="self_statement",
     )
     revise_terminal = MemoryProposal(
         operation="revise",
-        item_id=target.id,
+        item_id=getattr(target, second_id_attr),
         content="不应提交",
         source_kind="self_statement",
     )
@@ -1213,6 +1453,7 @@ def test_contradict_then_revise_rejects_terminal_target_and_commits_contradictio
     )
 
     assert [proposal.operation for proposal in result.accepted] == ["contradict"]
+    assert result.accepted[0].item_id == target.id
     assert [(item.index, item.reason) for item in result.rejected] == [
         (1, "invalid_state_transition")
     ]
