@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -705,7 +706,8 @@ def test_validated_commit_and_source_deletion_are_atomic(
             '"subject_id":"u1","category":"preference","content":"喜欢简洁回答",'
             '"confidence":0.9,"status":"active","sensitivity":"normal",'
             '"source_kind":"self_statement","explicit_memory":false,\n'
-            '"decay_exempt":false,"expires_at":null,"related_item_ids":[],"item_id":null}]}'
+            '"decay_exempt":false,"expires_at":null,"source_ids":[1],'
+            '"related_item_ids":[],"item_id":null}]}'
         )
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
 
@@ -714,6 +716,60 @@ def test_validated_commit_and_source_deletion_are_atomic(
         assert outcome.error is None
         assert len(outcome.committed) == 1
         assert outcome.committed[0].content == "喜欢简洁回答"
+        assert store.status(GROUP).pending_count == 0
+
+    asyncio.run(go())
+
+
+def test_explicit_owner_review_does_not_blanket_confirm_curator_claims(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = store.collect(
+            MemorySource(
+                scope=GROUP,
+                message_id="unrelated",
+                sender_id="someone-else",
+                text="hello everyone",
+                message_timestamp=100,
+            )
+        )
+        assert source_id is not None
+        agent = FakeAgent(
+            json.dumps(
+                {
+                    "operations": [
+                        {
+                            "operation": "add",
+                            "source_ids": [source_id],
+                            "subject_kind": "user",
+                            "subject_id": "victim",
+                            "category": "identity",
+                            "content": "victim manages payroll",
+                            "confidence": 0.9,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "owner_confirmed",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        }
+                    ]
+                }
+            )
+        )
+        coordinator = make_coordinator(store, agent, cfg, tmp_path)
+
+        outcome = await coordinator.review_now(
+            GROUP, actor=MemoryActor("owner", "group_owner")
+        )
+
+        assert outcome.error is None
+        assert outcome.accepted == ()
+        assert outcome.rejected[0].reason == "owner_confirmation_required"
+        assert store.list_items(GROUP, limit=10) == ()
         assert store.status(GROUP).pending_count == 0
 
     asyncio.run(go())

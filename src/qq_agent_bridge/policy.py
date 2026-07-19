@@ -79,6 +79,18 @@ class Job:
 JobRunner = Callable[[Job], Awaitable[str]]
 
 
+def effective_command_access(
+    cfg: BridgeConfig, command: str, group_id: str | None = None
+) -> str:
+    """Resolve command access with policy-level special defaults."""
+    name = str(command).strip().lower()
+    if name == "memory" and name not in cfg.commands:
+        group_commands = cfg.command_groups.get(str(group_id), {}) if group_id else {}
+        if name not in group_commands:
+            return "user"
+    return cfg.command_access(name, group_id) if group_id is not None else cfg.command_access(name)
+
+
 class Policy:
     def __init__(self, cfg: BridgeConfig, runner: JobRunner) -> None:
         self.cfg = cfg
@@ -148,15 +160,7 @@ class Policy:
 
     def _command_access(self, cmd: str, group_id: str | None) -> str:
         """Keep /memory opt-in at the scope layer, not disabled at command parsing."""
-        if cmd == "memory" and "memory" not in self.cfg.commands:
-            group_commands = self.cfg.command_groups.get(str(group_id), {}) if group_id else {}
-            if "memory" not in group_commands:
-                return "user"
-        return (
-            self.cfg.command_access(cmd, group_id)
-            if group_id is not None
-            else self.cfg.command_access(cmd)
-        )
+        return effective_command_access(self.cfg, cmd, group_id)
 
     def start_job(self, ev: ChatEvent, cmd: ParsedCommand) -> tuple[str, str | None]:
         jid = f"j{int(time.time()*1000)}-{secrets.token_hex(3)}"

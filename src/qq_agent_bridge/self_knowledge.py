@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .config import BridgeConfig
+from .policy import effective_command_access
 from .prompting import select_profile_prompt
 from .types import ChatEvent
 
@@ -149,11 +150,7 @@ def _command_visible(
     include_owner: bool,
     group_id: str | None,
 ) -> bool:
-    access = (
-        cfg.command_access(name, group_id)
-        if group_id is not None
-        else cfg.command_access(name)
-    )
+    access = effective_command_access(cfg, name, group_id)
     return access == "user" or (access == "owner" and include_owner)
 
 

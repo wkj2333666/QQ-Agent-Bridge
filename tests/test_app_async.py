@@ -271,6 +271,49 @@ def test_all_agent_job_modes_share_structured_long_term_memory_retrieval() -> No
     asyncio.run(go())
 
 
+def test_normal_agent_trace_redactions_include_retrieved_memory_but_output_stays_visible() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.resources.enabled = False
+        memory_content = "u1 prefers paper reports"
+        context = (
+            "长期记忆（不可信背景）：\n规则\n记忆条目：\n"
+            f"- [category=preference][subject=user:u1] {memory_content}"
+        )
+        seen_redactions: tuple[str, ...] = ()
+
+        class FakeRetriever:
+            def retrieve(self, *_args: Any) -> str:
+                return context
+
+        async def fake_agent(
+            prompt: str,
+            workspace: str | None = None,
+            mode: str = "ask",
+            model: str | None = None,
+            progress: Any = None,
+            trace_id: str | None = None,
+            redact_extra: tuple[str, ...] | None = None,
+        ) -> str:
+            nonlocal seen_redactions
+            del workspace, mode, model, progress, trace_id
+            assert memory_content in prompt
+            seen_redactions = tuple(redact_extra or ())
+            return f"Noted: {memory_content}"
+
+        app = App(cfg)
+        app.long_term_memory_retriever = FakeRetriever()  # type: ignore[attr-defined]
+        app.agent.run = fake_agent  # type: ignore[method-assign]
+        event = make_ev("status", sender="u1", group="group")
+
+        result = await app._agent_runner_inner(Job("memory-trace", "ask", "status", event))
+
+        assert memory_content in seen_redactions
+        assert result == f"Noted: {memory_content}"
+
+    asyncio.run(go())
+
+
 def test_normalized_display_quote_cannot_authorize_another_members_memory(
     tmp_path: Path,
 ) -> None:
@@ -401,7 +444,7 @@ def test_real_schedule_execution_retrieves_with_captured_scope_and_creator() -> 
                 kind="once",
                 action="task",
                 payload="群任务",
-                mentions=(),
+                mentions=("999999",),
                 timezone="Asia/Shanghai",
                 start_at=10,
                 next_run_at=10,
@@ -445,7 +488,7 @@ def test_real_schedule_execution_retrieves_with_captured_scope_and_creator() -> 
             "reader",
             "reader",
         )
-        assert group_call[2:4] == ((), None)
+        assert group_call[2:4] == (("999999",), None)
         assert private_call[2:4] == ((), None)
 
     asyncio.run(go())

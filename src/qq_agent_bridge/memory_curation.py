@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import re
+import unicodedata
 from typing import Mapping, Sequence
 
 from .config import BridgeConfig, LongTermMemoryConfig
@@ -80,13 +81,12 @@ _ENGLISH_SECRET_LABEL = (
     rf"{_ENGLISH_CREDENTIAL_LABEL}|"
     r"password|passwd|secret|cookie)"
 )
-_ENGLISH_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|[=:：])"
+_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|(?:是|为|等于)|[=:：])"
 _CHINESE_SECRET_LABEL = (
     r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
     r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码)|"
     r"(?:登录|认证|身份)?(?:凭据|凭证)|认证信息)"
 )
-_CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _ENV_SECRET_SUFFIX = (
     r"(?:(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
     r"secret_access_key|(?:access|refresh|auth)_(?:token|key)|bearer(?:_token)?|"
@@ -105,15 +105,17 @@ _SECRET_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b{_ENGLISH_SECRET_LABEL}\b\s*{_ENGLISH_SECRET_ASSIGNMENT}\s*\S",
+        rf"(?<![A-Za-z0-9_]){_ENGLISH_SECRET_LABEL}(?![A-Za-z0-9_])"
+        rf"\s*{_SECRET_ASSIGNMENT}\s*\S",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"{_CHINESE_SECRET_LABEL}\s*{_CHINESE_SECRET_ASSIGNMENT}\s*\S"
+        rf"{_CHINESE_SECRET_LABEL}\s*{_SECRET_ASSIGNMENT}\s*\S",
+        re.IGNORECASE,
     ),
     re.compile(
         rf"(?<![A-Za-z0-9_])_*(?:[A-Za-z0-9]+_)*{_ENV_SECRET_SUFFIX}"
-        rf"\s*{_ENGLISH_SECRET_ASSIGNMENT}\s*\S",
+        rf"\s*{_SECRET_ASSIGNMENT}\s*\S",
         re.IGNORECASE,
     ),
 )
@@ -177,6 +179,17 @@ _SENSITIVE_PATTERNS = (
     re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE),
     re.compile(r"(?:手机号|手机号码|联系电话|电话号码|邮箱|电子邮箱|微信号|QQ号)"),
     re.compile(
+        r"(?:我的?微信(?:号|ID)?(?:是|为)?|加我微信|我的?联系方式(?:是|为)?)"
+        r"\s*[：:=]?\s*[A-Za-z][A-Za-z0-9_.-]{3,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:我家在|收件地址|邮寄地址|通信地址)[^\n]{0,80}"
+        r"(?:省|市)[^\n]{0,40}(?:区|县)[^\n]{0,40}"
+        r"(?:路|街|大道|巷)[^\n]{0,20}\d+号",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:phone|mobile|telephone|email|wechat|qq)\s*"
         r"(?:number|address|id|account)?\s*(?:is|=|:)\s*\S+",
         re.IGNORECASE,
@@ -184,6 +197,11 @@ _SENSITIVE_PATTERNS = (
     re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
     # Legal identity and financial information.
     re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
+    re.compile(
+        r"(?:我叫|我的?名字(?:是|叫|为)|姓名(?:是|叫|为))"
+        r"[\u3400-\u9fff\u00b7]{2,12}",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\b(?:legal\s+name|passport\s+(?:number|no)|social\s+security\s+number|ssn)\b",
         re.IGNORECASE,
@@ -219,6 +237,7 @@ _SENSITIVE_PATTERNS = (
 _PROPOSAL_FIELDS = frozenset(
     {
         "operation",
+        "source_ids",
         "item_id",
         "related_item_ids",
         "subject_kind",
@@ -365,7 +384,9 @@ class MemoryCollector:
 def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
     """Parse the curator's exact JSON envelope without coercing field types."""
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_unique_object)
+    except _DuplicateKeyError as exc:
+        raise ValueError("curator output contains duplicate key") from exc
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("curator output is not valid JSON") from exc
     if not isinstance(payload, dict) or set(payload) != {"operations"}:
@@ -521,13 +542,44 @@ class MemoryValidator:
         if proposal.sensitivity == "secret":
             return None, "secret_content"
 
-        reason = self._validate_subject(scope, sources, proposal, actor)
+        cited_sources, reason = self._cited_sources(sources, proposal)
+        if reason is not None:
+            return None, reason
+        evidence_content = proposal.content or (target.content if target is not None else None)
+        evidence_sources = sources if cited_sources is None else cited_sources
+        if proposal.source_kind == "owner_confirmed" and evidence_content is not None:
+            explicit_item_confirmation = bool(
+                not proposal.evidence_required
+                and cited_sources is None
+                and proposal.actor_class == "user"
+                and proposal.operation == "reinforce"
+                and proposal.item_id
+                and actor is not None
+                and any(
+                    source.sender_id == actor.id and source.explicit
+                    for source in evidence_sources
+                )
+            )
+            owner_supports_content = actor is not None and any(
+                source.sender_id == actor.id
+                and _content_supported_by_source(evidence_content, source.text)
+                for source in evidence_sources
+            )
+            if not explicit_item_confirmation and not owner_supports_content:
+                return None, "owner_confirmation_required"
+        elif cited_sources is not None and evidence_content is not None:
+            if not any(
+                _content_supported_by_source(evidence_content, source.text)
+                for source in cited_sources
+            ):
+                return None, "source_content_mismatch"
+        reason = self._validate_subject(scope, evidence_sources, proposal, actor)
         if reason is not None:
             return None, reason
 
         explicit_evidence = any(
             source.sender_id == proposal.subject_id and source.explicit
-            for source in sources
+            for source in evidence_sources
         )
         if proposal.explicit_memory and not explicit_evidence:
             return None, "explicit_consent_required"
@@ -578,6 +630,8 @@ class MemoryValidator:
                     confidence=proposal.confidence,
                     source_kind=proposal.source_kind,
                     actor_class=proposal.actor_class,
+                    source_ids=proposal.source_ids,
+                    evidence_required=proposal.evidence_required,
                 )
             else:
                 proposal = MemoryProposal(
@@ -591,6 +645,8 @@ class MemoryValidator:
                     ),
                     source_kind=proposal.source_kind,
                     actor_class=proposal.actor_class,
+                    source_ids=proposal.source_ids,
+                    evidence_required=proposal.evidence_required,
                 )
         if proposal.operation == "add" and duplicate is not None:
             proposal = MemoryProposal.reinforce(
@@ -598,8 +654,27 @@ class MemoryValidator:
                 confidence=proposal.confidence,
                 source_kind=proposal.source_kind,
                 actor_class=proposal.actor_class,
+                source_ids=proposal.source_ids,
+                evidence_required=proposal.evidence_required,
             )
         return proposal, None
+
+    @staticmethod
+    def _cited_sources(
+        sources: tuple[MemorySource, ...], proposal: MemoryProposal
+    ) -> tuple[tuple[MemorySource, ...] | None, str | None]:
+        if not proposal.evidence_required and not proposal.source_ids:
+            return None, None
+        if not proposal.source_ids:
+            return (), "source_evidence_required"
+        by_id = {source.id: source for source in sources if source.id is not None}
+        cited: list[MemorySource] = []
+        for source_id in proposal.source_ids:
+            source = by_id.get(source_id)
+            if source is None:
+                return (), "invalid_source_evidence"
+            cited.append(source)
+        return tuple(cited), None
 
     @staticmethod
     def _validate_operation_shape(
@@ -930,6 +1005,14 @@ class MemoryValidator:
         if proposal.source_kind == "owner_confirmed":
             if scope.kind != "group" or actor is None or actor.role != "group_owner":
                 return "actor_not_authorized"
+            if not any(source.sender_id == actor.id for source in sources):
+                return "owner_confirmation_required"
+            if proposal.content is not None and not any(
+                source.sender_id == actor.id
+                and _content_supported_by_source(proposal.content, source.text)
+                for source in sources
+            ):
+                return "owner_confirmation_required"
             return None
         if not authored:
             return "third_party_personal_claim"
@@ -991,6 +1074,14 @@ def _parse_proposal(value: object) -> MemoryProposal:
         not isinstance(item, str) for item in related
     ):
         raise ValueError("curator related_item_ids must be a string list")
+    source_ids = value.get("source_ids", ())
+    if not isinstance(source_ids, (list, tuple)) or any(
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        for item in source_ids
+    ):
+        raise ValueError("curator source_ids must be a positive integer list")
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("curator source_ids must be unique")
     if value.get("category") is not None and value["category"] not in ALLOWED_CATEGORIES:
         raise ValueError("curator category is invalid")
     if value.get("status") is not None and value["status"] not in ALLOWED_STATUSES:
@@ -1002,6 +1093,7 @@ def _parse_proposal(value: object) -> MemoryProposal:
 
     return MemoryProposal(
         operation=operation,
+        source_ids=tuple(source_ids),
         item_id=value.get("item_id"),
         related_item_ids=tuple(related),
         subject_kind=value.get("subject_kind"),
@@ -1015,7 +1107,32 @@ def _parse_proposal(value: object) -> MemoryProposal:
         explicit_memory=value.get("explicit_memory", False),
         decay_exempt=value.get("decay_exempt", False),
         expires_at=value.get("expires_at"),
+        evidence_required=True,
     )
+
+
+class _DuplicateKeyError(ValueError):
+    pass
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKeyError(key)
+        result[key] = value
+    return result
+
+
+def _evidence_normal_form(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", _normalize_text(text)).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _content_supported_by_source(content: str, source_text: str) -> bool:
+    proposed = _evidence_normal_form(content)
+    source = _evidence_normal_form(source_text)
+    return bool(proposed and proposed in source)
 
 
 def _normalize_actor(actor: object | None) -> MemoryActor | None:

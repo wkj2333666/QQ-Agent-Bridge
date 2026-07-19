@@ -57,7 +57,7 @@ from .scheduler import Schedule, ScheduleExecutionResult, ScheduleRun, Scheduler
 from .self_knowledge import build_help_reply, build_prompt_self_knowledge, maybe_self_reply
 from .storage_gate import GatedAgentAdapter, StorageActivityGate
 from .storage_maintenance import StorageMaintainer
-from .types import ChatEvent, ParsedCommand, trusted_reply_sender_id
+from .types import ChatEvent, ChatSegment, ParsedCommand, trusted_reply_sender_id
 from .workspace_search import WorkspaceSearch
 from .whisper_runner import WhisperRunner
 
@@ -1147,6 +1147,7 @@ class App:
             dormant_threshold=cfg.decay.dormant_threshold,
         )
         coordinator: MemoryReviewCoordinator | None = None
+        interpreter = None
         try:
             async with self.storage_gate.activity():
                 store.initialize()
@@ -1169,6 +1170,8 @@ class App:
                     await self._stop_memory_coordinator(coordinator)
                 except BaseException:  # noqa: BLE001 - preserve the original failure
                     pass
+            self._dispose_memory_runtime(interpreter)
+            self._dispose_memory_runtime(coordinator)
             store.close()
             if not isinstance(exc, Exception):
                 raise
@@ -1276,11 +1279,24 @@ class App:
                     store.close()
             except Exception as exc:  # noqa: BLE001 - shutdown is best effort
                 logger.warning("memory database shutdown failed error=%s", type(exc).__name__)
+        commands = self.memory_commands
+        self._dispose_memory_runtime(commands.interpreter if commands is not None else None)
+        self._dispose_memory_runtime(coordinator)
         self.long_term_memory_store = None
         self.long_term_memory_collector = None
         self.long_term_memory_retriever = None
         self.memory_commands = None
         self.memory_review_coordinator = None
+
+    @staticmethod
+    def _dispose_memory_runtime(runtime: object | None) -> None:
+        dispose = getattr(runtime, "dispose", None)
+        if not callable(dispose):
+            return
+        try:
+            dispose()
+        except Exception as exc:  # noqa: BLE001 - shutdown is best effort
+            logger.warning("restricted memory runtime cleanup failed error=%s", type(exc).__name__)
 
     async def _stop_memory_coordinator(self, coordinator: object) -> None:
         stop_task = asyncio.create_task(
@@ -1809,6 +1825,17 @@ class App:
             mentioned_bot=True,
             text=schedule.payload,
             timestamp=run.due_at,
+            segments=tuple(
+                ChatSegment(
+                    type="mention",
+                    text=f"@{qq} ",
+                    qq=str(qq),
+                    raw_type="schedule",
+                    raw_data={"source": "schedule"},
+                )
+                for qq in schedule.mentions
+                if schedule.is_group and str(qq).isdigit()
+            ),
         )
 
     async def _send_schedule_text(self, schedule: Schedule, text: str, echo: str) -> None:
@@ -2315,7 +2342,7 @@ class App:
                 model=model,
                 progress=progress,
                 trace_id=job.id,
-                redact_extra=self._outgoing_redaction_values(job),
+                redact_extra=self._agent_trace_redaction_values(job, long_term_memory),
             )
         finally:
             self.resources.cleanup_prepared(prepared_resources)
@@ -2460,6 +2487,21 @@ class App:
             for value in (job.outgoing_token or "", outbox_absolute, outbox_relative)
             if value
         )
+
+    def _agent_trace_redaction_values(
+        self, job: Job, long_term_memory: str
+    ) -> tuple[str, ...]:
+        values = list(self._outgoing_redaction_values(job))
+        if long_term_memory:
+            values.append(long_term_memory)
+            for line in long_term_memory.splitlines():
+                match = re.fullmatch(
+                    r"- \[category=[^\]\r\n]+\]\[subject=(?:group|user):[^\]\r\n]+\] (.+)",
+                    line,
+                )
+                if match and match.group(1):
+                    values.append(match.group(1))
+        return tuple(dict.fromkeys(value for value in values if value))
 
     def _prepare_runtime_skill_bundle(self) -> str:
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)

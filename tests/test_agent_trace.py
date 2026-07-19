@@ -152,6 +152,33 @@ def test_cursor_trace_and_failure_log_redact_job_scoped_bare_values(
     assert "ordinary-marker" in caplog.text
 
 
+def test_trace_redacts_memory_content_without_redacting_returned_output(
+    tmp_path: Path,
+) -> None:
+    memory_content = "u1 prefers paper reports"
+    script = tmp_path / "agent.sh"
+    _write_script(script, f"printf '%s\\n' '{memory_content}'")
+    trace_root = _trace_root_for(tmp_path)
+    cfg = _config(tmp_path, trace_root)
+    cfg.agent.binary = str(script)
+
+    result = asyncio.run(
+        CursorAdapter(cfg).run(
+            "prompt",
+            str(tmp_path),
+            "ask",
+            trace_id="memory-redaction",
+            redact_extra=(memory_content,),
+        )
+    )
+
+    path, _records = _read_trace(trace_root)
+    serialized = path.read_text(encoding="utf-8")
+    assert result == memory_content
+    assert memory_content not in serialized
+    assert "[REDACTED]" in serialized
+
+
 def test_trace_redacts_job_values_split_by_ansi(tmp_path: Path) -> None:
     trace_root = _trace_root_for(tmp_path)
     cfg = _config(tmp_path, trace_root)

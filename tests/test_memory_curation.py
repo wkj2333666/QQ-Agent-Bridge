@@ -404,6 +404,227 @@ def test_parse_curator_output_rejects_excessive_operation_count() -> None:
         parse_curator_output(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"operations":[],"operations":[{"operation":"forget","item_id":"x"}]}',
+        (
+            '{"operations":[{"operation":"add","source_ids":[1],'
+            '"subject_kind":"user","subject_id":"u1","subject_id":"victim",'
+            '"content":"likes tea"}]}'
+        ),
+    ],
+)
+def test_parse_curator_output_rejects_duplicate_keys_at_every_level(
+    payload: str,
+) -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        parse_curator_output(payload)
+
+
+def test_curator_proposals_require_cited_sources_with_normalized_content_support(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text="我喜欢 黑咖啡。",
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u2",
+            text="hello everyone",
+            message_timestamp=101,
+        ),
+    )
+    proposals = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [41],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "喜欢黑咖啡",
+                        "confidence": 0.9,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                    {
+                        "operation": "add",
+                        "source_ids": [42],
+                        "subject_kind": "user",
+                        "subject_id": "u2",
+                        "category": "identity",
+                        "content": "u2 is a vegetarian",
+                        "confidence": 0.9,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                    {
+                        "operation": "add",
+                        "source_ids": [42],
+                        "subject_kind": "group",
+                        "subject_id": "g",
+                        "category": "group_norm",
+                        "content": "the group requires weekly reports",
+                        "confidence": 0.9,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "inferred",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, proposals, actor=None)
+
+    assert [proposal.content for proposal in result.accepted] == ["喜欢黑咖啡"]
+    assert [rejection.reason for rejection in result.rejected] == [
+        "source_content_mismatch",
+        "source_content_mismatch",
+    ]
+
+
+def test_curator_proposal_rejects_uncited_and_out_of_batch_sources(
+    cfg: BridgeConfig,
+) -> None:
+    source_row = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="I prefer tea",
+        message_timestamp=100,
+    )
+
+    for source_ids, expected in (([], "source_evidence_required"), ([99], "invalid_source_evidence")):
+        proposal = parse_curator_output(
+            json.dumps(
+                {
+                    "operations": [
+                        {
+                            "operation": "add",
+                            "source_ids": source_ids,
+                            "subject_kind": "user",
+                            "subject_id": "u1",
+                            "content": "prefer tea",
+                        }
+                    ]
+                }
+            )
+        )[0]
+
+        result = MemoryValidator(cfg).validate(GROUP, (source_row,), (proposal,), actor=None)
+
+        assert result.accepted == ()
+        assert result.rejected[0].reason == expected
+
+
+def test_stateful_curator_proposal_must_support_the_target_content(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="u1",
+            content="u1 prefers tea",
+        ),
+    )
+    unrelated = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="hello everyone",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "reinforce",
+                        "source_ids": [41],
+                        "item_id": target.id,
+                    }
+                ]
+            }
+        )
+    )[0]
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (unrelated,), (proposal,), actor=None
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_content_mismatch"
+
+
+def test_curator_cannot_claim_the_explicit_owner_confirmation_command_path(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="victim",
+            content="victim is a vegetarian",
+            status="candidate",
+        ),
+    )
+    unrelated = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="owner",
+        text="hello everyone",
+        message_timestamp=100,
+        explicit=True,
+    )
+    proposal = MemoryProposal(
+        operation="reinforce",
+        source_ids=(41,),
+        item_id=target.id,
+        source_kind="owner_confirmed",
+        actor_class="user",
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (unrelated,),
+        (proposal,),
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "owner_confirmation_required"
+
+
 def test_validator_accepts_sender_self_statement_and_group_culture(
     cfg: BridgeConfig,
 ) -> None:
@@ -600,6 +821,44 @@ def test_validator_rejects_shared_secret_assignment_variants(
 @pytest.mark.parametrize(
     "content",
     [
+        "API key 是 abcdefghijklmnop",
+        "API_KEY为abcdefghijk",
+        "密码 is hunter2value",
+        "访问令牌 equals opaque-token-value",
+        "client secret 等于 opaque-client-value",
+    ],
+)
+def test_mixed_language_credential_assignments_are_unconditionally_rejected(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    content: str,
+) -> None:
+    store.set_scope_enabled(GROUP, True)
+    collector = MemoryCollector(store, cfg)
+    event = make_event(content, group="g")
+    assert collector.collect_event(event, command_name="memory", explicit=True) is False
+
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        content=content,
+        source_kind="explicit_request",
+        explicit_memory=True,
+        actor_class="user",
+    )
+    result = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content, explicit=True),),
+        (proposal,),
+        actor=MemoryActor("123", "member"),
+    )
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "secret_content"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         "api_token=abcdefgh",
         "api-token: abcdefgh",
         "api token equals abcdefgh",
@@ -786,6 +1045,42 @@ def test_validator_conservatively_escalates_sensitive_personal_content(
 
     assert result.rejected == ()
     assert result.accepted[0].sensitivity == "sensitive"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我叫张三",
+        "我的名字是张三",
+        "我的微信是 wxid_zhangsan",
+        "加我微信 wxid_zhangsan",
+        "我的联系方式是 zhangsan_27",
+        "我家在北京市海淀区中关村大街27号",
+        "收件地址：上海市浦东新区世纪大道100号",
+    ],
+)
+def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
+    cfg: BridgeConfig,
+    content: str,
+) -> None:
+    assert classify_memory_sensitivity(content) == "sensitive"
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="123",
+        category="identity",
+        content=content,
+        source_kind="self_statement",
+    )
+
+    background = MemoryValidator(cfg).validate(
+        GROUP,
+        (source(text=content),),
+        (proposal,),
+        actor=None,
+    )
+
+    assert background.accepted == ()
+    assert background.rejected[0].reason == "sensitivity_consent_required"
 
 
 @pytest.mark.parametrize(
@@ -989,7 +1284,12 @@ def test_group_owner_can_confirm_only_non_sensitive_third_party_candidate(
 
     result = MemoryValidator(cfg).validate(
         GROUP,
-        (source(sender="owner"),),
+        (
+            source(
+                sender="owner",
+                text="123负责每周发布纪要；123住在上海市静安区",
+            ),
+        ),
         (normal, sensitive),
         actor=MemoryActor("owner", "group_owner"),
     )
@@ -1555,7 +1855,7 @@ def test_validator_rejects_cross_sensitivity_content_collision(
 
     result = MemoryValidator(cfg, store=store).validate(
         GROUP,
-        (source(sender="owner", text="确认此信息"),),
+        (source(sender="owner", text="确认123住在上海市静安区"),),
         (proposal,),
         actor=MemoryActor("owner", "group_owner"),
     )
@@ -1606,7 +1906,7 @@ def test_validator_rejects_owner_confirmed_content_change_matching_sensitive_ite
 
     result = MemoryValidator(cfg, store=store).validate(
         GROUP,
-        (source(sender="owner", text="确认此信息"),),
+        (source(sender="owner", text=f"确认123{sensitive.content}"),),
         (proposal,),
         actor=MemoryActor("owner", "group_owner"),
     )
@@ -1649,7 +1949,7 @@ def test_validator_rejects_explicit_candidate_matching_sensitive_item(
 
     result = MemoryValidator(cfg, store=store).validate(
         GROUP,
-        (source(sender="owner", text="可能是此信息"),),
+        (source(sender="owner", text="可能是123住在上海市静安区"),),
         (proposal,),
         actor=MemoryActor("owner", "group_owner"),
     )

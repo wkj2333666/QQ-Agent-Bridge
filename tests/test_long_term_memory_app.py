@@ -242,6 +242,90 @@ def test_disabled_global_memory_is_a_noop(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_real_restricted_memory_runtimes_are_disposed_on_app_shutdown(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir(mode=0o700)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        cfg = config(tmp_path)
+        app = App(cfg, config_path=tmp_path / "config.yaml")
+
+        await app._initialize_long_term_memory()
+
+        assert app.memory_review_coordinator is not None
+        assert app.memory_commands is not None
+        curator_agent = app.memory_review_coordinator.curator.agent
+        interpreter_agent = app.memory_commands.interpreter.agent
+        owned_paths = (
+            Path(curator_agent.cfg.agent.default_workspace),
+            Path(curator_agent.cfg.agent.sandbox_home),
+            Path(interpreter_agent.cfg.agent.default_workspace),
+            Path(interpreter_agent.cfg.agent.sandbox_home),
+        )
+        assert all(path.exists() for path in owned_paths)
+
+        await app._shutdown_long_term_memory()
+
+        assert all(not path.exists() for path in owned_paths)
+
+    asyncio.run(go())
+
+
+def test_restricted_memory_runtimes_are_disposed_when_app_startup_fails(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    async def go() -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir(mode=0o700)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        original_coordinator_builder = main_module.build_memory_review_coordinator
+        original_interpreter_builder = main_module.build_memory_command_interpreter
+        owned_paths: list[Path] = []
+
+        def build_coordinator(*args: Any, **kwargs: Any) -> Any:
+            coordinator = original_coordinator_builder(*args, **kwargs)
+            agent = coordinator.curator.agent
+            owned_paths.extend(
+                (
+                    Path(agent.cfg.agent.default_workspace),
+                    Path(agent.cfg.agent.sandbox_home),
+                )
+            )
+
+            async def fail_start() -> None:
+                raise RuntimeError("injected startup failure")
+
+            coordinator.start = fail_start
+            return coordinator
+
+        def build_interpreter(*args: Any, **kwargs: Any) -> Any:
+            interpreter = original_interpreter_builder(*args, **kwargs)
+            owned_paths.extend(
+                (
+                    Path(interpreter.agent.cfg.agent.default_workspace),
+                    Path(interpreter.agent.cfg.agent.sandbox_home),
+                )
+            )
+            return interpreter
+
+        monkeypatch.setattr(main_module, "build_memory_review_coordinator", build_coordinator)
+        monkeypatch.setattr(main_module, "build_memory_command_interpreter", build_interpreter)
+        app = App(config(tmp_path), config_path=tmp_path / "config.yaml")
+
+        await app._initialize_long_term_memory()
+
+        assert app.long_term_memory_error == "RuntimeError"
+        assert app.long_term_memory_store is None
+        assert len(owned_paths) == 4
+        assert all(not path.exists() for path in owned_paths)
+
+    asyncio.run(go())
+
+
 def test_run_starts_memory_before_onebot_and_closes_it_on_shutdown(
     tmp_path: Path,
     monkeypatch: Any,

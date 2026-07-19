@@ -164,13 +164,16 @@ low-priority review task, cancellation, retry backoff, and shutdown behavior.
 Builds a constrained prompt, invokes the configured `auto` model in a restricted
 ask-only environment, parses a JSON proposal, and passes operations to deterministic
 validation. It cannot access the network, tools, QQ sending, outgoing resources, or
-a writable Agent workspace.
+a writable Agent workspace. Every parsed operation cites source row IDs from the
+current batch, and duplicate JSON keys are malformed at any nesting level.
 
 ### MemoryValidator
 
 Is the authority for scope, subject provenance, category, sensitivity, confidence,
 length, operation count, duplicate, contradiction, and forbidden-field checks. The
-model proposes operations; the validator decides whether they can commit.
+model proposes operations; the validator decides whether they can commit. Cited IDs
+must belong to the exact batch, and normalized proposed or target content must be an
+extractive substring of a cited source before a curator operation can commit.
 
 ### MemoryRetriever
 
@@ -297,13 +300,16 @@ Personal memory operations must satisfy all of these conditions:
 - model text cannot override structured sender, quote, mention, or reply metadata.
 
 Owner confirmation of a third-party fact uses source kind `owner_confirmed`, never
-`self_statement`, and remains subject to sensitivity rules.
+`self_statement`, cites an item-specific supporting statement authored by that owner,
+and remains subject to sensitivity rules. Invoking `/memory review now` grants no
+blanket confirmation authority.
 
 ### Always excluded
 
 - messages sent by the bot;
 - profile text, system prompts, runtime skills, and hidden context;
-- passwords, access tokens, cookies, private keys, approval nonces, or credentials;
+- passwords, access tokens, cookies, private keys, approval nonces, or credentials,
+  including mixed Chinese/English label-assignment forms;
 - raw file, image, audio, video, and forwarded-record payloads;
 - unsupported cross-scope references;
 - instructions that attempt to change bot personality, permissions, or behavior.
@@ -319,7 +325,9 @@ identity claims become candidates and do not affect replies.
 Health, precise location, contact information, legal identity, finances, intimate
 relationships, political or religious affiliation, and similarly sensitive personal
 facts require an explicit remember request by the subject. Owner confirmation alone
-cannot bypass this requirement.
+cannot bypass this requirement. Legal-name statements, WeChat/contact handles, and
+postal addresses precise to street and house number are included in this rule and
+never activate through normal background review.
 
 Passwords, tokens, cookies, private keys, recovery codes, and authentication secrets
 are never stored even when explicitly requested.
@@ -356,10 +364,13 @@ ask invocation:
 - no progress sent to QQ;
 - strict timeout and output-size limit;
 - trace output contains lifecycle metadata only, not source text.
+- generated restricted workspace and home directories are removed on adapter disposal,
+  App shutdown, and startup failure; cleanup is limited to adapter-owned private paths.
 
 The prompt labels all QQ content and existing memories as untrusted data. It includes
-the evidence rules and an exact JSON schema. The curator may propose at most a
-configured small operation count per batch.
+the evidence rules and an exact JSON schema with `source_ids`. Duplicate keys are
+rejected before schema validation. The curator may propose at most a configured small
+operation count per batch.
 
 Allowed operations are:
 
@@ -459,7 +470,8 @@ Group ask/task retrieval includes:
 
 Proactive retrieval includes group memories and a bounded set for actual participants
 in the current proactive batch. Schedule ask/task execution reuses the scope captured
-when the schedule was created.
+when the schedule was created and its persisted real mentions. String-form OneBot CQ
+`at` codes are retained as structured mention segments, not only rendered text.
 
 Text that merely contains a QQ number, nickname, or textual `@` does not authorize
 subject retrieval.
@@ -470,6 +482,10 @@ It returns at most 12 items and 1500 characters by default.
 
 Candidates, rejected items, dormant items, contradicted losers, and expired items do
 not enter normal prompts.
+
+Retrieved item content is added to normal Agent trace/log redaction values. This
+redaction applies to diagnostic sinks only; the assistant result remains available to
+the normal output delivery path.
 
 ## Prompt Contract
 

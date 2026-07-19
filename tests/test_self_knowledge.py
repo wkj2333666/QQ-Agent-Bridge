@@ -144,7 +144,7 @@ def test_memory_reply_reflects_config() -> None:
     disabled = maybe_self_reply("有记忆吗", make_cfg(memory_enabled=False), make_ev())
 
     assert enabled is not None and "短期记忆" in enabled
-    assert disabled is not None and "没有开启记忆" in disabled
+    assert disabled is not None and "没有开启短期记忆" in disabled
 
 
 def test_self_knowledge_describes_opt_in_scoped_long_term_memory() -> None:
@@ -169,6 +169,24 @@ def test_self_knowledge_describes_opt_in_scoped_long_term_memory() -> None:
     no_short_term = build_prompt_self_knowledge(cfg, make_ev())
     assert "短期记忆" in no_short_term and "未开启" in no_short_term
     assert "长期记忆" in no_short_term and "不会跨群" in no_short_term
+
+
+def test_help_uses_policy_memory_default_and_honors_group_override() -> None:
+    cfg = BridgeConfig(
+        allowed_users=["reader"],
+        allowed_groups=["group"],
+    )
+    assert "memory" not in cfg.commands
+
+    private_help = build_help_reply(cfg, make_ev(is_group=False, sender="reader"))
+    group_help = build_help_reply(cfg, make_ev(is_group=True, sender="reader"))
+
+    assert "/memory" in private_help
+    assert "/memory" in group_help
+
+    cfg.command_groups = {"group": {"memory": "disabled"}}
+    overridden = build_help_reply(cfg, make_ev(is_group=True, sender="reader"))
+    assert "/memory" not in overridden
 
 
 def test_long_term_memory_self_knowledge_is_actor_aware() -> None:
