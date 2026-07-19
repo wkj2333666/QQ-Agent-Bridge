@@ -54,6 +54,20 @@ class MentionDecision:
 
 RememberProactive = Callable[[tuple[_QueuedMessage, ...], tuple[ProactiveReplyMessage, ...]], None]
 
+PROACTIVE_TIMER_DRAIN_TIMEOUT_SECONDS = 1.0
+
+
+@dataclass
+class _ProactiveWork:
+    """A generation-owned batch whose externally visible effects are not committed."""
+
+    batch: tuple[_QueuedMessage, ...]
+    generation: int
+    replies: tuple[ProactiveReplyMessage, ...] | None = None
+    next_reply: int = 0
+    remembered: bool = False
+    rate_recorded: bool = False
+
 
 class ProactiveSpeaker:
     """Collect unmentioned group messages and occasionally say one short line."""
@@ -85,6 +99,11 @@ class ProactiveSpeaker:
         self._hourly_sent: dict[str, deque[float]] = {}
         self._handoff_generation = 0
         self._active_handoff: int | None = None
+        self._runtime_generation = 0
+        self._inflight: dict[str, _ProactiveWork] = {}
+        self._resumable: dict[str, _ProactiveWork] = {}
+        self._detached_tasks: set[asyncio.Task[None]] = set()
+        self._draining_timers = False
 
     def observe(self, ev: ChatEvent) -> None:
         if not self._should_collect(ev):
@@ -139,6 +158,8 @@ class ProactiveSpeaker:
     def reset_chat(self, chat_id: str) -> None:
         """Drop queued interjection state for a chat after reset/profile changes."""
         self._batches.pop(chat_id, None)
+        self._resumable.pop(chat_id, None)
+        self._inflight.pop(chat_id, None)
         task = self._timers.pop(chat_id, None)
         if task:
             task.cancel()
@@ -172,6 +193,8 @@ class ProactiveSpeaker:
         return decision
 
     async def stop(self) -> None:
+        if self._active_handoff is None:
+            self._runtime_generation += 1
         await self._stop_timers()
 
     def begin_handoff(self) -> int:
@@ -180,6 +203,7 @@ class ProactiveSpeaker:
             raise RuntimeError("proactive handoff already active")
         self._handoff_generation += 1
         self._active_handoff = self._handoff_generation
+        self._runtime_generation += 1
         for task in tuple(self._timers.values()):
             task.cancel()
         return self._handoff_generation
@@ -191,8 +215,9 @@ class ProactiveSpeaker:
         await self._stop_timers()
         if self._active_handoff != generation:
             return
+        pending, resumable = self._take_uncommitted_work()
         self._active_handoff = None
-        self._schedule_pending_batches()
+        self._accept_handoff(pending, resumable)
 
     def commit_handoff(self, generation: int, replacement: ProactiveSpeaker) -> None:
         """Atomically move pending intake to the replacement runtime."""
@@ -200,51 +225,123 @@ class ProactiveSpeaker:
             raise RuntimeError("stale proactive handoff")
         if any(not task.done() for task in self._timers.values()):
             raise RuntimeError("proactive handoff timers are still running")
-        pending = {
-            chat_id: tuple(messages)
-            for chat_id, messages in self._batches.items()
-            if messages
-        }
-        self._batches.clear()
+        pending, resumable = self._take_uncommitted_work()
         self._timers.clear()
         self._active_handoff = None
-        replacement._accept_handoff(pending)
+        replacement._accept_handoff(pending, resumable)
 
     async def _stop_timers(self) -> None:
-        while True:
+        self._draining_timers = True
+        try:
             tasks = tuple(task for task in self._timers.values() if not task.done())
-            if not tasks:
-                for chat_id, task in tuple(self._timers.items()):
-                    if task.done():
-                        self._timers.pop(chat_id, None)
-                return
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if tasks:
+                _done, pending = await asyncio.wait(
+                    tasks,
+                    timeout=max(0.0, PROACTIVE_TIMER_DRAIN_TIMEOUT_SECONDS),
+                )
+            else:
+                pending = set()
+            task_set = set(tasks)
             for chat_id, task in tuple(self._timers.items()):
-                if task in tasks and self._timers.get(chat_id) is task:
+                if task.done() or task in task_set:
                     self._timers.pop(chat_id, None)
+            for task in pending:
+                self._detach_task(task)
+            if pending:
+                logger.warning("proactive timer drain timed out count=%d", len(pending))
+        finally:
+            self._draining_timers = False
 
     def _schedule_pending_batches(self) -> None:
-        for chat_id, messages in tuple(self._batches.items()):
-            if messages and chat_id not in self._timers:
+        chats = set(self._batches) | set(self._resumable)
+        for chat_id in chats:
+            has_work = bool(self._batches.get(chat_id)) or chat_id in self._resumable
+            if has_work and chat_id not in self._timers and self._chat_is_eligible(chat_id):
                 self._schedule_flush(chat_id)
 
     def _accept_handoff(
         self,
         pending: dict[str, tuple[_QueuedMessage, ...]],
+        resumable: dict[str, _ProactiveWork] | None = None,
     ) -> None:
         if self._active_handoff is not None:
             raise RuntimeError("replacement proactive runtime is draining")
+        resumable = resumable or {}
         max_items = max(1, self.cfg.proactive.max_batch_messages)
         for chat_id, messages in pending.items():
+            if not self._chat_is_eligible(chat_id):
+                continue
             batch = self._batches.setdefault(chat_id, [])
             batch.extend(messages)
             if len(batch) > max_items:
                 del batch[: len(batch) - max_items]
             for message in messages:
                 self._mark_seen(message.id)
+        for chat_id, work in resumable.items():
+            if not self._chat_is_eligible(chat_id):
+                continue
+            self._resumable[chat_id] = _ProactiveWork(
+                batch=work.batch,
+                generation=self._runtime_generation,
+                replies=work.replies,
+                next_reply=work.next_reply,
+                remembered=work.remembered,
+                rate_recorded=work.rate_recorded,
+            )
+            for message in work.batch:
+                self._mark_seen(message.id)
         self._schedule_pending_batches()
+
+    def _take_uncommitted_work(
+        self,
+    ) -> tuple[dict[str, tuple[_QueuedMessage, ...]], dict[str, _ProactiveWork]]:
+        pending = {
+            chat_id: tuple(messages)
+            for chat_id, messages in self._batches.items()
+            if messages
+        }
+        resumable: dict[str, _ProactiveWork] = {}
+        for source in (self._resumable, self._inflight):
+            for chat_id, work in source.items():
+                if work.replies is None:
+                    pending[chat_id] = work.batch + pending.get(chat_id, ())
+                else:
+                    resumable[chat_id] = work
+        self._batches.clear()
+        self._resumable.clear()
+        self._inflight.clear()
+        return pending, resumable
+
+    def _chat_is_eligible(self, chat_id: str) -> bool:
+        proactive = self.cfg.proactive
+        return bool(
+            proactive.enabled
+            and self.cfg.is_group_allowed(chat_id)
+            and (not proactive.allowed_groups or chat_id in proactive.allowed_groups)
+        )
+
+    def _work_may_side_effect(self, chat_id: str, generation: int) -> bool:
+        return bool(
+            self._active_handoff is None
+            and generation == self._runtime_generation
+            and self._chat_is_eligible(chat_id)
+        )
+
+    def _detach_task(self, task: asyncio.Task[None]) -> None:
+        self._detached_tasks.add(task)
+
+        def done(completed: asyncio.Task[None]) -> None:
+            self._detached_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.exception()
+            except Exception:  # noqa: BLE001 - consume detached task failures
+                return
+
+        task.add_done_callback(done)
 
     def _should_collect(self, ev: ChatEvent) -> bool:
         cfg = self.cfg.proactive
@@ -307,12 +404,13 @@ class ProactiveSpeaker:
             return True
         return False
 
-    async def _flush_later(self, chat_id: str) -> None:
+    async def _flush_later(self, chat_id: str, generation: int) -> None:
         await asyncio.sleep(max(0.0, self.cfg.proactive.batch_seconds))
-        await self._flush(chat_id)
+        await self._flush(chat_id, generation)
 
     def _schedule_flush(self, chat_id: str) -> None:
-        task = asyncio.create_task(self._flush_later(chat_id))
+        generation = self._runtime_generation
+        task = asyncio.create_task(self._flush_later(chat_id, generation))
         self._timers[chat_id] = task
         task.add_done_callback(
             lambda completed, pending_chat=chat_id: self._discard_completed_timer(
@@ -328,12 +426,31 @@ class ProactiveSpeaker:
     ) -> None:
         if self._timers.get(chat_id) is completed:
             self._timers.pop(chat_id, None)
+            if self._active_handoff is None and not self._draining_timers:
+                self._schedule_pending_chat(chat_id)
 
-    async def _flush(self, chat_id: str) -> None:
-        batch = self._batches.pop(chat_id, [])
+    def _schedule_pending_chat(self, chat_id: str) -> None:
+        if chat_id in self._timers or not self._chat_is_eligible(chat_id):
+            return
+        if self._batches.get(chat_id) or chat_id in self._resumable:
+            self._schedule_flush(chat_id)
+
+    async def _flush(self, chat_id: str, generation: int) -> None:
+        work = self._resumable.pop(chat_id, None)
+        if work is None:
+            batch = tuple(self._batches.pop(chat_id, []))
+            work = _ProactiveWork(batch=batch, generation=generation)
+        else:
+            work.generation = generation
+        self._inflight[chat_id] = work
+        batch = list(work.batch)
         self._debug("flush", chat_id=chat_id, batch_size=len(batch))
+        if not self._work_may_side_effect(chat_id, work.generation):
+            if work.generation == self._runtime_generation and self._active_handoff is None:
+                self._discard_work(chat_id, work)
+            return
         has_clear_question = self._has_clear_question(batch)
-        if len(batch) < self.cfg.proactive.min_messages and not has_clear_question:
+        if work.replies is None and len(batch) < self.cfg.proactive.min_messages and not has_clear_question:
             self._debug(
                 "silent",
                 reason="not-enough-messages",
@@ -341,35 +458,55 @@ class ProactiveSpeaker:
                 batch_size=len(batch),
                 min_messages=self.cfg.proactive.min_messages,
             )
+            self._discard_work(chat_id, work)
             return
-        if not self._rate_limit_allows(chat_id):
+        if work.replies is None and not self._rate_limit_allows(chat_id):
             self._debug("silent", reason="rate-limit", chat_id=chat_id)
+            self._discard_work(chat_id, work)
             return
-        prompt = self._build_prompt(batch)
-        self._debug("decide", chat_id=chat_id, messages=len(batch), model=self.cfg.proactive.model)
-        try:
-            raw = await run_agent(
-                self.agent,
-                prompt,
-                self.cfg.agent.default_workspace,
-                "ask",
-                model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
-                trace_id=f"proactive-{batch[-1].id}",
-            )
-        except Exception:  # noqa: BLE001 - proactive chat should fail silent
-            logger.exception("proactive agent run failed")
-            return
-        replies = self._parse_decision(raw, allowed_at={msg.sender_id for msg in batch})
-        if not replies:
-            self._debug("silent", reason="llm-declined-or-invalid", chat_id=chat_id, raw=raw)
+        if work.replies is None:
+            if not self._work_may_side_effect(chat_id, work.generation):
+                return
+            prompt = self._build_prompt(batch)
+            self._debug("decide", chat_id=chat_id, messages=len(batch), model=self.cfg.proactive.model)
+            try:
+                raw = await run_agent(
+                    self.agent,
+                    prompt,
+                    self.cfg.agent.default_workspace,
+                    "ask",
+                    model=self.cfg.proactive.model or self.cfg.agent.chat_model or None,
+                    trace_id=f"proactive-{batch[-1].id}",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - proactive chat should fail silent
+                logger.exception("proactive agent run failed")
+                self._discard_work(chat_id, work)
+                return
+            if not self._work_may_side_effect(chat_id, work.generation):
+                return
+            replies = self._parse_decision(raw, allowed_at={msg.sender_id for msg in batch})
+            if not replies:
+                self._debug("silent", reason="llm-declined-or-invalid", chat_id=chat_id, raw=raw)
+                self._discard_work(chat_id, work)
+                return
+            work.replies = tuple(replies)
+
+        replies = work.replies
+        if replies is None:
             return
         delay = max(0.0, self.cfg.proactive.reply_message_delay_seconds)
-        for idx, reply in enumerate(replies):
+        for idx in range(work.next_reply, len(replies)):
+            reply = replies[idx]
             if idx and delay:
                 await asyncio.sleep(delay)
+            if not self._work_may_side_effect(chat_id, work.generation):
+                return
             echo = f"proactive-{batch[-1].id}-{idx}" if len(replies) > 1 else f"proactive-{batch[-1].id}"
             reply_to = batch[-1].id if idx == 0 else None
             await self._send_reply(chat_id, reply.text, echo, reply.ats, reply_to)
+            work.next_reply = idx + 1
             self._debug(
                 "send",
                 chat_id=chat_id,
@@ -380,9 +517,21 @@ class ProactiveSpeaker:
                 quote=reply_to,
                 reply=reply.text,
             )
-        if self.remember:
+        if self.remember and not work.remembered:
+            if not self._work_may_side_effect(chat_id, work.generation):
+                return
             self.remember(tuple(batch), tuple(replies))
-        self._record_proactive_send(chat_id)
+            work.remembered = True
+        if not work.rate_recorded:
+            if not self._work_may_side_effect(chat_id, work.generation):
+                return
+            self._record_proactive_send(chat_id)
+            work.rate_recorded = True
+        self._discard_work(chat_id, work)
+
+    def _discard_work(self, chat_id: str, work: _ProactiveWork) -> None:
+        if self._inflight.get(chat_id) is work:
+            self._inflight.pop(chat_id, None)
 
     async def _send_reply(
         self,

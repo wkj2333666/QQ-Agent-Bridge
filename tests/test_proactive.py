@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import logging
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.proactive as proactive_module  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.proactive import ProactiveSpeaker  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatReply, ChatResource, ChatSegment  # type: ignore
@@ -975,6 +979,359 @@ def test_proactive_drops_internal_prompt_echo_from_llm() -> None:
         await speaker.stop()
 
         assert sent == []
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("outcome", ("success", "failure", "cancellation"))
+def test_handoff_reclaims_batch_paused_in_agent_exactly_once(outcome: str) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0
+        cfg.proactive.min_messages = 1
+        entered = asyncio.Event()
+        sent: list[str] = []
+        calls = 0
+
+        class PausingAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    entered.set()
+                    await asyncio.Future()
+                return '{"speak": true, "reply": "recovered"}'
+
+        class ReplacementAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                return '{"speak": true, "reply": "recovered"}'
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            sent.append(text)
+
+        old = ProactiveSpeaker(cfg, PausingAgent(), send)  # type: ignore[arg-type]
+        replacement = ProactiveSpeaker(cfg, ReplacementAgent(), send)  # type: ignore[arg-type]
+        old.observe(make_ev("recover this", "agent-inflight"))
+        await asyncio.wait_for(entered.wait(), 1)
+
+        generation = old.begin_handoff()
+        await old.stop()
+        if outcome == "success":
+            old.commit_handoff(generation, replacement)
+            target = replacement
+        elif outcome == "failure":
+            await old.rollback_handoff(generation)
+            target = old
+        else:
+            transition_entered = asyncio.Event()
+
+            async def cancelled_transition() -> None:
+                try:
+                    transition_entered.set()
+                    await asyncio.Future()
+                finally:
+                    await old.rollback_handoff(generation)
+
+            transition = asyncio.create_task(cancelled_transition())
+            await transition_entered.wait()
+            transition.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await transition
+            target = old
+
+        await wait_for(lambda: len(sent) == 1)
+        await asyncio.sleep(0.03)
+
+        assert sent == ["recovered"]
+        assert not target._batches  # noqa: SLF001
+        await target.stop()
+        if target is replacement:
+            await old.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("outcome", ("success", "failure", "cancellation"))
+def test_handoff_resumes_only_unsent_multi_message_side_effects(outcome: str) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0
+        cfg.proactive.min_messages = 1
+        cfg.proactive.reply_message_delay_seconds = 0
+        second_started = asyncio.Event()
+        blocked_second_once = False
+        sent: list[str] = []
+        remembered: list[tuple[Any, Any]] = []
+
+        class ThreeReplyAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                return (
+                    '{"speak": true, "messages": ['
+                    '{"text": "one"}, {"text": "two"}, {"text": "three"}]}'
+                )
+
+        class MustNotRunAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                raise AssertionError("parsed replies must transfer without another Agent call")
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            nonlocal blocked_second_once
+            if text == "two" and not blocked_second_once:
+                blocked_second_once = True
+                second_started.set()
+                await asyncio.Future()
+            sent.append(text)
+
+        def remember(batch: Any, replies: Any) -> None:
+            remembered.append((batch, replies))
+
+        old = ProactiveSpeaker(
+            cfg,
+            ThreeReplyAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        replacement = ProactiveSpeaker(
+            cfg,
+            MustNotRunAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        old.observe(make_ev("send three", "multi-inflight"))
+        await asyncio.wait_for(second_started.wait(), 1)
+
+        generation = old.begin_handoff()
+        await old.stop()
+        if outcome == "success":
+            old.commit_handoff(generation, replacement)
+            target = replacement
+        elif outcome == "failure":
+            await old.rollback_handoff(generation)
+            target = old
+        else:
+            transition_entered = asyncio.Event()
+
+            async def cancelled_transition() -> None:
+                try:
+                    transition_entered.set()
+                    await asyncio.Future()
+                finally:
+                    await old.rollback_handoff(generation)
+
+            transition = asyncio.create_task(cancelled_transition())
+            await transition_entered.wait()
+            transition.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await transition
+            target = old
+
+        await wait_for(lambda: len(sent) == 3)
+        await asyncio.sleep(0.03)
+
+        assert sent == ["one", "two", "three"]
+        assert len(remembered) == 1
+        await target.stop()
+        if target is replacement:
+            await old.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("restriction", ("disabled", "global", "proactive"))
+def test_handoff_drops_batch_rejected_by_replacement_config(restriction: str) -> None:
+    async def go() -> None:
+        old_cfg = make_cfg()
+        old_cfg.proactive.batch_seconds = 60
+        old_cfg.proactive.min_messages = 1
+        new_cfg = deepcopy(old_cfg)
+        if restriction == "disabled":
+            new_cfg.proactive.enabled = False
+        elif restriction == "global":
+            new_cfg.allowed_groups = ["other"]
+        else:
+            new_cfg.proactive.allowed_groups = ["other"]
+        calls = 0
+        sent: list[str] = []
+
+        class Agent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                nonlocal calls
+                calls += 1
+                return '{"speak": true, "reply": "must not send"}'
+
+        async def send(*args: Any, **kwargs: Any) -> None:
+            sent.append("sent")
+
+        old = ProactiveSpeaker(old_cfg, Agent(), send)
+        replacement = ProactiveSpeaker(new_cfg, Agent(), send)
+        old.observe(make_ev("pending", f"transfer-{restriction}"))
+        generation = old.begin_handoff()
+        await old.stop()
+
+        old.commit_handoff(generation, replacement)
+        await asyncio.sleep(0.05)
+
+        assert calls == 0
+        assert sent == []
+        assert not replacement._batches  # noqa: SLF001
+        assert not replacement._timers  # noqa: SLF001
+        await replacement.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("restriction", ("disabled", "global", "proactive"))
+@pytest.mark.parametrize("stage", ("before-agent", "before-send"))
+def test_flush_rechecks_current_eligibility_before_agent_and_send(
+    restriction: str,
+    stage: str,
+) -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0.03 if stage == "before-agent" else 0
+        cfg.proactive.min_messages = 1
+        agent_entered = asyncio.Event()
+        release_agent = asyncio.Event()
+        calls = 0
+        sent: list[str] = []
+        remembered: list[object] = []
+
+        class Agent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                nonlocal calls
+                calls += 1
+                if stage == "before-send":
+                    agent_entered.set()
+                    await release_agent.wait()
+                return '{"speak": true, "reply": "must not send"}'
+
+        async def send(*args: Any, **kwargs: Any) -> None:
+            sent.append("sent")
+
+        speaker = ProactiveSpeaker(
+            cfg,
+            Agent(),
+            send,
+            remember=lambda *_args: remembered.append(object()),
+        )
+        speaker.observe(make_ev("pending", f"recheck-{restriction}-{stage}"))
+        if stage == "before-send":
+            await asyncio.wait_for(agent_entered.wait(), 1)
+        if restriction == "disabled":
+            cfg.proactive.enabled = False
+        elif restriction == "global":
+            cfg.allowed_groups = ["other"]
+        else:
+            cfg.proactive.allowed_groups = ["other"]
+        release_agent.set()
+        await asyncio.sleep(0.08)
+
+        assert calls == (0 if stage == "before-agent" else 1)
+        assert sent == []
+        assert remembered == []
+        await speaker.stop()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("handoff", (False, True))
+def test_timer_drain_detaches_repeatedly_cancellation_resistant_agent(
+    handoff: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def go() -> None:
+        monkeypatch.setattr(proactive_module, "PROACTIVE_TIMER_DRAIN_TIMEOUT_SECONDS", 0.02)
+        cfg = make_cfg()
+        cfg.proactive.batch_seconds = 0
+        cfg.proactive.min_messages = 1
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        cancellations = 0
+        sent: list[str] = []
+        remembered: list[str] = []
+
+        class ResistantAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                nonlocal cancellations
+                entered.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        cancellations += 1
+                return '{"speak": true, "reply": "stale"}'
+
+        class ReplacementAgent:
+            async def run(self, *args: Any, **kwargs: Any) -> str:
+                return '{"speak": true, "reply": "replacement"}'
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            sent.append(text)
+
+        def remember(_batch: Any, replies: Any) -> None:
+            remembered.extend(reply.text for reply in replies)
+
+        speaker = ProactiveSpeaker(
+            cfg,
+            ResistantAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        replacement = ProactiveSpeaker(
+            cfg,
+            ReplacementAgent(),
+            send,
+            remember=remember,
+        )  # type: ignore[arg-type]
+        speaker.observe(make_ev("resistant", f"resistant-{handoff}"))
+        await asyncio.wait_for(entered.wait(), 1)
+        generation = speaker.begin_handoff() if handoff else None
+
+        started = asyncio.get_running_loop().time()
+        stop_task = asyncio.create_task(speaker.stop())
+        await asyncio.sleep(0.06)
+        bounded = stop_task.done()
+        if not bounded:
+            release.set()
+        await asyncio.wait_for(stop_task, 1)
+        elapsed = asyncio.get_running_loop().time() - started
+        await speaker.stop()
+
+        if handoff:
+            assert generation is not None
+            speaker.commit_handoff(generation, replacement)
+            if bounded:
+                await wait_for(lambda: sent == ["replacement"])
+        release.set()
+        assert bounded
+        assert elapsed < 0.15
+        assert not speaker._timers  # noqa: SLF001
+        assert cancellations >= 1
+        await wait_for(lambda: not speaker._detached_tasks)  # noqa: SLF001
+        await asyncio.sleep(0.03)
+
+        assert sent == (["replacement"] if handoff else [])
+        assert remembered == (["replacement"] if handoff else [])
+        assert "group" not in speaker._last_proactive_sent_at  # noqa: SLF001
+        await replacement.stop()
 
     asyncio.run(go())
 
