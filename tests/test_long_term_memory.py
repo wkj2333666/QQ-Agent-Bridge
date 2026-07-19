@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import importlib
 from pathlib import Path
 import sqlite3
+from typing import Iterator
 
 import pytest
 
@@ -34,6 +37,27 @@ def _source(
         message_timestamp=created_at,
         created_at=created_at,
     )
+
+
+def test_public_module_reexports_domain_models() -> None:
+    public_module = importlib.import_module("qq_agent_bridge.long_term_memory")
+    models_module = importlib.import_module("qq_agent_bridge.long_term_memory_models")
+
+    for name in (
+        "MemoryScope",
+        "MemorySource",
+        "MemoryItem",
+        "MemoryProposal",
+        "MemoryStoreStatus",
+    ):
+        assert getattr(public_module, name) is getattr(models_module, name)
+
+
+def test_schema_and_migration_helpers_are_in_focused_internal_module() -> None:
+    schema_module = importlib.import_module("qq_agent_bridge.long_term_memory_schema")
+
+    assert schema_module.SCHEMA_VERSION == 1
+    assert callable(schema_module.migrate)
 
 
 @pytest.fixture
@@ -176,6 +200,46 @@ def test_scope_disable_prevents_late_review_commit(store: LongTermMemoryStore) -
     assert store.list_items(GROUP_A) == ()
 
 
+def test_collect_rechecks_enablement_inside_write_transaction(
+    store: LongTermMemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    disabling_store = LongTermMemoryStore(store.path)
+    disabling_store.initialize()
+    original_transaction = store._transaction
+    statements: list[str] = []
+    assert store._connection is not None
+    store._connection.set_trace_callback(statements.append)
+
+    @contextmanager
+    def disable_before_collect_transaction() -> Iterator[sqlite3.Connection]:
+        disabling_store.set_scope_enabled(GROUP_A, False)
+        with original_transaction() as conn:
+            yield conn
+
+    monkeypatch.setattr(store, "_transaction", disable_before_collect_transaction)
+    try:
+        source_id = store.collect(
+            _source(GROUP_A, "interleaved", "user-a", "must not be stored")
+        )
+    finally:
+        store._connection.set_trace_callback(None)
+        disabling_store.close()
+
+    assert source_id is None
+    assert not store.is_scope_enabled(GROUP_A)
+    assert store.pending_sources(GROUP_A, 10) == ()
+    begin_index = statements.index("BEGIN IMMEDIATE")
+    enabled_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "SELECT enabled FROM memory_scopes" in statement
+    )
+    assert begin_index < enabled_index
+    assert not any("INSERT INTO review_buffer" in statement for statement in statements)
+
+
 def test_commit_review_is_atomic_and_consumes_only_selected_scoped_sources(
     store: LongTermMemoryStore,
 ) -> None:
@@ -286,6 +350,19 @@ def test_expiry_and_decay_are_bounded_and_scope_independent(
     assert decayed is not None
     assert decayed.status == "dormant"
     assert store.retrieve_candidates(GROUP_A) == ()
+
+
+def test_expire_raw_deletes_source_at_exact_ttl_boundary(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    source_id = store.collect(
+        _source(GROUP_A, "ttl-boundary", "user-a", "expires now", created_at=1)
+    )
+    assert source_id is not None
+
+    assert store.expire_raw(604_801) == 1
+    assert store.pending_sources(GROUP_A, 10) == ()
 
 
 def test_memory_scope_rejects_incomplete_or_unknown_scopes() -> None:

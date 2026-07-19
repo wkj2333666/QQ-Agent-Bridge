@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -11,174 +10,23 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Iterable, Iterator, Literal, Sequence
+from typing import Iterable, Iterator, Sequence
 import uuid
 
-
-ScopeKind = Literal["group", "private"]
-MemoryStatusName = Literal[
-    "candidate", "active", "dormant", "contradicted", "rejected"
-]
-
-ALLOWED_CATEGORIES = frozenset(
-    {
-        "preference",
-        "identity",
-        "project",
-        "relationship",
-        "group_norm",
-        "recurring_topic",
-    }
+from .long_term_memory_models import (
+    ALLOWED_CATEGORIES,
+    ALLOWED_OPERATIONS,
+    ALLOWED_STATUSES,
+    INDEXED_STATUSES,
+    MemoryItem,
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+    MemoryStatusName,
+    MemoryStoreStatus,
+    ScopeKind,
 )
-ALLOWED_STATUSES = frozenset(
-    {"candidate", "active", "dormant", "contradicted", "rejected"}
-)
-ALLOWED_OPERATIONS = frozenset(
-    {"add", "revise", "reinforce", "contradict", "merge", "mark_candidate", "forget"}
-)
-INDEXED_STATUSES = frozenset({"active", "dormant"})
-SCHEMA_VERSION = 1
-
-
-@dataclass(frozen=True)
-class MemoryScope:
-    kind: ScopeKind
-    id: str
-
-    def __post_init__(self) -> None:
-        if self.kind not in {"group", "private"}:
-            raise ValueError("memory scope kind must be group or private")
-        normalized_id = str(self.id).strip()
-        if not normalized_id:
-            raise ValueError("memory scope id must not be empty")
-        object.__setattr__(self, "id", normalized_id)
-
-
-@dataclass(frozen=True)
-class MemorySource:
-    scope: MemoryScope
-    message_id: str
-    sender_id: str
-    text: str
-    message_timestamp: int
-    id: int | None = None
-    mentioned_ids: tuple[str, ...] = ()
-    quoted_sender_id: str | None = None
-    is_reply: bool = False
-    direct_interaction: bool = False
-    command_class: str | None = None
-    collection_reason: str = "ordinary_message"
-    explicit: bool = False
-    review_state: str = "pending"
-    attempt_count: int = 0
-    next_attempt_at: int = 0
-    created_at: int | None = None
-
-
-@dataclass(frozen=True)
-class MemoryItem:
-    id: str
-    short_id: str
-    scope: MemoryScope
-    subject_kind: str
-    subject_id: str
-    category: str
-    content: str
-    base_confidence: float
-    effective_score: float
-    status: MemoryStatusName
-    sensitivity: str
-    source_kind: str
-    source_count: int
-    explicit_memory: bool
-    decay_exempt: bool
-    created_at: int
-    updated_at: int
-    last_supported_at: int
-    expires_at: int | None
-    dormant_at: int | None
-    version: int
-
-
-@dataclass(frozen=True)
-class MemoryProposal:
-    operation: str
-    item_id: str | None = None
-    related_item_ids: tuple[str, ...] = ()
-    subject_kind: str | None = None
-    subject_id: str | None = None
-    category: str | None = None
-    content: str | None = None
-    confidence: float | None = None
-    status: str | None = None
-    sensitivity: str = "normal"
-    source_kind: str = "inferred"
-    explicit_memory: bool = False
-    decay_exempt: bool = False
-    expires_at: int | None = None
-    created_at: int | None = None
-    actor_class: str = "curator"
-
-    @classmethod
-    def add(
-        cls,
-        *,
-        subject_kind: str,
-        subject_id: str,
-        category: str = "preference",
-        content: str,
-        confidence: float = 0.75,
-        status: str = "active",
-        sensitivity: str = "normal",
-        source_kind: str = "inferred",
-        explicit_memory: bool = False,
-        decay_exempt: bool = False,
-        expires_at: int | None = None,
-        created_at: int | None = None,
-        actor_class: str = "curator",
-    ) -> MemoryProposal:
-        return cls(
-            operation="add",
-            subject_kind=subject_kind,
-            subject_id=subject_id,
-            category=category,
-            content=content,
-            confidence=confidence,
-            status=status,
-            sensitivity=sensitivity,
-            source_kind=source_kind,
-            explicit_memory=explicit_memory,
-            decay_exempt=decay_exempt,
-            expires_at=expires_at,
-            created_at=created_at,
-            actor_class=actor_class,
-        )
-
-    @classmethod
-    def reinforce(
-        cls,
-        item_id: str,
-        *,
-        confidence: float | None = None,
-        source_kind: str = "inferred",
-        actor_class: str = "curator",
-    ) -> MemoryProposal:
-        return cls(
-            operation="reinforce",
-            item_id=item_id,
-            confidence=confidence,
-            source_kind=source_kind,
-            actor_class=actor_class,
-        )
-
-
-@dataclass(frozen=True)
-class MemoryStoreStatus:
-    enabled: bool
-    pending_count: int
-    active_count: int
-    candidate_count: int
-    last_review_at: int | None
+from .long_term_memory_schema import SCHEMA_VERSION, migrate
 
 
 class LongTermMemoryStore:
@@ -222,7 +70,7 @@ class LongTermMemoryStore:
         connection.execute("PRAGMA synchronous = NORMAL")
         self._connection = connection
         try:
-            self._migrate()
+            migrate(connection)
             os.chmod(self.path, 0o600)
         except BaseException:
             connection.close()
@@ -259,10 +107,10 @@ class LongTermMemoryStore:
             )
 
     def collect(self, source: MemorySource) -> int | None:
-        if not self.is_scope_enabled(source.scope):
-            return None
         created_at = int(source.created_at or time.time())
         with self._transaction() as conn:
+            if not self._is_scope_enabled_conn(conn, source.scope):
+                return None
             cursor = conn.execute(
                 """
                 INSERT INTO review_buffer(
@@ -543,7 +391,7 @@ class LongTermMemoryStore:
         cutoff = int(now) - self.raw_ttl_seconds
         with self._transaction() as conn:
             cursor = conn.execute(
-                "DELETE FROM review_buffer WHERE created_at < ?",
+                "DELETE FROM review_buffer WHERE created_at <= ?",
                 (cutoff,),
             )
         return max(0, int(cursor.rowcount))
@@ -666,136 +514,6 @@ class LongTermMemoryStore:
             raise
         else:
             conn.execute("COMMIT")
-
-    def _migrate(self) -> None:
-        conn = self._conn
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"memory database schema {version} is newer than supported {SCHEMA_VERSION}"
-            )
-        try:
-            conn.executescript(
-                f"""
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS memory_scopes (
-                    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('group', 'private')),
-                    scope_id TEXT NOT NULL,
-                    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
-                    updated_at INTEGER NOT NULL,
-                    PRIMARY KEY(scope_kind, scope_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS review_buffer (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('group', 'private')),
-                    scope_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    sender_id TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    message_timestamp INTEGER NOT NULL,
-                    mentioned_ids_json TEXT NOT NULL DEFAULT '[]',
-                    quoted_sender_id TEXT,
-                    is_reply INTEGER NOT NULL DEFAULT 0 CHECK(is_reply IN (0, 1)),
-                    direct_interaction INTEGER NOT NULL DEFAULT 0
-                        CHECK(direct_interaction IN (0, 1)),
-                    command_class TEXT,
-                    collection_reason TEXT NOT NULL,
-                    explicit_source INTEGER NOT NULL DEFAULT 0
-                        CHECK(explicit_source IN (0, 1)),
-                    review_state TEXT NOT NULL DEFAULT 'pending',
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL,
-                    UNIQUE(scope_kind, scope_id, message_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_review_buffer_pending
-                    ON review_buffer(scope_kind, scope_id, review_state,
-                                     next_attempt_at, created_at);
-                CREATE INDEX IF NOT EXISTS idx_review_buffer_ttl
-                    ON review_buffer(created_at);
-
-                CREATE TABLE IF NOT EXISTS memory_items (
-                    id TEXT PRIMARY KEY,
-                    short_id TEXT NOT NULL UNIQUE,
-                    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('group', 'private')),
-                    scope_id TEXT NOT NULL,
-                    subject_kind TEXT NOT NULL,
-                    subject_id TEXT NOT NULL,
-                    category TEXT NOT NULL CHECK(category IN (
-                        'preference', 'identity', 'project', 'relationship',
-                        'group_norm', 'recurring_topic'
-                    )),
-                    content TEXT NOT NULL,
-                    base_confidence REAL NOT NULL CHECK(base_confidence BETWEEN 0 AND 1),
-                    effective_score REAL NOT NULL CHECK(effective_score BETWEEN 0 AND 1),
-                    status TEXT NOT NULL CHECK(status IN (
-                        'candidate', 'active', 'dormant', 'contradicted', 'rejected'
-                    )),
-                    sensitivity TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    source_count INTEGER NOT NULL DEFAULT 1,
-                    explicit_memory INTEGER NOT NULL DEFAULT 0
-                        CHECK(explicit_memory IN (0, 1)),
-                    decay_exempt INTEGER NOT NULL DEFAULT 0
-                        CHECK(decay_exempt IN (0, 1)),
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    last_supported_at INTEGER NOT NULL,
-                    expires_at INTEGER,
-                    dormant_at INTEGER,
-                    version INTEGER NOT NULL DEFAULT 1
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status
-                    ON memory_items(scope_kind, scope_id, status, effective_score);
-                CREATE INDEX IF NOT EXISTS idx_memory_items_subject
-                    ON memory_items(scope_kind, scope_id, subject_kind, subject_id, status);
-
-                CREATE TABLE IF NOT EXISTS memory_revisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    item_id TEXT REFERENCES memory_items(id) ON DELETE SET NULL,
-                    operation TEXT NOT NULL,
-                    actor_class TEXT NOT NULL,
-                    before_summary TEXT,
-                    after_summary TEXT,
-                    evidence_excerpt TEXT,
-                    deleted_item_hash TEXT,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_revisions_item
-                    ON memory_revisions(item_id, created_at);
-
-                CREATE TABLE IF NOT EXISTS review_runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scope_hash TEXT NOT NULL,
-                    trigger_class TEXT NOT NULL,
-                    source_count INTEGER NOT NULL,
-                    proposed_count INTEGER NOT NULL,
-                    accepted_count INTEGER NOT NULL,
-                    candidate_count INTEGER NOT NULL,
-                    rejected_count INTEGER NOT NULL,
-                    duration_ms INTEGER NOT NULL,
-                    retry_count INTEGER NOT NULL,
-                    error_class TEXT,
-                    started_at INTEGER NOT NULL,
-                    finished_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_review_runs_scope
-                    ON review_runs(scope_hash, finished_at);
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-                    item_id UNINDEXED,
-                    content,
-                    tokenize = 'unicode61'
-                );
-                PRAGMA user_version = {SCHEMA_VERSION};
-                COMMIT;
-                """
-            )
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
 
     def _apply_operation(
         self,
