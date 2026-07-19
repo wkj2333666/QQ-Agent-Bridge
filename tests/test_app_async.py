@@ -19,6 +19,7 @@ from qq_agent_bridge.cursor_adapter import CustomCommandAdapter  # type: ignore
 from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore  # type: ignore
 from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope, MemorySource  # type: ignore
 from qq_agent_bridge.main import App  # type: ignore
+from qq_agent_bridge.memory_commands import MemoryCommandResult  # type: ignore
 from qq_agent_bridge.onebot import _normalize_event  # type: ignore
 from qq_agent_bridge.policy import Job, Policy  # type: ignore
 from qq_agent_bridge.redactor import strip_ansi  # type: ignore
@@ -143,6 +144,7 @@ def make_cfg() -> BridgeConfig:
             "stop": True,
             "reload": True,
             "schedule": True,
+            "memory": "user",
         },
         workspaces={"/tmp": True},
         dangerous_requires_confirm=True,
@@ -3456,7 +3458,7 @@ def test_reset_clears_current_conversation_memory() -> None:
         await app._handle(make_ev("/ask 第一轮", group="group", mid="reset-1"))
         await wait_until_sent(adapter, "reply 1")
         await app._handle(make_ev("/reset", sender="owner", group="group", mid="reset-2"))
-        await wait_until_sent(adapter, "已清空当前会话记忆和最近群聊背景")
+        await wait_until_sent(adapter, "长期记忆不受影响")
         await app._handle(make_ev("/ask 第二轮", group="group", mid="reset-3"))
         await wait_until_sent(adapter, "reply 2")
 
@@ -3466,6 +3468,50 @@ def test_reset_clears_current_conversation_memory() -> None:
         assert "ambient 背景" not in prompts[1]
 
     asyncio.run(go())
+
+
+def test_memory_command_routes_before_agent_jobs() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        agent_calls: list[str] = []
+
+        async def runner(job: Any) -> str:
+            agent_calls.append(job.cmd)
+            return "unexpected"
+
+        class FakeMemoryCommands:
+            def __init__(self) -> None:
+                self.calls: list[tuple[ChatEvent, str]] = []
+
+            async def handle(self, ev: ChatEvent, args: str) -> MemoryCommandResult:
+                self.calls.append((ev, args))
+                return MemoryCommandResult("长期记忆状态")
+
+        app = make_app(cfg, runner, adapter)
+        service = FakeMemoryCommands()
+        app.memory_commands = service  # type: ignore[assignment]
+
+        await app._handle(make_ev("/memory", group="group", mid="memory-route"))
+
+        assert service.calls and service.calls[0][1] == ""
+        assert agent_calls == []
+        assert any("长期记忆状态" in sent[2] for sent in adapter.sent)
+
+    asyncio.run(go())
+
+
+def test_permission_view_reports_memory_default_and_group_override() -> None:
+    cfg = make_cfg()
+    cfg.commands.pop("memory", None)
+    app = App(cfg)
+
+    default = app._permission_view_reply(make_ev("/permission", sender="owner", group="group"))
+    cfg.command_groups = {"group": {"memory": "disabled"}}
+    overridden = app._permission_view_reply(make_ev("/permission", sender="owner", group="group"))
+
+    assert "/memory：全局 user，本群 -，生效 user" in default
+    assert "/memory：全局 user，本群 disabled，生效 disabled" in overridden
 
 
 def test_reset_clears_pending_proactive_batch() -> None:

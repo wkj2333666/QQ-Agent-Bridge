@@ -32,6 +32,7 @@ COMMANDS: set[str] = {
     "reset",
     "reload",
     "schedule",
+    "memory",
 }
 READ_ONLY_COMMANDS: set[str] = {
     "ask",
@@ -135,11 +136,7 @@ class Policy:
         elif not self.cfg.is_user_allowed(ev.sender_id):
             return False, "user-denied"
         group_id = ev.chat_id if ev.is_group else None
-        access = (
-            self.cfg.command_access(cmd, group_id)
-            if group_id is not None
-            else self.cfg.command_access(cmd)
-        )
+        access = self._command_access(cmd, group_id)
         if access == "disabled":
             return False, "cmd-disabled"
         if access == "owner" and not self.cfg.is_owner(ev.sender_id):
@@ -148,6 +145,18 @@ class Policy:
             return False, "ws-denied"
         self.seen[ev.id] = time.time()
         return True, "ok"
+
+    def _command_access(self, cmd: str, group_id: str | None) -> str:
+        """Keep /memory opt-in at the scope layer, not disabled at command parsing."""
+        if cmd == "memory" and "memory" not in self.cfg.commands:
+            group_commands = self.cfg.command_groups.get(str(group_id), {}) if group_id else {}
+            if "memory" not in group_commands:
+                return "user"
+        return (
+            self.cfg.command_access(cmd, group_id)
+            if group_id is not None
+            else self.cfg.command_access(cmd)
+        )
 
     def start_job(self, ev: ChatEvent, cmd: ParsedCommand) -> tuple[str, str | None]:
         jid = f"j{int(time.time()*1000)}-{secrets.token_hex(3)}"

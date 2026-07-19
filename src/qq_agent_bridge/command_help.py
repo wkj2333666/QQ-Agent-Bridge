@@ -133,6 +133,29 @@ COMMAND_HELP_METADATA: dict[str, CommandHelpSpec] = {
         ),
         restrictions=("只用于群聊；查看需命令可用，设置和清除仅群 owner 可执行。",),
     ),
+    "memory": CommandHelpSpec(
+        summary="查看和管理当前群或私聊的长期记忆。",
+        usage=(
+            "/memory [status]",
+            "/memory enable|disable",
+            "/memory remember <内容>",
+            "/memory list [group|me|candidate] [页码]",
+            "/memory show|confirm|forget <序号或短ID>",
+            "/memory correct <序号或短ID> <新内容>",
+            "/memory clear me|group|user <QQ>",
+            "/memory review now",
+            "/memory <自然语言请求>",
+        ),
+        examples=(
+            "/memory remember 我喜欢简短回答",
+            "/memory list me",
+            "/memory 忘掉我之前准备考研这件事",
+        ),
+        restrictions=(
+            "默认按当前群或私聊严格隔离；群成员只能管理自己，群 owner 可管理群主体。",
+            "清空操作必须使用限时确认令牌再次确认。",
+        ),
+    ),
 }
 
 # Short aliases make the metadata easy to consume from later command routing.
@@ -191,6 +214,8 @@ def _permission_line(access: str, ev: ChatEvent) -> str:
 
 def _effective_access(name: str, cfg: Any, ev: ChatEvent) -> str:
     group_id = _group_id(ev)
+    if name == "memory" and not _has_explicit_memory_access(cfg, group_id):
+        return "user"
     resolver = getattr(cfg, "command_access", None)
     if callable(resolver):
         if group_id is not None:
@@ -215,6 +240,19 @@ def _effective_access(name: str, cfg: Any, ev: ChatEvent) -> str:
         if override is not _MISSING:
             return _normalize_access(override, name)
     return _normalize_access(global_access, name)
+
+
+def _has_explicit_memory_access(cfg: Any, group_id: str | None) -> bool:
+    commands = getattr(cfg, "commands", {})
+    if isinstance(commands, Mapping) and "memory" in commands:
+        return True
+    if group_id is None:
+        return False
+    groups = getattr(cfg, "command_groups", {})
+    if not isinstance(groups, Mapping):
+        return False
+    group = groups.get(str(group_id), {})
+    return isinstance(group, Mapping) and "memory" in group
 
 
 def _group_id(ev: Any) -> str | None:
