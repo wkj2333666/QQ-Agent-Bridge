@@ -38,6 +38,8 @@ class AgentConfig:
     share_network: bool = False
     bwrap_binary: str = "bwrap"
     force_task_tools: bool = True
+    hardened_read_only: bool = False
+    log_subprocess_output: bool = True
     sandbox_home: str = "~/.local/state/qq-agent-bridge/agent-home"
     chat_model: str = "auto"
     task_model: str = "composer"

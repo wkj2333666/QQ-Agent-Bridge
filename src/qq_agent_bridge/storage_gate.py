@@ -5,7 +5,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
+import os
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any
 
 from .agent_runtime import ProgressCallback, build_agent_adapter, run_agent
@@ -127,17 +130,42 @@ def build_restricted_agent_adapter(
 ) -> GatedAgentAdapter:
     """Build an isolated ask-only adapter configuration for background analysis."""
     restricted = deepcopy(cfg)
-    resolved_workspace = str(Path(workspace).expanduser().resolve(strict=False))
+    resolved_workspace = str(_create_private_curator_workspace())
     restricted.workspaces = {resolved_workspace: True}
+    restricted.agent.runtime = "cursor-cli"
+    restricted.agent.command = {}
     restricted.max_runtime_seconds = max(1, int(timeout_seconds))
     restricted.max_output_chars = max(1, int(max_output_chars))
     restricted.agent.default_workspace = resolved_workspace
     restricted.agent.use_bwrap = True
     restricted.agent.share_network = False
     restricted.agent.force_task_tools = False
+    restricted.agent.hardened_read_only = True
+    restricted.agent.log_subprocess_output = False
     restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
     restricted.agent.max_output_chars = restricted.max_output_chars
     restricted.agent.trace_enabled = False
     restricted.progress.enabled = False
     restricted.resources.enabled = False
     return GatedAgentAdapter(build_agent_adapter(restricted), gate)
+
+
+def _create_private_curator_workspace() -> Path:
+    home = Path.home().resolve(strict=True)
+    root = home / ".local" / "state" / "qq-agent-bridge"
+    current = home
+    for part in root.relative_to(home).parts:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            current.mkdir(mode=0o700)
+            metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("private application state path must contain directories only")
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+            raise ValueError("private application state path is not safely owned")
+    root.chmod(0o700)
+    workspace = Path(tempfile.mkdtemp(prefix="curator-workspace-", dir=root))
+    workspace.chmod(0o700)
+    return workspace

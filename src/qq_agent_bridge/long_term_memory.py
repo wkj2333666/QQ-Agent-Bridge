@@ -552,22 +552,45 @@ class LongTermMemoryStore:
         trigger_class: str = "review",
         now: int | None = None,
     ) -> int:
+        return self.mark_review_failures(
+            scope,
+            tuple((source_id, next_attempt_at) for source_id in source_ids),
+            error_class=error_class,
+            trigger_class=trigger_class,
+            now=now,
+        )
+
+    def mark_review_failures(
+        self,
+        scope: MemoryScope,
+        source_deadlines: Sequence[tuple[int, int]],
+        *,
+        error_class: str,
+        trigger_class: str = "review",
+        now: int | None = None,
+    ) -> int:
         current = int(time.time()) if now is None else int(now)
-        unique_ids = tuple(dict.fromkeys(int(value) for value in source_ids))
-        if not unique_ids:
+        deadlines = {
+            int(source_id): int(next_attempt_at)
+            for source_id, next_attempt_at in source_deadlines
+        }
+        if not deadlines:
             return 0
         with self._transaction() as conn:
-            self._require_scoped_sources(conn, scope, unique_ids)
-            placeholders = ",".join("?" for _ in unique_ids)
-            cursor = conn.execute(
-                f"""
+            source_ids = tuple(deadlines)
+            self._require_scoped_sources(conn, scope, source_ids)
+            updated = 0
+            for source_id, next_attempt_at in deadlines.items():
+                cursor = conn.execute(
+                    """
                 UPDATE review_buffer
                 SET attempt_count = attempt_count + 1, next_attempt_at = ?
                 WHERE scope_kind = ? AND scope_id = ?
-                  AND id IN ({placeholders})
-                """,
-                (int(next_attempt_at), *self._scope_params(scope), *unique_ids),
-            )
+                  AND id = ?
+                    """,
+                    (next_attempt_at, *self._scope_params(scope), source_id),
+                )
+                updated += max(0, int(cursor.rowcount))
             conn.execute(
                 """
                 INSERT INTO review_runs(
@@ -579,13 +602,13 @@ class LongTermMemoryStore:
                 (
                     self._scope_hash(scope),
                     trigger_class,
-                    len(unique_ids),
+                    len(source_ids),
                     str(error_class),
                     current,
                     current,
                 ),
             )
-        return max(0, int(cursor.rowcount))
+        return updated
 
     @property
     def _conn(self) -> sqlite3.Connection:

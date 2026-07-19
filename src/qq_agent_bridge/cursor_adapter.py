@@ -83,6 +83,13 @@ class CursorAdapter:
         normalized = " ".join(text.lower().split())
         return "enospc" in normalized or "no space left on device" in normalized
 
+    def _process_error_class(self, text: str) -> str:
+        if self._is_usage_limit_error(text):
+            return "usage_limit"
+        if self._is_storage_exhaustion_error(text):
+            return "storage_exhaustion"
+        return "process_exit"
+
     def _build_cmd(
         self,
         prompt: str,
@@ -91,8 +98,14 @@ class CursorAdapter:
         model: str | None,
         stream: bool = False,
     ) -> list[str]:
+        if self.cfg.agent.hardened_read_only and mode != "ask":
+            raise ValueError("hardened read-only agent only supports ask mode")
         cursor_cmd: list[str] = [self.binary, "-p", "--workspace", workspace]
-        cursor_sandbox = "disabled" if self.cfg.agent.use_bwrap else "enabled"
+        cursor_sandbox = (
+            "enabled"
+            if self.cfg.agent.hardened_read_only or not self.cfg.agent.use_bwrap
+            else "disabled"
+        )
         if model:
             cursor_cmd.extend(["--model", model])
         if stream:
@@ -470,20 +483,31 @@ class CursorAdapter:
                     except Exception:  # noqa: BLE001 - progress should not fail the job
                         logger.exception("progress callback failed")
             if proc.returncode:
-                logger.warning(
-                    "agent process failed with exit code %s: %s",
-                    proc.returncode,
-                    redact(cleaned, extra=redact_extra)[:1000],
-                )
+                error_class = self._process_error_class(cleaned)
+                if self.cfg.agent.log_subprocess_output:
+                    logger.warning(
+                        "agent process failed with exit code %s: %s",
+                        proc.returncode,
+                        redact(cleaned, extra=redact_extra)[:1000],
+                    )
+                else:
+                    logger.warning(
+                        "agent process failed: error_class=%s exit_code=%s",
+                        error_class,
+                        proc.returncode,
+                    )
                 if (
                     model
                     and str(model).strip().lower() != "auto"
                     and self._is_usage_limit_error(cleaned)
                 ):
-                    logger.warning(
-                        "model %s hit its usage limit; retrying once with Auto",
-                        model,
-                    )
+                    if self.cfg.agent.log_subprocess_output:
+                        logger.warning(
+                            "model %s hit its usage limit; retrying once with Auto",
+                            model,
+                        )
+                    else:
+                        logger.warning("agent retry: error_class=usage_limit")
                     if progress:
                         try:
                             await progress("指定模型额度已用尽，正在切换 Auto 重试。")
@@ -516,7 +540,10 @@ class CursorAdapter:
             return "[error] 助手暂时不可用"
         except Exception as e:  # noqa: BLE001
             trace.record("lifecycle", "error", summary=type(e).__name__)
-            logger.exception("agent run error")
+            if self.cfg.agent.log_subprocess_output:
+                logger.exception("agent run error")
+            else:
+                logger.warning("agent run error: error_class=%s", type(e).__name__)
             return f"[error] 助手执行失败：{type(e).__name__}"
         finally:
             trace.record(

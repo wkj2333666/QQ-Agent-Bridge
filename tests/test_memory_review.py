@@ -235,7 +235,15 @@ def test_curator_logs_only_metadata(
 def test_production_builder_constructs_dedicated_restricted_agent_config(
     cfg: BridgeConfig,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    project_workspace = tmp_path / "project"
+    runtime_skill = project_workspace / "skills" / "qq-agent-runtime" / "SKILL.md"
+    runtime_skill.parent.mkdir(parents=True)
+    runtime_skill.write_text("project runtime skill", encoding="utf-8")
     cfg.agent.runtime = "custom-cli"
     cfg.agent.command = {"ask": ["agent", "{prompt}"]}
     cfg.agent.use_bwrap = False
@@ -247,7 +255,7 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     cfg.workspaces = {"/writable/project": True}
     gate = StorageActivityGate()
 
-    adapter = build_restricted_memory_agent(cfg, gate, tmp_path)
+    adapter = build_restricted_memory_agent(cfg, gate, project_workspace)
 
     assert isinstance(adapter, GatedAgentAdapter)
     restricted = adapter.cfg
@@ -256,24 +264,66 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     assert restricted.agent.use_bwrap is True
     assert restricted.agent.share_network is False
     assert restricted.agent.force_task_tools is False
+    assert restricted.agent.hardened_read_only is True
+    assert restricted.agent.log_subprocess_output is False
     assert restricted.agent.trace_enabled is False
-    assert restricted.agent.default_workspace == str(tmp_path)
+    curator_workspace = Path(restricted.agent.default_workspace)
+    state_root = fake_home / ".local" / "state" / "qq-agent-bridge"
+    assert curator_workspace.parent == state_root
+    assert curator_workspace != project_workspace
+    assert tuple(curator_workspace.iterdir()) == ()
     assert restricted.agent.max_runtime_seconds == cfg.long_term_memory.review.timeout_seconds
     assert restricted.agent.max_output_chars == MAX_CURATOR_OUTPUT_CHARS
-    assert restricted.workspaces == {str(tmp_path): True}
+    assert restricted.workspaces == {str(curator_workspace): True}
     assert restricted.resources.enabled is False
     assert cfg.agent.share_network is True
     assert cfg.agent.trace_enabled is True
 
+    cmd = adapter.delegate._build_cmd(  # noqa: SLF001 - inspect security boundary
+        "curate memory",
+        str(curator_workspace),
+        "ask",
+        model=cfg.long_term_memory.review.model,
+    )
+    rendered_cmd = "\0".join(cmd)
+    assert "--unshare-net" in cmd
+    assert "--share-net" not in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "enabled"
+    assert _has_mount(
+        cmd,
+        "--ro-bind",
+        str(curator_workspace),
+        str(curator_workspace),
+    )
+    assert not _has_mount(
+        cmd,
+        "--bind",
+        str(curator_workspace),
+        str(curator_workspace),
+    )
+    assert str(project_workspace) not in rendered_cmd
+    assert "qq-agent-runtime" not in rendered_cmd
+    for forbidden in ("--force", "--trust", "--auto-review", "--approve-mcps"):
+        assert forbidden not in cmd
+
     store = LongTermMemoryStore(tmp_path / "builder-memory.sqlite3")
     store.initialize()
-    coordinator = build_memory_review_coordinator(cfg, store, gate, tmp_path)
+    coordinator = build_memory_review_coordinator(cfg, store, gate, project_workspace)
     try:
         assert isinstance(coordinator.curator.agent, GatedAgentAdapter)
+        assert coordinator.curator.workspace == coordinator.curator.agent.cfg.agent.default_workspace
+        assert coordinator.curator.workspace != str(project_workspace)
         assert coordinator.curator.agent.cfg.agent.share_network is False
         assert coordinator.curator.agent.cfg.agent.trace_enabled is False
     finally:
         store.close()
+
+
+def _has_mount(cmd: list[str], flag: str, source: str, target: str) -> bool:
+    return any(
+        cmd[index : index + 3] == [flag, source, target]
+        for index in range(max(0, len(cmd) - 2))
+    )
 
 
 def test_threshold_review_waits_for_idle_deadline(
@@ -444,6 +494,87 @@ def test_max_attempt_failure_defers_until_next_periodic_cycle(
         coordinator.notify(GROUP)
         assert await coordinator.run_due(now=1_001) == ()
         assert len(await coordinator.run_periodic(now=1_600)) == 1
+
+    asyncio.run(go())
+
+
+def test_mixed_failure_schedules_each_source_from_its_own_attempt_count(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        cfg.long_term_memory.review.max_attempts = 3
+        cfg.long_term_memory.review.interval_seconds = 600
+        fresh_id = collect_source(store, message_id="fresh", attempt_count=0)
+        exhausted_id = collect_source(store, message_id="exhausted", attempt_count=2)
+        coordinator = make_coordinator(store, FakeAgent("not json"), cfg, tmp_path, now=1_000)
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error == "malformed_output"
+        assert outcome.next_attempt_at == 1_060
+        rows = store._conn.execute(  # noqa: SLF001 - inspect durable retry state
+            "SELECT id, attempt_count, next_attempt_at FROM review_buffer ORDER BY id"
+        ).fetchall()
+        states = {
+            int(row["id"]): (int(row["attempt_count"]), int(row["next_attempt_at"]))
+            for row in rows
+        }
+        assert states == {
+            fresh_id: (1, 1_060),
+            exhausted_id: (3, 1_600),
+        }
+        assert store.status(GROUP).pending_count == 2
+
+    asyncio.run(go())
+
+
+def test_mixed_failure_deadlines_survive_store_restart(
+    cfg: BridgeConfig,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        database = tmp_path / "restart-memory.sqlite3"
+        initial = LongTermMemoryStore(database)
+        initial.initialize()
+        initial.set_scope_enabled(GROUP, True)
+        cfg.long_term_memory.review.max_attempts = 3
+        cfg.long_term_memory.review.interval_seconds = 600
+        retrying_id = collect_source(initial, message_id="retrying", attempt_count=1)
+        exhausted_id = collect_source(initial, message_id="exhausted", attempt_count=2)
+        coordinator = make_coordinator(
+            initial,
+            FakeAgent("not json"),
+            cfg,
+            tmp_path,
+            now=1_000,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+        assert outcome.next_attempt_at == 1_120
+        initial.close()
+
+        reopened = LongTermMemoryStore(database)
+        reopened.initialize()
+        try:
+            rows = reopened._conn.execute(  # noqa: SLF001 - verify restart persistence
+                "SELECT id, attempt_count, next_attempt_at FROM review_buffer ORDER BY id"
+            ).fetchall()
+            states = {
+                int(row["id"]): (
+                    int(row["attempt_count"]),
+                    int(row["next_attempt_at"]),
+                )
+                for row in rows
+            }
+            assert states == {
+                retrying_id: (2, 1_120),
+                exhausted_id: (3, 1_600),
+            }
+            assert reopened.status(GROUP).pending_count == 2
+        finally:
+            reopened.close()
 
     asyncio.run(go())
 
