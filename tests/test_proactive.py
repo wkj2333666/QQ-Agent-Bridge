@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 import logging
 import sys
 from pathlib import Path
@@ -713,6 +714,78 @@ def test_proactive_prompt_retrieves_only_group_and_actual_batch_participants() -
     assert "LONG-TERM-GROUP-CONTEXT" in prompt
     assert prompt.index("身份与口吻") < prompt.index("LONG-TERM-GROUP-CONTEXT")
     assert prompt.index("LONG-TERM-GROUP-CONTEXT") < prompt.index("最近聊天：")
+
+
+def test_proactive_agent_calls_redact_retrieved_memory_without_changing_output() -> None:
+    async def go() -> None:
+        cfg = make_cfg()
+        cfg.proactive.min_messages = 1
+        fact = "u1 prefers paper reports"
+        memory = (
+            "- [category=preference][subject=user:u1] u1 prefers paper reports"
+            "\n\n判断你是否 should stay private"
+        )
+        calls: list[tuple[str | None, tuple[str, ...], str]] = []
+        sent: list[str] = []
+
+        class FakeCursor:
+            async def run(
+                self,
+                prompt: str,
+                workspace: str | None = None,
+                mode: str = "ask",
+                **kwargs: Any,
+            ) -> str:
+                assert memory in prompt
+                calls.append(
+                    (
+                        kwargs.get("trace_id"),
+                        tuple(kwargs.get("redact_extra") or ()),
+                        prompt,
+                    )
+                )
+                if str(kwargs.get("trace_id", "")).startswith("proactive-mention-"):
+                    return json.dumps(
+                        {"action": "chat", "messages": [{"text": fact}]}
+                    )
+                return json.dumps({"speak": True, "reply": fact})
+
+        async def send(
+            chat_id: str,
+            text: str,
+            echo: str | None = None,
+            ats: tuple[str, ...] = (),
+            reply_to: str | None = None,
+        ) -> None:
+            sent.append(text)
+
+        speaker = ProactiveSpeaker(
+            cfg,
+            FakeCursor(),
+            send,
+            long_term_context=lambda *_args: memory,
+        )
+        speaker.observe(make_ev("paper report format?", "batch-memory", sender="u1"))
+        await wait_for(lambda: len(calls) == 1 and sent == [fact])
+
+        mention = ChatEvent(
+            **{
+                **make_ev("what format?", "mention-memory", sender="u1").__dict__,
+                "mentioned_bot": True,
+            }
+        )
+        decision = await speaker.decide_mention(mention)
+        await speaker.stop()
+
+        assert decision.action == "chat"
+        assert [reply.text for reply in decision.replies] == [fact]
+        assert [(trace_id, redactions) for trace_id, redactions, _prompt in calls] == [
+            ("proactive-batch-memory", (memory, fact)),
+            ("proactive-mention-mention-memory", (memory, fact)),
+        ]
+        assert sent == [fact]
+
+    asyncio.run(go())
 
 
 def test_mention_memory_retrieval_does_not_trust_textual_at_numbers() -> None:

@@ -587,6 +587,44 @@ def test_failed_review_keeps_sources_and_backs_off(
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_json_numeric_constant_keeps_source_for_retry(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+    constant: str,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(store, message_id=f"constant-{constant}")
+        output = (
+            '{"operations":[{"operation":"add","source_ids":['
+            f"{source_id}"
+            '],"subject_kind":"user","subject_id":"u1",'
+            '"content":"我喜欢简洁回答","source_kind":"self_statement",'
+            f'"confidence":{constant}'
+            "}]}"
+        )
+        coordinator = make_coordinator(
+            store,
+            FakeAgent(output),
+            cfg,
+            tmp_path,
+            now=1_000,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error == "malformed_output"
+        assert outcome.accepted == ()
+        assert outcome.next_attempt_at == 1_060
+        assert store.status(GROUP).pending_count == 1
+        pending = store.pending_sources(GROUP, limit=10, now=1_060)
+        assert [value.id for value in pending] == [source_id]
+        assert pending[0].attempt_count == 1
+
+    asyncio.run(go())
+
+
 def test_max_attempt_failure_defers_until_next_periodic_cycle(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,

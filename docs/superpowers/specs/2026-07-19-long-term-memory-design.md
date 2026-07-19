@@ -309,7 +309,8 @@ blanket confirmation authority.
 - messages sent by the bot;
 - profile text, system prompts, runtime skills, and hidden context;
 - passwords, access tokens, cookies, private keys, approval nonces, or credentials,
-  including mixed Chinese/English label-assignment forms;
+  including NFKC-normalized full-width text, mixed Chinese/English label-assignment
+  forms, and standard environment names such as `AWS_ACCESS_KEY_ID`;
 - raw file, image, audio, video, and forwarded-record payloads;
 - unsupported cross-scope references;
 - instructions that attempt to change bot personality, permissions, or behavior.
@@ -327,7 +328,8 @@ relationships, political or religious affiliation, and similarly sensitive perso
 facts require an explicit remember request by the subject. Owner confirmation alone
 cannot bypass this requirement. Legal-name statements, WeChat/contact handles, and
 postal addresses precise to street and house number are included in this rule and
-never activate through normal background review.
+never activate through normal background review. Legal-name and precise-address
+detection tolerates ordinary punctuation and spacing, including `我家住` forms.
 
 Passwords, tokens, cookies, private keys, recovery codes, and authentication secrets
 are never stored even when explicitly requested.
@@ -368,9 +370,10 @@ ask invocation:
   App shutdown, and startup failure; cleanup is limited to adapter-owned private paths.
 
 The prompt labels all QQ content and existing memories as untrusted data. It includes
-the evidence rules and an exact JSON schema with `source_ids`. Duplicate keys are
-rejected before schema validation. The curator may propose at most a configured small
-operation count per batch.
+the evidence rules and an exact JSON schema with `source_ids`. Duplicate keys and
+non-JSON numeric constants (`NaN`, `Infinity`, and `-Infinity`) are rejected before
+schema validation. The curator may propose at most a configured small operation count
+per batch.
 
 Allowed operations are:
 
@@ -384,9 +387,12 @@ mark_candidate
 forget
 ```
 
-The automatic curator may only propose `forget` for expiry, proven replacement, or
-merging. User-requested hard deletion is handled by the command service and does not
-depend on model permission.
+The automatic curator may only propose `forget` for a stored expiry that has actually
+elapsed or for resolved same-subject/category replacement items whose content is also
+affirmatively supported by the cited source batch. A fabricated, unrelated, or merely
+named related ID grants no delete authority. This proof remains mandatory when an
+authorized user triggers `/memory review now`. User-requested hard deletion is handled
+by the deterministic command service and does not depend on model permission.
 
 ## Validation and Failure Semantics
 
@@ -407,6 +413,13 @@ Cross-scope access, unauthorized subjects, third-party personal claims, forbidde
 categories, secrets, excessive length, or invalid state transitions reject only that
 operation. Other valid operations in the batch may commit. Logs store a fixed reason
 code, not content.
+
+Extractive matching is necessary but not sufficient evidence. The deterministic
+validator preserves enough source structure to reject matches that occur only inside
+quotes, negations, examples, output instructions, forget requests, or explicit
+do-not-store/do-not-remember contexts. Curator confidence cannot override this polarity
+and consent gate; ambiguous support becomes a candidate only when the deterministic
+gate permits it, otherwise the operation is rejected.
 
 ### Low confidence
 
@@ -483,9 +496,10 @@ It returns at most 12 items and 1500 characters by default.
 Candidates, rejected items, dormant items, contradicted losers, and expired items do
 not enter normal prompts.
 
-Retrieved item content is added to normal Agent trace/log redaction values. This
-redaction applies to diagnostic sinks only; the assistant result remains available to
-the normal output delivery path.
+Retrieved item content is added to normal and proactive Agent trace/log redaction
+values, including both unmentioned batch decisions and direct-mention classification.
+This redaction applies to diagnostic sinks only; the assistant result remains available
+to the normal output delivery path.
 
 ## Prompt Contract
 
