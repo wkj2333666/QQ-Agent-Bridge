@@ -105,6 +105,14 @@ _MULTILINGUAL_SECRET_LABEL = (
     r"パスワード|暗証番号|秘密鍵|api\s*キー|アクセストークン|認証情報|"
     r"비밀번호|암호|api\s*키|액세스\s*토큰|인증\s*정보)"
 )
+_ANY_SECRET_LABEL = (
+    rf"(?:{_ENGLISH_SECRET_LABEL}|{_CHINESE_SECRET_LABEL}|"
+    rf"{_MULTILINGUAL_SECRET_LABEL})"
+)
+_SECRET_LIKE_VALUE = (
+    r"(?=[^\s]{8,})(?=[^\s]*[0-9_./+@:-])"
+    r"[A-Za-z0-9_.$~+/@:-]{8,}"
+)
 _ENV_SECRET_SUFFIX = (
     r"(?:(?:aws_)?access_key_id|"
     r"(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
@@ -134,6 +142,10 @@ _SECRET_PATTERNS = (
     ),
     re.compile(
         rf"{_MULTILINGUAL_SECRET_LABEL}\s*{_SECRET_ASSIGNMENT}\s*\S",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_ANY_SECRET_LABEL}[^\n]{{0,48}}?{_SECRET_LIKE_VALUE}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -179,13 +191,14 @@ _SENSITIVE_PATTERNS = (
     # Health and medical status.
     re.compile(
         r"(?:确诊|诊断|病史|患有|用药|服药|怀孕|孕期|抑郁症?|焦虑症?|"
-        r"双相|癌症|糖尿病|艾滋|HIV|血压|过敏)",
+        r"双相|癌症|糖尿病|艾滋|HIV|血压|过敏|哮喘|心脏病|癫痫|慢性病)",
         re.IGNORECASE,
     ),
     re.compile(
         r"\b(?:medical\s+(?:diagnosis|condition|history)|diagnosed\s+with|"
         r"pregnan(?:t|cy)|depression|anxiety|bipolar|cancer|diabetes|hiv|"
-        r"blood\s+pressure|allerg(?:y|ic)|medication)\b",
+        r"blood\s+pressure|allerg(?:y|ic)|medication|asthma|epilepsy|"
+        r"heart\s+disease|chronic\s+(?:illness|disease))\b",
         re.IGNORECASE,
     ),
     # Precise location and contact details.
@@ -221,7 +234,9 @@ _SENSITIVE_PATTERNS = (
     ),
     re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
     # Legal identity and financial information.
-    re.compile(r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|社保号)"),
+    re.compile(
+        r"(?:身份证(?:号|号码)?|护照(?:号|号码)?|真实姓名|法定姓名|全名|社保号)"
+    ),
     re.compile(
         r"(?:我\s*叫|我\s*的?\s*名字\s*(?:是|叫|为)|"
         r"(?:我\s*的?\s*)?姓\s*名\s*(?:(?:是|叫|为)|[：:=＝]))"
@@ -229,7 +244,8 @@ _SENSITIVE_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:legal\s+name|passport\s+(?:number|no)|social\s+security\s+number|ssn)\b",
+        r"\b(?:legal\s+name|full\s+name|passport\s+(?:number|no)|"
+        r"social\s+security\s+number|ssn)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -573,7 +589,7 @@ class MemoryValidator:
         if proposal.sensitivity == "secret":
             return None, "secret_content"
 
-        if proposal.operation == "forget" and (
+        if proposal.operation in {"forget", "merge"} and (
             actor is None or proposal.evidence_required
         ):
             return None, "actor_not_authorized"
@@ -601,6 +617,10 @@ class MemoryValidator:
                 and _content_affirmatively_supported_by_source(
                     evidence_content, source.text
                 )
+                and (
+                    not _curator_proposal_can_activate(proposal)
+                    or _content_is_direct_assertion(evidence_content, source.text)
+                )
                 for source in evidence_sources
             )
             if not explicit_item_confirmation and not owner_supports_content:
@@ -617,6 +637,11 @@ class MemoryValidator:
                 _content_affirmatively_supported_by_source(
                     evidence_content, source.text
                 )
+                for source in matching_sources
+            ):
+                return None, "source_evidence_disallowed"
+            if _curator_proposal_can_activate(proposal) and not any(
+                _content_is_direct_assertion(evidence_content, source.text)
                 for source in matching_sources
             ):
                 return None, "source_evidence_disallowed"
@@ -681,6 +706,8 @@ class MemoryValidator:
                     evidence_required=proposal.evidence_required,
                 )
             else:
+                if actor is None or proposal.evidence_required:
+                    return None, "actor_not_authorized"
                 proposal = MemoryProposal(
                     operation="merge",
                     item_id=duplicate.id,
@@ -1129,6 +1156,7 @@ def _parse_proposal(value: object) -> MemoryProposal:
         raise ValueError("curator source_ids must be a positive integer list")
     if len(set(source_ids)) != len(source_ids):
         raise ValueError("curator source_ids must be unique")
+    _require_curator_operation_fields(value, operation, tuple(source_ids), tuple(related))
     if value.get("category") is not None and value["category"] not in ALLOWED_CATEGORIES:
         raise ValueError("curator category is invalid")
     if value.get("status") is not None and value["status"] not in ALLOWED_STATUSES:
@@ -1156,6 +1184,32 @@ def _parse_proposal(value: object) -> MemoryProposal:
         expires_at=value.get("expires_at"),
         evidence_required=True,
     )
+
+
+def _require_curator_operation_fields(
+    value: Mapping[str, object],
+    operation: str,
+    source_ids: tuple[int, ...],
+    related_item_ids: tuple[str, ...],
+) -> None:
+    if not source_ids:
+        raise ValueError("curator operation is missing required source_ids")
+    required_strings = {
+        "add": ("subject_kind", "subject_id", "content"),
+        "mark_candidate": ("subject_kind", "subject_id", "content"),
+        "revise": ("item_id", "content"),
+        "reinforce": ("item_id",),
+        "contradict": ("item_id", "content"),
+        "merge": ("item_id",),
+        "forget": ("item_id",),
+    }[operation]
+    if any(
+        not isinstance(value.get(field), str) or not str(value[field]).strip()
+        for field in required_strings
+    ):
+        raise ValueError(f"curator {operation} operation is missing required fields")
+    if operation == "merge" and not related_item_ids:
+        raise ValueError("curator merge operation is missing required related_item_ids")
 
 
 class _DuplicateKeyError(ValueError):
@@ -1203,6 +1257,52 @@ def _content_affirmatively_supported_by_source(content: str, source_text: str) -
             return True
         offset = compact_source.find(proposed, offset + 1)
     return False
+
+
+def _curator_proposal_can_activate(proposal: MemoryProposal) -> bool:
+    if not proposal.evidence_required:
+        return False
+    if proposal.operation == "mark_candidate" or proposal.status == "candidate":
+        return False
+    if proposal.operation == "reinforce":
+        return True
+    confidence = 0.75 if proposal.confidence is None else float(proposal.confidence)
+    return confidence >= ACTIVE_CONFIDENCE_THRESHOLD
+
+
+def _content_is_direct_assertion(content: str, source_text: str) -> bool:
+    proposed = _evidence_normal_form(content)
+    normalized_source, compact_source, positions = _evidence_source_map(source_text)
+    if not proposed:
+        return False
+    offset = compact_source.find(proposed)
+    while offset >= 0:
+        start = positions[offset]
+        end = positions[offset + len(proposed) - 1] + 1
+        if _trivial_assertion_wrappers(normalized_source[:start], normalized_source[end:]):
+            return True
+        offset = compact_source.find(proposed, offset + 1)
+    return False
+
+
+def _trivial_assertion_wrappers(prefix: str, suffix: str) -> bool:
+    normalized_prefix = prefix.strip()
+    normalized_prefix = re.sub(r"^(?:[-*•]\s*)", "", normalized_prefix)
+    if normalized_prefix not in {
+        "",
+        "i",
+        "my",
+        "we",
+        "our",
+        "我",
+        "我的",
+        "我们",
+        "我们的",
+        "本人",
+        "本群",
+    }:
+        return False
+    return suffix.strip() in {"", ".", "。", "!", "！"}
 
 
 def _evidence_source_map(text: str) -> tuple[str, str, tuple[int, ...]]:
@@ -1347,24 +1447,29 @@ def _normalize_text(text: object) -> str:
 
 
 def _contains_secret(text: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", str(text or ""))
-    normalized = "".join(
-        character
-        for character in normalized
-        if unicodedata.category(character) != "Cf"
-    )
-    normalized = _normalize_text(normalized).casefold()
+    normalized = _security_normal_form(text)
     return any(pattern.search(normalized) is not None for pattern in _SECRET_PATTERNS)
 
 
 def classify_memory_sensitivity(text: str) -> str:
     """Conservatively classify personal content without delegating policy to a model."""
-    normalized = _normalize_text(text).casefold()
+    normalized = _security_normal_form(text)
     if _contains_structured_sensitive_identifier(normalized) or any(
         pattern.search(normalized) is not None for pattern in _SENSITIVE_PATTERNS
     ):
         return "sensitive"
     return "normal"
+
+
+def _security_normal_form(text: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    normalized = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) not in {"Cf", "Cc", "Cs"}
+        and not unicodedata.category(character).startswith("M")
+    )
+    return _normalize_text(normalized).casefold()
 
 
 def _contains_structured_sensitive_identifier(text: str) -> bool:

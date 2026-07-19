@@ -69,6 +69,23 @@ def test_redact_replaces_full_openai_and_github_secrets() -> None:
     assert out.count("[REDACTED]") == 2
 
 
+def test_extra_redaction_is_case_insensitive_whitespace_flexible_and_escaped() -> None:
+    memory = "Subject-Redacted Prefers (Paper)+ Reports"
+    rendered = "subject-redacted\tPREFERS   (paper)+ reports"
+
+    out = redact(f"before {rendered} after", extra=(memory,))
+
+    assert rendered not in out
+    assert out == "before [REDACTED] after"
+
+
+def test_extra_redaction_ignores_oversized_patterns_without_regex_failure() -> None:
+    oversized = "(" + ("sensitive " * 1_000) + ")"
+    ordinary = "ordinary trace output"
+
+    assert redact(ordinary, extra=(oversized,)) == ordinary
+
+
 if __name__ == "__main__":
     test_redact_basic()
     test_strip_ansi()

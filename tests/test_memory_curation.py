@@ -343,6 +343,7 @@ def test_parse_curator_output_accepts_only_exact_json_schema() -> None:
                 "operations": [
                     {
                         "operation": "add",
+                        "source_ids": [1],
                         "subject_kind": "user",
                         "subject_id": "123",
                         "category": "preference",
@@ -369,6 +370,8 @@ def test_parse_curator_output_accepts_only_exact_json_schema() -> None:
             confidence=0.91,
             status="active",
             source_kind="self_statement",
+            source_ids=(1,),
+            evidence_required=True,
         ),
     )
 
@@ -435,6 +438,41 @@ def test_parse_curator_output_rejects_non_json_numeric_constants(
 
     with pytest.raises(ValueError, match="valid JSON"):
         parse_curator_output(payload)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"operation": "add"},
+        {
+            "operation": "add",
+            "source_ids": [1],
+            "subject_kind": "user",
+            "subject_id": "u1",
+        },
+        {"operation": "revise", "source_ids": [1], "item_id": "item"},
+        {"operation": "reinforce", "source_ids": [1]},
+        {
+            "operation": "contradict",
+            "source_ids": [1],
+            "content": "replacement",
+        },
+        {"operation": "merge", "source_ids": [1], "item_id": "item"},
+        {"operation": "forget", "source_ids": [1]},
+        {
+            "operation": "mark_candidate",
+            "source_ids": [],
+            "subject_kind": "user",
+            "subject_id": "u1",
+            "content": "candidate",
+        },
+    ],
+)
+def test_parse_curator_output_rejects_operation_missing_required_fields(
+    operation: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="required"):
+        parse_curator_output(json.dumps({"operations": [operation]}))
 
 
 def test_curator_proposals_require_cited_sources_with_normalized_content_support(
@@ -538,6 +576,11 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "Hypothetically, u1 prefers paper reports.",
         "Suppose u1 prefers paper reports.",
         "If u1 prefers paper reports, the dashboard would change.",
+        "Whether u1 prefers paper reports is unknown.",
+        "Rumor says u1 prefers paper reports.",
+        "Someone said u1 prefers paper reports.",
+        "Maybe u1 prefers paper reports.",
+        "Please remember that u1 prefers paper reports.",
         "不要把“u1 prefers paper reports”记为长期记忆。",
         "不 要 记 住 u1 prefers paper reports。",
         "请忘记 u1 prefers paper reports。",
@@ -546,6 +589,10 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "比 如，u1 prefers paper reports。",
         "假设 u1 prefers paper reports。",
         "如果 u1 prefers paper reports，就更新报表。",
+        "是否 u1 prefers paper reports 还不确定。",
+        "据说 u1 prefers paper reports。",
+        "听说 u1 prefers paper reports。",
+        "请记住 u1 prefers paper reports。",
     ],
     ids=[
         "quoted-opt-out",
@@ -562,6 +609,11 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "english-hypothetical",
         "english-suppose",
         "english-if",
+        "english-unknown",
+        "english-rumor",
+        "english-hearsay",
+        "english-maybe",
+        "english-positive-instruction",
         "chinese-opt-out",
         "spaced-chinese-opt-out",
         "chinese-forget",
@@ -570,6 +622,10 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
         "spaced-chinese-example",
         "chinese-suppose",
         "chinese-if",
+        "chinese-uncertain",
+        "chinese-rumor",
+        "chinese-hearsay",
+        "chinese-positive-instruction",
     ],
 )
 def test_evidence_binding_rejects_non_affirmative_context_regardless_of_confidence(
@@ -615,11 +671,11 @@ def test_evidence_binding_rejects_non_affirmative_context_regardless_of_confiden
     "source_text",
     [
         "u1 prefers paper reports",
-        "Please remember that u1 prefers paper reports.",
-        "请记住 u1 prefers paper reports。",
+        "u1 prefers paper reports.",
+        "  u1 prefers paper reports。  ",
     ],
 )
-def test_evidence_binding_accepts_affirmative_or_positive_memory_context(
+def test_evidence_binding_accepts_direct_assertion_with_trivial_punctuation(
     cfg: BridgeConfig,
     source_text: str,
 ) -> None:
@@ -658,6 +714,54 @@ def test_evidence_binding_accepts_affirmative_or_positive_memory_context(
     assert result.accepted[0].status == "active"
 
 
+@pytest.mark.parametrize(
+    ("content", "source_text"),
+    [
+        ("prefer paper reports", "I prefer paper reports."),
+        ("喜欢纸质报告", "我喜欢纸质报告。"),
+        ("review on Fridays", "We review on Fridays!"),
+        ("偏好简洁回答", "我的偏好简洁回答。"),
+    ],
+)
+def test_active_evidence_allows_only_trivial_first_person_speaker_wrappers(
+    cfg: BridgeConfig,
+    content: str,
+    source_text: str,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=source_text,
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [41],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": content,
+                        "confidence": 0.99,
+                        "status": "active",
+                        "source_kind": "self_statement",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), proposal, actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].status == "active"
+
+
 def test_curator_proposal_rejects_uncited_and_out_of_batch_sources(
     cfg: BridgeConfig,
 ) -> None:
@@ -670,22 +774,14 @@ def test_curator_proposal_rejects_uncited_and_out_of_batch_sources(
         message_timestamp=100,
     )
 
-    for source_ids, expected in (([], "source_evidence_required"), ([99], "invalid_source_evidence")):
-        proposal = parse_curator_output(
-            json.dumps(
-                {
-                    "operations": [
-                        {
-                            "operation": "add",
-                            "source_ids": source_ids,
-                            "subject_kind": "user",
-                            "subject_id": "u1",
-                            "content": "prefer tea",
-                        }
-                    ]
-                }
-            )
-        )[0]
+    for source_ids, expected in (((), "source_evidence_required"), ((99,), "invalid_source_evidence")):
+        proposal = MemoryProposal.add(
+            subject_kind="user",
+            subject_id="u1",
+            content="prefer tea",
+            source_ids=source_ids,
+            evidence_required=True,
+        )
 
         result = MemoryValidator(cfg).validate(GROUP, (source_row,), (proposal,), actor=None)
 
@@ -775,6 +871,55 @@ def test_curator_cannot_claim_the_explicit_owner_confirmation_command_path(
 
     assert result.accepted == ()
     assert result.rejected[0].reason == "owner_confirmation_required"
+
+
+def test_owner_hearsay_cannot_activate_candidate_memory(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="victim",
+            content="victim is a vegetarian",
+            status="candidate",
+        ),
+    )
+    hearsay = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="owner",
+        text="Rumor says victim is a vegetarian.",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "reinforce",
+                        "source_ids": [41],
+                        "item_id": target.id,
+                        "confidence": 0.99,
+                        "source_kind": "owner_confirmed",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (hearsay,),
+        proposal,
+        actor=MemoryActor("owner", "group_owner"),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "owner_confirmation_required"
+    assert store.get_item(GROUP, target.id) == target
 
 
 def test_validator_accepts_sender_self_statement_and_group_culture(
@@ -1033,6 +1178,12 @@ def test_mixed_language_credential_assignments_are_unconditionally_rejected(
         "пароль: hunter2value",
         "비밀번호는 hunter2value",
         "GOOGLE_APPLICATION_CREDENTIALS=opaquevalue123456",
+        "password has been changed to REDACTED_VALUE_12345",
+        "pass\u034fword is REDACTED_VALUE_12345",
+        "登录密码现在是 REDACTED_VALUE_12345",
+        "pa\u200dss\u034fword currently REDACTED_VALUE_12345",
+        "API key currently REDACTED_VALUE_12345",
+        "OPENAI_API_KEY\u034f=REDACTED_VALUE_12345",
     ],
     ids=[
         "chinese-jiushi",
@@ -1057,6 +1208,12 @@ def test_mixed_language_credential_assignments_are_unconditionally_rejected(
         "russian-password",
         "korean-password",
         "common-credentials-env",
+        "english-changed-to-grammar",
+        "combining-grapheme-joiner",
+        "chinese-current-value",
+        "mixed-invisible-label",
+        "auth-label-secret-value-without-assignment",
+        "env-combining-control",
     ],
 )
 def test_unicode_and_access_key_credentials_are_unconditionally_rejected(
@@ -1235,6 +1392,13 @@ def test_sensitive_personal_fact_requires_explicit_request_by_subject(
         "My spouse is Bob",
         "我的政治立场是自由主义",
         "My religion is Buddhism",
+        "I have asthma",
+        "I was diagnosed with asthma",
+        "我有哮喘",
+        "My full name is Redacted Person",
+        "My full na\u034fme is Redacted Person",
+        "我的全名是张三",
+        "１３８－００１３－８０００",
         "13800138000",
         "110101199001011234",
         "6222020200000000",
@@ -1293,6 +1457,10 @@ def test_validator_conservatively_escalates_sensitive_personal_content(
         "我的联系方式是 zhangsan_27",
         "我家在北京市海淀区中关村大街27号",
         "收件地址：上海市浦东新区世纪大道100号",
+        "I have asthma",
+        "我有哮喘",
+        "My full name is Redacted Person",
+        "我的全名是张三",
     ],
 )
 def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
@@ -1336,6 +1504,10 @@ def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
         "家庭地址：北京市海淀区中关村大街27号",
         "家庭 地址 : 北京市 海淀区 中关村大街 27号",
         "家庭住址＝北京市海淀区中关村大街27号",
+        "姓\u200b名：张三",
+        "我\u200b叫张三",
+        "家庭地\u200b址：北京市海淀区中关村大街27号",
+        "姓\u034f名：张三",
     ],
     ids=[
         "name-colon",
@@ -1352,6 +1524,10 @@ def test_legal_name_contact_handle_and_precise_address_require_subject_consent(
         "family-address-label",
         "spaced-family-address-label",
         "family-residence-fullwidth-equals",
+        "zero-width-name-label",
+        "zero-width-first-person-name",
+        "zero-width-family-address",
+        "combining-control-name-label",
     ],
 )
 def test_punctuated_legal_names_and_precise_home_addresses_are_sensitive(
@@ -1387,7 +1563,6 @@ def test_punctuated_legal_names_and_precise_home_addresses_are_sensitive(
         "138001380001",
         "138)0013(8000",
         "138/0013/8000",
-        "１３８－００１３－８０００",
     ],
 )
 def test_mobile_classifier_does_not_match_inside_longer_digit_run(content: str) -> None:
@@ -1797,10 +1972,11 @@ def test_validator_normalizes_duplicate_revision_to_audited_survivor_merge(
         content="likes   COFFEE",
         confidence=0.9,
         source_kind="self_statement",
+        actor_class="user",
     )
 
     result = MemoryValidator(cfg, store=store).validate(
-        GROUP, (collected,), (proposal,), actor=None
+        GROUP, (collected,), (proposal,), actor=MemoryActor("123", "member")
     )
 
     assert result.rejected == ()
@@ -1811,6 +1987,7 @@ def test_validator_normalizes_duplicate_revision_to_audited_survivor_merge(
             related_item_ids=(revised_target.id,),
             confidence=0.9,
             source_kind="self_statement",
+            actor_class="user",
         ),
     )
     committed = store.commit_review(GROUP, (source_id,), result.accepted)
@@ -2796,6 +2973,121 @@ def test_background_curator_forget_rejects_expiry_and_replacement_claims(
     assert store.get_item(GROUP, target.id) is not None
 
 
+def test_actorless_curator_merge_cannot_delete_unrelated_same_category_item(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="subject-redacted",
+            category="preference",
+            content="subject-redacted prefers alpha reports",
+        ),
+    )
+    unrelated = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="subject-redacted",
+            category="preference",
+            content="subject-redacted prefers beta dashboards",
+        ),
+        message_id="unrelated-beta",
+    )
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="subject-redacted",
+        text="subject-redacted prefers alpha reports",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "merge",
+                        "source_ids": [41],
+                        "item_id": target.id,
+                        "related_item_ids": [unrelated.id],
+                        "source_kind": "self_statement",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), proposal, actor=None
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "actor_not_authorized"
+    assert store.get_item(GROUP, target.id) == target
+    assert store.get_item(GROUP, unrelated.id) == unrelated
+
+
+def test_curator_revise_collision_cannot_normalize_into_destructive_merge(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+) -> None:
+    revised = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="preference",
+            content="Likes tea",
+        ),
+    )
+    existing = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            category="preference",
+            content="Likes coffee",
+        ),
+        message_id="existing-coffee",
+    )
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="123",
+        text="Likes coffee",
+        message_timestamp=100,
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "revise",
+                        "source_ids": [41],
+                        "item_id": revised.id,
+                        "content": "Likes coffee",
+                        "source_kind": "self_statement",
+                        "confidence": 0.99,
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (evidence,), proposal, actor=None
+    )
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "actor_not_authorized"
+    assert store.get_item(GROUP, revised.id) == revised
+    assert store.get_item(GROUP, existing.id) == existing
+
+
 def test_curator_forget_requires_proof_even_when_review_has_an_actor(
     store: LongTermMemoryStore,
     cfg: BridgeConfig,
@@ -2970,6 +3262,7 @@ def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
         item_id=getattr(target, first_id_attr),
         related_item_ids=(getattr(related, first_id_attr),),
         source_kind="self_statement",
+        actor_class="user",
     )
     revise_removed = MemoryProposal(
         operation="revise",
@@ -3035,6 +3328,7 @@ def test_duplicate_revision_retires_alias_target_from_later_staged_operations(
         content="likes coffee",
         confidence=0.9,
         source_kind="self_statement",
+        actor_class="user",
     )
     unavailable_sibling = MemoryProposal.reinforce(
         getattr(revised_target, sibling_id_attr),
@@ -3056,6 +3350,7 @@ def test_duplicate_revision_retires_alias_target_from_later_staged_operations(
             related_item_ids=(revised_target.id,),
             confidence=0.9,
             source_kind="self_statement",
+            actor_class="user",
         ),
     )
     assert [(item.index, item.reason) for item in result.rejected] == [

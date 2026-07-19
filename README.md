@@ -209,19 +209,22 @@ The curator runs as a restricted ask-only Agent with network disabled, no projec
 workspace writes, no normal task tools, and no QQ progress output. Its proposals are
 untrusted, must cite supporting source row IDs, and require affirmative normalized
 support outside quotes, negations, examples, and opt-out instructions. Curator forgets
-are never allowed to hard-delete records; changes use validated revise, contradict, or
-merge operations, while deterministic user commands and store expiry remain the only
-hard-delete paths. Duplicate keys and non-JSON numeric constants are rejected.
-Credential checks apply Unicode NFKC, remove format controls, case-fold labels, and
-reject multilingual assignments and standard secret environment names. Generated
+and merges are never allowed to hard-delete records; background changes use validated
+revise or contradict operations, while deterministic user commands and store expiry
+remain the only hard-delete paths. ACTIVE proposals require the cited source to be
+essentially the proposed assertion, apart from trivial speaker and punctuation wrappers.
+Duplicate keys, non-JSON numeric constants, and operations missing required fields are
+rejected. Credential and sensitivity checks apply Unicode NFKC, remove invisible format
+and combining controls, case-fold labels, and reject multilingual authentication labels
+paired with secret-like values or standard secret environment names. Generated
 restricted homes/workspaces are removed on disposal, shutdown, and startup failure.
 A database failure disables only long-term memory; normal chat, tasks, schedules, and
 OneBot continue running.
 
-Normal and proactive Agent traces redact retrieved long-term-memory item content without
-changing the assistant text delivered to QQ. Real CQ-string and persisted schedule
-mentions retain their structured retrieval authority; rendered textual mentions do not
-gain authority.
+Normal and proactive Agent traces redact case and whitespace variants of retrieved
+long-term-memory item content without changing the assistant text delivered to QQ. Real
+CQ-string and persisted schedule mentions retain their structured retrieval authority;
+rendered textual mentions do not gain authority.
 
 The database is local plaintext. Its parent directory is mode `0700` and the database
 is mode `0600`, but operators must still protect host access, disk snapshots, and every
