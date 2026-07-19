@@ -738,6 +738,100 @@ def test_validator_converts_known_duplicate_to_reinforcement(
     )
 
 
+def test_validator_normalizes_self_duplicate_revision_to_reinforcement(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            confidence=0.8,
+            source_kind="self_statement",
+        ),
+    )
+    proposal = MemoryProposal(
+        operation="revise",
+        item_id=target.short_id,
+        content="  LIKES   TEA  ",
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (source(text="I still like tea"),), (proposal,), actor=None
+    )
+
+    assert result.rejected == ()
+    assert result.accepted == (
+        MemoryProposal.reinforce(
+            target.id, confidence=0.9, source_kind="self_statement"
+        ),
+    )
+
+
+def test_validator_normalizes_duplicate_revision_to_audited_survivor_merge(
+    store: LongTermMemoryStore, cfg: BridgeConfig
+) -> None:
+    revised_target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            confidence=0.8,
+            source_kind="self_statement",
+        ),
+    )
+    survivor = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes coffee",
+            confidence=0.6,
+            status="candidate",
+            source_kind="inferred",
+        ),
+        message_id="survivor-source",
+    )
+    collected = source(text="I now like coffee")
+    source_id = store.collect(collected)
+    assert source_id is not None
+    proposal = MemoryProposal(
+        operation="revise",
+        item_id=revised_target.id,
+        content="likes   COFFEE",
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP, (collected,), (proposal,), actor=None
+    )
+
+    assert result.rejected == ()
+    assert result.accepted == (
+        MemoryProposal(
+            operation="merge",
+            item_id=survivor.id,
+            related_item_ids=(revised_target.id,),
+            confidence=0.9,
+            source_kind="self_statement",
+        ),
+    )
+    committed = store.commit_review(GROUP, (source_id,), result.accepted)
+    assert [item.id for item in committed] == [survivor.id]
+    assert store.get_item(GROUP, revised_target.id) is None
+    remaining = store.list_items(GROUP, include_expired=True)
+    assert [item.id for item in remaining] == [survivor.id]
+    assert remaining[0].content == "Likes coffee"
+    assert remaining[0].source_count == 2
+    assert remaining[0].base_confidence == pytest.approx(0.9)
+    assert remaining[0].status == "active"
+
+
 @pytest.mark.parametrize("confidence", [0.9, 0.5], ids=["active", "candidate"])
 @pytest.mark.parametrize("expires_at", [None, 1], ids=["current", "expired"])
 def test_validator_rejects_cross_sensitivity_content_collision(
@@ -1407,6 +1501,80 @@ def test_merge_then_revise_rejects_merged_away_target_and_commits_merge(
     committed = store.commit_review(GROUP, (source_id,), result.accepted)
     assert [item.id for item in committed] == [target.id]
     assert store.get_item(GROUP, related.id) is None
+
+
+@pytest.mark.parametrize(
+    ("revision_id_attr", "sibling_id_attr"),
+    [("id", "short_id"), ("short_id", "id")],
+    ids=["full-to-short", "short-to-full"],
+)
+def test_duplicate_revision_retires_alias_target_from_later_staged_operations(
+    store: LongTermMemoryStore,
+    cfg: BridgeConfig,
+    revision_id_attr: str,
+    sibling_id_attr: str,
+) -> None:
+    revised_target = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes tea",
+            source_kind="self_statement",
+        ),
+    )
+    survivor = seed_item(
+        store,
+        MemoryProposal.add(
+            subject_kind="user",
+            subject_id="123",
+            content="Likes coffee",
+            source_kind="self_statement",
+        ),
+        message_id="survivor-source",
+    )
+    collected = source(text="I now like coffee")
+    source_id = store.collect(collected)
+    assert source_id is not None
+    revision = MemoryProposal(
+        operation="revise",
+        item_id=getattr(revised_target, revision_id_attr),
+        content="likes coffee",
+        confidence=0.9,
+        source_kind="self_statement",
+    )
+    unavailable_sibling = MemoryProposal.reinforce(
+        getattr(revised_target, sibling_id_attr),
+        confidence=0.95,
+        source_kind="self_statement",
+    )
+
+    result = MemoryValidator(cfg, store=store).validate(
+        GROUP,
+        (collected,),
+        (revision, unavailable_sibling),
+        actor=MemoryActor("123", "member"),
+    )
+
+    assert result.accepted == (
+        MemoryProposal(
+            operation="merge",
+            item_id=survivor.id,
+            related_item_ids=(revised_target.id,),
+            confidence=0.9,
+            source_kind="self_statement",
+        ),
+    )
+    assert [(item.index, item.reason) for item in result.rejected] == [
+        (1, "target_not_found")
+    ]
+    committed = store.commit_review(GROUP, (source_id,), result.accepted)
+    assert [item.id for item in committed] == [survivor.id]
+    assert store.get_item(GROUP, revised_target.id) is None
+    assert store.get_item(GROUP, revised_target.short_id) is None
+    assert [item.id for item in store.list_items(GROUP, include_expired=True)] == [
+        survivor.id
+    ]
 
 
 @pytest.mark.parametrize(
