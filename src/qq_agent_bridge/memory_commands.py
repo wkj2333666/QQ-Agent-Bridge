@@ -28,6 +28,26 @@ Interpreter = Callable[[str], Awaitable[str]]
 Acknowledger = Callable[[ChatEvent, str], Awaitable[None]]
 _PAGE_SIZE = 8
 _MAX_INTERPRETED_MUTATIONS = 5
+
+
+class RestrictedMemoryInterpreter:
+    def __init__(self, agent: Any) -> None:
+        self.agent = agent
+        self.workspace = agent.cfg.agent.default_workspace
+
+    async def __call__(self, prompt: str) -> str:
+        return await run_agent(
+            self.agent,
+            prompt,
+            self.workspace,
+            "ask",
+            model="auto",
+        )
+
+    def dispose(self) -> None:
+        self.agent.dispose()
+
+
 _INTERPRETER_INTENTS = frozenset(
     {
         "status",
@@ -867,18 +887,7 @@ def build_memory_command_interpreter(
         timeout_seconds=min(45, max(1, cfg.long_term_memory.review.timeout_seconds)),
         max_output_chars=8_000,
     )
-    interpreter_workspace = agent.cfg.agent.default_workspace
-
-    async def interpret(prompt: str) -> str:
-        return await run_agent(
-            agent,
-            prompt,
-            interpreter_workspace,
-            "ask",
-            model="auto",
-        )
-
-    return interpret
+    return RestrictedMemoryInterpreter(agent)
 
 
 def _nonempty_string(value: object) -> bool:

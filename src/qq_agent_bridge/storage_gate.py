@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 from typing import Any
@@ -88,9 +89,16 @@ class StorageActivityGate:
 class GatedAgentAdapter:
     """Apply an activity lease to every call made through an Agent adapter."""
 
-    def __init__(self, delegate: Any, gate: StorageActivityGate) -> None:
+    def __init__(
+        self,
+        delegate: Any,
+        gate: StorageActivityGate,
+        *,
+        owned_paths: tuple[Path, ...] = (),
+    ) -> None:
         self.delegate = delegate
         self.gate = gate
+        self._owned_paths = owned_paths
 
     @property
     def cfg(self) -> Any:
@@ -119,6 +127,21 @@ class GatedAgentAdapter:
                 redact_extra=redact_extra,
             )
 
+    def dispose(self) -> None:
+        """Remove only private paths created for this adapter."""
+        pending = self._owned_paths
+        failed: list[Path] = []
+        failure: Exception | None = None
+        for path in reversed(pending):
+            try:
+                _remove_private_curator_path(path)
+            except Exception as exc:  # noqa: BLE001 - attempt every owned path
+                failed.append(path)
+                failure = failure or exc
+        self._owned_paths = tuple(reversed(failed))
+        if failure is not None:
+            raise RuntimeError("restricted Agent path cleanup failed") from failure
+
 
 def build_restricted_agent_adapter(
     cfg: BridgeConfig,
@@ -129,33 +152,47 @@ def build_restricted_agent_adapter(
     max_output_chars: int,
 ) -> GatedAgentAdapter:
     """Build an isolated ask-only adapter configuration for background analysis."""
-    restricted = deepcopy(cfg)
-    curator_workspace = _create_private_curator_path("curator-workspace-")
-    curator_home = _create_private_curator_path("curator-home-")
-    resolved_workspace = str(curator_workspace)
-    restricted.workspaces = {resolved_workspace: True}
-    restricted.agent.runtime = "cursor-cli"
-    restricted.agent.command = {}
-    restricted.max_runtime_seconds = max(1, int(timeout_seconds))
-    restricted.max_output_chars = max(1, int(max_output_chars))
-    restricted.agent.default_workspace = resolved_workspace
-    restricted.agent.use_bwrap = True
-    restricted.agent.share_network = False
-    restricted.agent.force_task_tools = False
-    restricted.agent.hardened_read_only = True
-    restricted.agent.log_subprocess_output = False
-    restricted.agent.sandbox_home = str(curator_home)
-    restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
-    restricted.agent.max_output_chars = restricted.max_output_chars
-    restricted.agent.trace_enabled = False
-    restricted.progress.enabled = False
-    restricted.resources.enabled = False
-    return GatedAgentAdapter(build_agent_adapter(restricted), gate)
+    owned_paths: list[Path] = []
+    try:
+        restricted = deepcopy(cfg)
+        curator_workspace = _create_private_curator_path("curator-workspace-")
+        owned_paths.append(curator_workspace)
+        curator_home = _create_private_curator_path("curator-home-")
+        owned_paths.append(curator_home)
+        resolved_workspace = str(curator_workspace)
+        restricted.workspaces = {resolved_workspace: True}
+        restricted.agent.runtime = "cursor-cli"
+        restricted.agent.command = {}
+        restricted.max_runtime_seconds = max(1, int(timeout_seconds))
+        restricted.max_output_chars = max(1, int(max_output_chars))
+        restricted.agent.default_workspace = resolved_workspace
+        restricted.agent.use_bwrap = True
+        restricted.agent.share_network = False
+        restricted.agent.force_task_tools = False
+        restricted.agent.hardened_read_only = True
+        restricted.agent.log_subprocess_output = False
+        restricted.agent.sandbox_home = str(curator_home)
+        restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
+        restricted.agent.max_output_chars = restricted.max_output_chars
+        restricted.agent.trace_enabled = False
+        restricted.progress.enabled = False
+        restricted.resources.enabled = False
+        return GatedAgentAdapter(
+            build_agent_adapter(restricted),
+            gate,
+            owned_paths=tuple(owned_paths),
+        )
+    except BaseException:
+        for path in reversed(owned_paths):
+            try:
+                _remove_private_curator_path(path)
+            except Exception:
+                pass
+        raise
 
 
 def _create_private_curator_path(prefix: str) -> Path:
-    home = Path.home().resolve(strict=True)
-    root = home / ".local" / "state" / "qq-agent-bridge"
+    home, root = _private_state_root()
     current = home
     for part in root.relative_to(home).parts:
         current = current / part
@@ -172,3 +209,30 @@ def _create_private_curator_path(prefix: str) -> Path:
     path = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
     path.chmod(0o700)
     return path
+
+
+def _private_state_root() -> tuple[Path, Path]:
+    home = Path.home().resolve(strict=True)
+    return home, home / ".local" / "state" / "qq-agent-bridge"
+
+
+def _remove_private_curator_path(path: Path) -> None:
+    candidate = Path(path)
+    try:
+        metadata = candidate.lstat()
+    except FileNotFoundError:
+        return
+    _home, root = _private_state_root()
+    resolved_root = root.resolve(strict=True)
+    if candidate.parent.resolve(strict=True) != resolved_root or not candidate.name.startswith(
+        ("curator-workspace-", "curator-home-")
+    ):
+        raise ValueError("refusing to remove an unowned restricted Agent path")
+    if metadata.st_uid != os.getuid():
+        raise ValueError("refusing to remove a foreign-owned restricted Agent path")
+    if stat.S_ISLNK(metadata.st_mode):
+        candidate.unlink()
+        return
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("restricted Agent path is not a directory")
+    shutil.rmtree(candidate)

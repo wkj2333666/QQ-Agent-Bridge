@@ -6,9 +6,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from qq_agent_bridge.storage_gate import GatedAgentAdapter, StorageActivityGate  # type: ignore
+import qq_agent_bridge.storage_gate as storage_gate_module  # type: ignore
+from qq_agent_bridge.config import BridgeConfig  # type: ignore
+from qq_agent_bridge.storage_gate import (  # type: ignore
+    GatedAgentAdapter,
+    StorageActivityGate,
+    build_restricted_agent_adapter,
+)
 
 
 def test_maintenance_waits_for_activity_and_blocks_new_activity() -> None:
@@ -185,3 +193,63 @@ def test_gated_agent_adapter_preserves_full_run_contract() -> None:
         ]
 
     asyncio.run(go())
+
+
+def test_restricted_adapter_disposal_removes_only_its_owned_private_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(mode=0o700)
+    unrelated = fake_home / ".local" / "state" / "qq-agent-bridge" / "keep.txt"
+    unrelated.parent.mkdir(parents=True, mode=0o700)
+    unrelated.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    cfg = BridgeConfig()
+
+    adapter = build_restricted_agent_adapter(
+        cfg,
+        StorageActivityGate(),
+        tmp_path,
+        timeout_seconds=10,
+        max_output_chars=1_000,
+    )
+    workspace = Path(adapter.cfg.agent.default_workspace)
+    sandbox_home = Path(adapter.cfg.agent.sandbox_home)
+    (sandbox_home / ".config" / "cursor").mkdir(parents=True)
+    auth_copy = sandbox_home / ".config" / "cursor" / "auth.json"
+    auth_copy.write_text('{"token":"copied-secret"}', encoding="utf-8")
+
+    adapter.dispose()
+    adapter.dispose()
+
+    assert not workspace.exists()
+    assert not sandbox_home.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+
+
+def test_restricted_adapter_builder_cleans_first_path_when_construction_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(mode=0o700)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setattr(
+        storage_gate_module,
+        "build_agent_adapter",
+        lambda _cfg: (_ for _ in ()).throw(RuntimeError("injected build failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected build failure"):
+        build_restricted_agent_adapter(
+            BridgeConfig(),
+            StorageActivityGate(),
+            tmp_path,
+            timeout_seconds=10,
+            max_output_chars=1_000,
+        )
+
+    state_root = fake_home / ".local" / "state" / "qq-agent-bridge"
+    assert list(state_root.glob("curator-workspace-*")) == []
+    assert list(state_root.glob("curator-home-*")) == []

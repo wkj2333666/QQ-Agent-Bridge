@@ -174,14 +174,20 @@ def test_normalize_cq_at_string_to_parseable_text() -> None:
         "group_id": 2000000001,
         "self_id": 111,
         "time": 1,
-        "message": "[CQ:at,qq=111] /task hello",
+        "message": "[CQ:at,qq=111] ask [CQ:at,qq=222] status",
     }
 
     ev = _normalize_event(raw, "111")
 
     assert ev is not None
     assert ev.mentioned_bot
-    assert ev.text == "@111 /task hello"
+    assert ev.text == "@111 ask @222 status"
+    assert [(segment.type, segment.qq) for segment in ev.segments] == [
+        ("mention", "111"),
+        ("text", None),
+        ("mention", "222"),
+        ("text", None),
+    ]
 
 
 def test_normalize_structured_reply_segment() -> None:

@@ -1,7 +1,7 @@
 """Domain types and constraints for scoped long-term memory."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -144,6 +144,8 @@ class MemoryProposal:
     expires_at: int | None = None
     created_at: int | None = None
     actor_class: str = "curator"
+    source_ids: tuple[int, ...] = ()
+    evidence_required: bool = field(default=False, compare=False, repr=False)
 
     @classmethod
     def add(
@@ -162,9 +164,12 @@ class MemoryProposal:
         expires_at: int | None = None,
         created_at: int | None = None,
         actor_class: str = "curator",
+        source_ids: tuple[int, ...] = (),
+        evidence_required: bool = False,
     ) -> MemoryProposal:
         return cls(
             operation="add",
+            source_ids=source_ids,
             subject_kind=subject_kind,
             subject_id=subject_id,
             category=category,
@@ -178,6 +183,7 @@ class MemoryProposal:
             expires_at=expires_at,
             created_at=created_at,
             actor_class=actor_class,
+            evidence_required=evidence_required,
         )
 
     @classmethod
@@ -188,13 +194,17 @@ class MemoryProposal:
         confidence: float | None = None,
         source_kind: str = "inferred",
         actor_class: str = "curator",
+        source_ids: tuple[int, ...] = (),
+        evidence_required: bool = False,
     ) -> MemoryProposal:
         return cls(
             operation="reinforce",
+            source_ids=source_ids,
             item_id=item_id,
             confidence=confidence,
             source_kind=source_kind,
             actor_class=actor_class,
+            evidence_required=evidence_required,
         )
 
 

@@ -79,8 +79,12 @@ def _extract_segments_and_resources(
             if reply
             else ()
         )
-        text_segment = (ChatSegment(type="text", text=text, raw_type="raw"),) if text else ()
-        return text, reply_segment + text_segment, resources, reply
+        message_segments = (
+            _segments_from_cq_string(msg)
+            if isinstance(msg, str)
+            else ((ChatSegment(type="text", text=text, raw_type="raw"),) if text else ())
+        )
+        return text, reply_segment + message_segments, resources, reply
 
     text_parts: list[str] = []
     segments: list[ChatSegment] = []
@@ -151,6 +155,42 @@ def _extract_segments_and_resources(
             else:
                 segments.append(ChatSegment(type="unknown", raw_type=raw_type, raw_data=data))
     return "".join(text_parts).strip(), tuple(segments), tuple(resources), reply
+
+
+def _segments_from_cq_string(text: str) -> tuple[ChatSegment, ...]:
+    clean = _NAPCAT_DISPLAY_REPLY_RE.sub("", _CQ_REPLY_RE.sub("", text))
+    if _CQ_AT_RE.search(clean) is None:
+        normalized = clean.strip()
+        return (
+            (ChatSegment(type="text", text=normalized, raw_type="raw"),)
+            if normalized
+            else ()
+        )
+    segments: list[ChatSegment] = []
+    cursor = 0
+    for match in _CQ_AT_RE.finditer(clean):
+        preceding = clean[cursor : match.start()]
+        if preceding:
+            segments.append(ChatSegment(type="text", text=preceding, raw_type="raw"))
+        qq = match.group(1)
+        rendered = f"@{qq} "
+        if qq.isdigit():
+            segments.append(
+                ChatSegment(
+                    type="mention",
+                    text=rendered,
+                    qq=qq,
+                    raw_type="at",
+                    raw_data={"qq": qq, "source": "cq-string"},
+                )
+            )
+        else:
+            segments.append(ChatSegment(type="text", text=rendered, raw_type="raw"))
+        cursor = match.end()
+    trailing = clean[cursor:]
+    if trailing:
+        segments.append(ChatSegment(type="text", text=trailing, raw_type="raw"))
+    return tuple(segments)
 
 
 def _reply_from_cq_text(text: str) -> ChatReply | None:
