@@ -81,6 +81,21 @@ def test_prompt_includes_conversation_history() -> None:
     assert "用户消息：继续" in prompt
 
 
+def test_prompt_places_long_term_memory_after_profile_before_short_term_history() -> None:
+    prompt = build_agent_prompt(
+        "task",
+        "继续火星项目",
+        make_ev(),
+        profile_prompt="PROFILE-MARKER",
+        long_term_memory="LONG-TERM-MARKER",
+        history="SHORT-TERM-MARKER",
+    )
+
+    assert "长期记忆背景：\nLONG-TERM-MARKER" in prompt
+    assert prompt.index("PROFILE-MARKER") < prompt.index("LONG-TERM-MARKER")
+    assert prompt.index("LONG-TERM-MARKER") < prompt.index("SHORT-TERM-MARKER")
+
+
 def test_prompt_includes_quoted_message_context() -> None:
     ev = make_ev("总结一下")
     ev = ChatEvent(

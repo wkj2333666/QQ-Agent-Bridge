@@ -24,6 +24,7 @@ def build_agent_prompt(
     resource_context: str = "",
     outgoing_resource_context: str = "",
     profile_prompt: str = "",
+    long_term_memory: str = "",
     runtime_reference_base: str = "",
     schedule_context: str = "",
 ) -> str:
@@ -66,6 +67,11 @@ def build_agent_prompt(
     if self_knowledge.strip():
         base += f"""你对自己的公开说明：
 {self_knowledge.strip()}
+
+"""
+    if long_term_memory.strip():
+        base += f"""长期记忆背景：
+{long_term_memory.strip()}
 
 """
     if schedule_context.strip():

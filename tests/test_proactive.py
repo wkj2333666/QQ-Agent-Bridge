@@ -670,6 +670,82 @@ def test_proactive_prompt_includes_group_background_context() -> None:
     assert "你不要再吃那个了" in prompt
 
 
+def test_proactive_prompt_retrieves_only_group_and_actual_batch_participants() -> None:
+    cfg = make_cfg()
+    calls: list[tuple[Any, ...]] = []
+
+    async def send(
+        chat_id: str,
+        text: str,
+        echo: str | None = None,
+        ats: tuple[str, ...] = (),
+        reply_to: str | None = None,
+    ) -> None:
+        raise AssertionError("should not send")
+
+    def long_term_context(*args: Any) -> str:
+        calls.append(args)
+        return "LONG-TERM-GROUP-CONTEXT"
+
+    speaker = ProactiveSpeaker(
+        cfg,
+        object(),
+        send,
+        long_term_context=long_term_context,
+    )
+    prompt = speaker._build_prompt(  # type: ignore[attr-defined]
+        [
+            make_ev("聊火星项目", "ltm-1", sender="u1"),  # type: ignore[list-item]
+            make_ev("我也参加", "ltm-2", sender="u2"),  # type: ignore[list-item]
+        ]
+    )
+
+    scope, current_sender, participants, quoted_sender, query = calls[0]
+    assert (scope.kind, scope.id) == ("group", "group")
+    assert current_sender == "u2"
+    assert set(participants) == {"u1", "u2"}
+    assert quoted_sender is None
+    assert "聊火星项目" in query
+    assert "LONG-TERM-GROUP-CONTEXT" in prompt
+    assert prompt.index("身份与口吻") < prompt.index("LONG-TERM-GROUP-CONTEXT")
+    assert prompt.index("LONG-TERM-GROUP-CONTEXT") < prompt.index("最近聊天：")
+
+
+def test_mention_memory_retrieval_does_not_trust_textual_at_numbers() -> None:
+    cfg = make_cfg()
+    calls: list[tuple[Any, ...]] = []
+
+    async def send(
+        chat_id: str,
+        text: str,
+        echo: str | None = None,
+        ats: tuple[str, ...] = (),
+        reply_to: str | None = None,
+    ) -> None:
+        raise AssertionError("should not send")
+
+    def long_term_context(*args: Any) -> str:
+        calls.append(args)
+        return ""
+
+    speaker = ProactiveSpeaker(
+        cfg,
+        object(),
+        send,
+        long_term_context=long_term_context,
+    )
+    ev = ChatEvent(
+        **{
+            **make_ev("@222222 你觉得呢", "textual-at", sender="u1").__dict__,
+            "mentioned_bot": True,
+        }
+    )
+
+    speaker._build_mention_prompt(ev)  # type: ignore[attr-defined]
+
+    assert calls[0][2] == ()
+
+
 def test_proactive_collects_three_valid_messages_after_filtering_invalid_items() -> None:
     cfg = make_cfg()
     cfg.proactive.max_reply_messages = 3  # type: ignore[attr-defined]
