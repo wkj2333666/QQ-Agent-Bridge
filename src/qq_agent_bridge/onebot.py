@@ -53,6 +53,11 @@ def _normalize_cq_text(text: str) -> str:
     return _CQ_AT_RE.sub(lambda match: f"@{match.group(1)} ", text)
 
 
+def _normalize_structured_text(text: str) -> str:
+    """Keep decoded text literal; only remove the optional NapCat reply preview."""
+    return _NAPCAT_DISPLAY_REPLY_RE.sub("", text)
+
+
 def _extract_segments_and_resources(
     msg: Any,
 ) -> tuple[str, tuple[ChatSegment, ...], tuple[ChatResource, ...], ChatReply | None]:
@@ -95,8 +100,8 @@ def _extract_segments_and_resources(
         if raw_type == "text":
             raw_text = str(data.get("text", ""))
             if reply is None:
-                reply = _reply_from_cq_text(raw_text) or _reply_from_napcat_display_text(raw_text)
-            text = _normalize_cq_text(raw_text)
+                reply = _reply_from_napcat_display_text(raw_text)
+            text = _normalize_structured_text(raw_text)
             text_parts.append(text)
             segments.append(ChatSegment(type="text", text=text, raw_type=raw_type, raw_data=data))
             resources.extend(_url_resources(text, source_segment=idx))
