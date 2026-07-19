@@ -61,6 +61,10 @@ _ENGLISH_PASSPHRASE_LABEL = (
     rf"(?:(?:private|secret|key){_SECRET_LABEL_SEPARATOR})?"
     rf"pass{_SECRET_LABEL_SEPARATOR}phrase"
 )
+_ENGLISH_CREDENTIAL_LABEL = (
+    rf"(?:(?:auth(?:entication)?|login|service){_SECRET_LABEL_SEPARATOR})?"
+    rf"credentials?"
+)
 _ENGLISH_SECRET_LABEL = (
     rf"(?:(?:api|oauth2?|session|client){_SECRET_LABEL_SEPARATOR}"
     rf"(?:(?:access|refresh){_SECRET_LABEL_SEPARATOR})?(?:token|key|secret)|"
@@ -71,18 +75,21 @@ _ENGLISH_SECRET_LABEL = (
     rf"{_ENGLISH_RECOVERY_LABEL}|"
     rf"mnemonic(?:{_SECRET_LABEL_SEPARATOR}(?:phrase|words?))?|"
     rf"{_ENGLISH_PASSPHRASE_LABEL}|token|"
+    rf"{_ENGLISH_CREDENTIAL_LABEL}|"
     r"password|passwd|secret|cookie)"
 )
 _ENGLISH_SECRET_ASSIGNMENT = r"(?:(?:is|are|equals)\b|[=:：])"
 _CHINESE_SECRET_LABEL = (
     r"(?:(?:接口|会话|客户端|访问|刷新|授权)?(?:令牌|密钥)|"
-    r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码))"
+    r"私钥|密码|口令|助记(?:词|短语)|(?:恢复|备份|种子)(?:短语|密钥|代码|码)|"
+    r"(?:登录|认证|身份)?(?:凭据|凭证)|认证信息)"
 )
 _CHINESE_SECRET_ASSIGNMENT = r"(?:是|为|等于|[=:：])"
 _ENV_SECRET_SUFFIX = (
     r"(?:(?:api|oauth2?|session|client)(?:_(?:access|refresh))?_(?:token|key|secret)|"
     r"secret_access_key|(?:access|refresh|auth)_(?:token|key)|bearer(?:_token)?|"
     r"private_key|secret_key|password|passwd|cookie|token|secret|"
+    r"credentials?|"
     r"(?:recovery|backup|seed)_(?:phrase|words?|key|codes?)|"
     r"mnemonic(?:_(?:phrase|words?))?|"
     r"(?:(?:private|secret|key)_)?pass(?:_?phrase))"
