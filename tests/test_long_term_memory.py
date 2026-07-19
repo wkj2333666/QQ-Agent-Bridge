@@ -275,6 +275,216 @@ def test_commit_review_is_atomic_and_consumes_only_selected_scoped_sources(
     assert store.status(GROUP_A).pending_count == 1
 
 
+def test_direct_revision_into_duplicate_reinforces_survivor_and_retires_target(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(
+        _source(GROUP_A, "target", "user-a", "Likes tea")
+    )
+    survivor_source = store.collect(
+        _source(GROUP_A, "survivor", "user-a", "Likes coffee")
+    )
+    assert target_source is not None and survivor_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (target_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="Likes tea",
+                confidence=0.85,
+            ),
+        ),
+    )[0]
+    survivor = store.commit_review(
+        GROUP_A,
+        (survivor_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="Likes coffee",
+                confidence=0.6,
+                status="candidate",
+            ),
+        ),
+    )[0]
+    revision_source = store.collect(
+        _source(GROUP_A, "revision", "user-a", "I now like coffee")
+    )
+    assert revision_source is not None
+
+    committed = store.commit_review(
+        GROUP_A,
+        (revision_source,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=target.short_id,
+                content=" likes   COFFEE ",
+                confidence=0.95,
+                source_kind="self_statement",
+            ),
+        ),
+    )
+
+    assert [item.id for item in committed] == [survivor.id]
+    assert store.get_item(GROUP_A, target.id) is None
+    remaining = store.list_items(GROUP_A, include_expired=True)
+    assert [item.id for item in remaining] == [survivor.id]
+    assert remaining[0].source_count == 2
+    assert remaining[0].base_confidence == pytest.approx(0.95)
+    assert remaining[0].effective_score == pytest.approx(0.95)
+    assert remaining[0].status == "active"
+    assert remaining[0].source_kind == "self_statement"
+
+    with sqlite3.connect(store.path) as conn:
+        fts_rows = conn.execute(
+            "SELECT item_id, content FROM memory_fts ORDER BY item_id"
+        ).fetchall()
+        survivor_revisions = conn.execute(
+            "SELECT operation FROM memory_revisions WHERE item_id = ? ORDER BY id",
+            (survivor.id,),
+        ).fetchall()
+        retired_audits = conn.execute(
+            "SELECT operation, deleted_item_hash FROM memory_revisions "
+            "WHERE deleted_item_hash IS NOT NULL"
+        ).fetchall()
+
+    assert fts_rows == [(survivor.id, "Likes coffee")]
+    assert [row[0] for row in survivor_revisions] == ["candidate", "merge"]
+    assert [row[0] for row in retired_audits] == ["add", "delete"]
+    assert retired_audits[0][1]
+    assert retired_audits[0][1] == retired_audits[1][1]
+
+
+def test_direct_self_duplicate_revision_is_a_reinforcement(
+    store: LongTermMemoryStore,
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    initial_source = store.collect(
+        _source(GROUP_A, "initial", "user-a", "Likes tea")
+    )
+    assert initial_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (initial_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user",
+                subject_id="user-a",
+                content="Likes tea",
+                confidence=0.8,
+            ),
+        ),
+    )[0]
+    revision_source = store.collect(
+        _source(GROUP_A, "revision", "user-a", "Still likes tea")
+    )
+    assert revision_source is not None
+
+    committed = store.commit_review(
+        GROUP_A,
+        (revision_source,),
+        (
+            MemoryProposal(
+                operation="revise",
+                item_id=target.short_id,
+                content="  LIKES   TEA ",
+                confidence=0.9,
+                source_kind="self_statement",
+            ),
+        ),
+    )
+
+    assert [item.id for item in committed] == [target.id]
+    assert len(store.list_items(GROUP_A, include_expired=True)) == 1
+    reinforced = store.get_item(GROUP_A, target.id)
+    assert reinforced is not None
+    assert reinforced.content == "Likes tea"
+    assert reinforced.source_count == 2
+    assert reinforced.base_confidence == pytest.approx(0.9)
+    with sqlite3.connect(store.path) as conn:
+        operations = [
+            row[0]
+            for row in conn.execute(
+                "SELECT operation FROM memory_revisions WHERE item_id = ? ORDER BY id",
+                (target.id,),
+            ).fetchall()
+        ]
+    assert operations == ["add", "reinforce"]
+
+
+def test_duplicate_revision_rolls_back_rows_fts_revisions_and_source_consumption(
+    store: LongTermMemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.set_scope_enabled(GROUP_A, True)
+    target_source = store.collect(_source(GROUP_A, "target", "user-a", "Tea"))
+    survivor_source = store.collect(
+        _source(GROUP_A, "survivor", "user-a", "Coffee")
+    )
+    assert target_source is not None and survivor_source is not None
+    target = store.commit_review(
+        GROUP_A,
+        (target_source,),
+        (MemoryProposal.add(subject_kind="user", subject_id="user-a", content="Tea"),),
+    )[0]
+    survivor = store.commit_review(
+        GROUP_A,
+        (survivor_source,),
+        (
+            MemoryProposal.add(
+                subject_kind="user", subject_id="user-a", content="Coffee"
+            ),
+        ),
+    )[0]
+    revision_source = store.collect(
+        _source(GROUP_A, "revision", "user-a", "Actually coffee")
+    )
+    assert revision_source is not None
+    original_record_revision = store._record_revision
+
+    def fail_merge_revision(*args: object, **kwargs: object) -> None:
+        if kwargs.get("operation") == "merge":
+            raise RuntimeError("injected merge audit failure")
+        original_record_revision(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_record_revision", fail_merge_revision)
+
+    with pytest.raises(RuntimeError, match="injected merge audit failure"):
+        store.commit_review(
+            GROUP_A,
+            (revision_source,),
+            (
+                MemoryProposal(
+                    operation="revise",
+                    item_id=target.id,
+                    content="coffee",
+                    confidence=0.9,
+                ),
+            ),
+        )
+
+    assert {item.id for item in store.list_items(GROUP_A, include_expired=True)} == {
+        target.id,
+        survivor.id,
+    }
+    assert [source.id for source in store.pending_sources(GROUP_A, 10)] == [
+        revision_source
+    ]
+    with sqlite3.connect(store.path) as conn:
+        fts_ids = {
+            row[0] for row in conn.execute("SELECT item_id FROM memory_fts").fetchall()
+        }
+        deleted_audits = conn.execute(
+            "SELECT COUNT(*) FROM memory_revisions WHERE deleted_item_hash IS NOT NULL"
+        ).fetchone()[0]
+    assert fts_ids == {target.id, survivor.id}
+    assert deleted_audits == 0
+
+
 def test_hard_delete_scrubs_revisions_and_fts(store: LongTermMemoryStore) -> None:
     store.set_scope_enabled(GROUP_A, True)
     source_id = store.collect(_source(GROUP_A, "one", "user-a", "source text"))

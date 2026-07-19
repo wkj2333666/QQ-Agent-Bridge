@@ -571,7 +571,7 @@ class LongTermMemoryStore:
             content = self._content(proposal.content)
             category = str(row["category"])
             self._require_category(category)
-            self._find_duplicate_or_raise_collision(
+            duplicate = self._find_duplicate_or_raise_collision(
                 conn,
                 scope,
                 subject_kind=row["subject_kind"],
@@ -581,6 +581,50 @@ class LongTermMemoryStore:
                 sensitivity=row["sensitivity"],
                 exclude_item_id=item_id,
             )
+            if duplicate is not None:
+                return self._apply_operation(
+                    conn,
+                    scope,
+                    MemoryProposal(
+                        operation="merge",
+                        item_id=str(duplicate["id"]),
+                        related_item_ids=(item_id,),
+                        confidence=(
+                            proposal.confidence
+                            if proposal.confidence is not None
+                            else float(row["base_confidence"])
+                        ),
+                        source_kind=proposal.source_kind,
+                        actor_class=proposal.actor_class,
+                    ),
+                    now,
+                )
+            current_key = memory_identity_key(
+                subject_kind=row["subject_kind"],
+                subject_id=row["subject_id"],
+                category=category,
+                content=row["content"],
+                sensitivity=row["sensitivity"],
+            )
+            revised_key = memory_identity_key(
+                subject_kind=row["subject_kind"],
+                subject_id=row["subject_id"],
+                category=category,
+                content=content,
+                sensitivity=row["sensitivity"],
+            )
+            if current_key == revised_key:
+                return self._apply_operation(
+                    conn,
+                    scope,
+                    MemoryProposal.reinforce(
+                        item_id,
+                        confidence=proposal.confidence,
+                        source_kind=proposal.source_kind,
+                        actor_class=proposal.actor_class,
+                    ),
+                    now,
+                )
             confidence = self._confidence(
                 proposal.confidence
                 if proposal.confidence is not None
@@ -661,17 +705,43 @@ class LongTermMemoryStore:
                 return [item_id, self._insert_item(conn, scope, replacement, now)]
             return [item_id]
         if proposal.operation == "merge":
+            related_rows: list[sqlite3.Row] = []
             for related_id in proposal.related_item_ids:
                 related = self._get_item_row(conn, scope, related_id)
                 if related is not None and related["id"] != item_id:
-                    self._hard_delete_row(conn, related, actor_class=proposal.actor_class)
+                    related_rows.append(related)
+            for related in related_rows:
+                self._hard_delete_row(conn, related, actor_class=proposal.actor_class)
+            confidence = self._confidence(
+                proposal.confidence
+                if proposal.confidence is not None
+                else float(row["base_confidence"])
+            )
+            score = max(float(row["effective_score"]), confidence)
+            status = (
+                "active"
+                if row["status"] in {"candidate", "dormant"}
+                else str(row["status"])
+            )
             conn.execute(
                 """
                 UPDATE memory_items
-                SET source_count = source_count + ?, updated_at = ?, version = version + 1
+                SET base_confidence = MAX(base_confidence, ?), effective_score = ?,
+                    status = ?, source_count = source_count + ?, source_kind = ?,
+                    updated_at = ?, last_supported_at = ?, dormant_at = NULL,
+                    version = version + 1
                 WHERE id = ?
                 """,
-                (len(proposal.related_item_ids), now, item_id),
+                (
+                    confidence,
+                    score,
+                    status,
+                    len(related_rows),
+                    proposal.source_kind,
+                    now,
+                    now,
+                    item_id,
+                ),
             )
             self._record_revision(
                 conn,
@@ -682,6 +752,7 @@ class LongTermMemoryStore:
                 after_summary=str(row["content"]),
                 now=now,
             )
+            self._sync_fts(conn, item_id)
             return [item_id]
         raise AssertionError("all allowed operations are handled")
 

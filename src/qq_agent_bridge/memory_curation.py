@@ -337,6 +337,7 @@ class MemoryValidator:
         if reason is not None:
             return None, reason
 
+        target: MemoryItem | None = None
         if proposal.operation in STATEFUL_OPERATIONS:
             if self.store is None:
                 return None, "target_resolver_required"
@@ -405,6 +406,28 @@ class MemoryValidator:
             )
             if sensitivity_collision:
                 return None, "sensitivity_collision"
+        if proposal.operation == "revise" and duplicate is not None:
+            assert proposal.item_id is not None and target is not None
+            if duplicate.id == proposal.item_id:
+                proposal = MemoryProposal.reinforce(
+                    proposal.item_id,
+                    confidence=proposal.confidence,
+                    source_kind=proposal.source_kind,
+                    actor_class=proposal.actor_class,
+                )
+            else:
+                proposal = MemoryProposal(
+                    operation="merge",
+                    item_id=duplicate.id,
+                    related_item_ids=(proposal.item_id,),
+                    confidence=(
+                        proposal.confidence
+                        if proposal.confidence is not None
+                        else target.base_confidence
+                    ),
+                    source_kind=proposal.source_kind,
+                    actor_class=proposal.actor_class,
+                )
         proposal = self._candidate_if_ambiguous(proposal)
         if proposal.operation == "add" and duplicate is not None:
             proposal = MemoryProposal.reinforce(
@@ -607,6 +630,24 @@ class MemoryValidator:
         elif proposal.operation == "merge":
             for related_id in proposal.related_item_ids:
                 staged_items[related_id] = None
+            confidence = (
+                target.base_confidence
+                if proposal.confidence is None
+                else float(proposal.confidence)
+            )
+            staged_items[target.id] = replace(
+                target,
+                base_confidence=max(target.base_confidence, confidence),
+                effective_score=max(target.effective_score, confidence),
+                status=(
+                    "active"
+                    if target.status in {"candidate", "dormant"}
+                    else target.status
+                ),
+                source_kind=proposal.source_kind,
+                source_count=target.source_count + len(proposal.related_item_ids),
+                dormant_at=None,
+            )
         elif proposal.operation == "contradict":
             staged_items[target.id] = replace(target, status="contradicted")
             staged_content.append(proposal)
