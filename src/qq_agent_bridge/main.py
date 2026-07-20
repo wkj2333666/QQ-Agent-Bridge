@@ -2333,18 +2333,10 @@ class App:
         is_group: bool = data.get("is_group", False)
         if not chat_id:
             return
-
-        async def _wait_then_send() -> None:
-            for _ in range(60):
-                if bool(getattr(self.adapter, "is_connected", lambda: False)()):
-                    break
-                await asyncio.sleep(1)
-            try:
-                await self._send_text(chat_id, is_group, "重启完毕。", "")
-            except Exception:
-                logger.warning("failed to send reboot-complete notification", exc_info=True)
-
-        asyncio.create_task(_wait_then_send())
+        try:
+            await self._send_text(chat_id, is_group, "重启完毕。", "")
+        except Exception:
+            logger.warning("failed to send reboot-complete notification", exc_info=True)
 
     def _build_resource_manager(self, cfg: BridgeConfig) -> ResourceManager:
         self.transcriber, resources = self._resource_manager_parts(cfg)
@@ -2383,7 +2375,8 @@ class App:
                     type(exc).__name__,
                 )
             await self.adapter.start(self._handle)
-            await self._send_reboot_complete()
+            if hasattr(self.adapter, "set_on_connected"):
+                self.adapter.set_on_connected(self._send_reboot_complete)
             if not self.echo_only:
                 await self.scheduler.start()
             await asyncio.Future()  # run forever
