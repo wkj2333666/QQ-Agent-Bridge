@@ -67,6 +67,183 @@ def test_normalize_rejects_non_numeric_ids() -> None:
     assert _normalize_event(raw, "111") is None
 
 
+def test_normalize_image_maps_all_napcat_receive_fields() -> None:
+    """Per NapCat docs, received image segments carry url, file, file_id,
+    path, file_size, file_unique, and mime_type.  file is the basename/UUID;
+    file_id is the separate server-assigned ID.  The size field is file_size."""
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {
+                "type": "image",
+                "data": {
+                    "file": "ABCDEF1234567890.jpg",
+                    "url": "https://gchat.qpic.cn/download?appid=1407&fileid=x",
+                    "file_id": "EhI1ABCDEF1234567890",
+                    "path": "/home/napcat/data/image/ABCDEF.jpg",
+                    "file_size": 1048576,
+                    "file_unique": "a1b2c3d4e5f6",
+                    "mime_type": "image/jpeg",
+                },
+            }
+        ],
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert len(ev.resources) == 1
+    r = ev.resources[0]
+    assert r.kind == "image"
+    assert r.url == "https://gchat.qpic.cn/download?appid=1407&fileid=x"
+    # file_size is the correct field name per NapCat docs
+    assert r.size == 1048576
+    assert r.mime_type == "image/jpeg"
+
+
+def test_normalize_record_voice_maps_all_napcat_receive_fields() -> None:
+    """Per NapCat docs, received record segments have url, file, file_id,
+    file_size, and duration on top of the send-side file field."""
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {
+                "type": "record",
+                "data": {
+                    "file": "voice_abcdef.amr",
+                    "url": "https://gchat.qpic.cn/voice/download?fileid=xxx",
+                    "file_id": "EhIVoiceFileId",
+                    "path": "/home/napcat/data/record/voice_abcdef.amr",
+                    "file_size": 32768,
+                    "file_unique": "voice_unique_123",
+                    "duration": 11,
+                },
+            }
+        ],
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert len(ev.resources) == 1
+    r = ev.resources[0]
+    assert r.kind == "voice"
+    assert r.url == "https://gchat.qpic.cn/voice/download?fileid=xxx"
+    assert r.file_id == "EhIVoiceFileId"
+    assert r.size == 32768
+    assert r.duration_seconds == 11
+
+
+def test_normalize_video_maps_all_napcat_receive_fields() -> None:
+    """Per NapCat docs, received video segments carry url, file, file_id,
+    file_size, file_unique."""
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {
+                "type": "video",
+                "data": {
+                    "file": "video_abcdef.mp4",
+                    "url": "https://gchat.qpic.cn/video/download?fileid=vid",
+                    "file_id": "EhIVideoFileId",
+                    "path": "/home/napcat/data/video/video_abcdef.mp4",
+                    "file_size": 5242880,
+                    "file_unique": "video_unique_456",
+                },
+            }
+        ],
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert len(ev.resources) == 1
+    r = ev.resources[0]
+    assert r.kind == "video"
+    assert r.url == "https://gchat.qpic.cn/video/download?fileid=vid"
+    assert r.file_id == "EhIVideoFileId"
+    assert r.size == 5242880
+
+
+def test_normalize_mixed_message_text_plus_images_and_voice() -> None:
+    """Verify all resources are extracted from a mixed message with text,
+    multiple images, and a voice — NapCat sends them as a segment array."""
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {"type": "text", "data": {"text": "看看这些照片和语音"}},
+            {
+                "type": "image",
+                "data": {"file": "img1.jpg", "url": "https://example.com/1.jpg"},
+            },
+            {
+                "type": "image",
+                "data": {"file": "img2.jpg", "url": "https://example.com/2.jpg"},
+            },
+            {
+                "type": "record",
+                "data": {
+                    "file": "voice.amr",
+                    "url": "https://example.com/voice.amr",
+                    "duration": 5,
+                },
+            },
+        ],
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert ev.text == "看看这些照片和语音"
+    kinds = [r.kind for r in ev.resources]
+    assert kinds == ["image", "image", "voice"]
+
+
+def test_normalize_image_without_url_still_creates_resource() -> None:
+    """NapCat may not always provide url. The resource must still be created
+    so the pipeline can decide how to handle it — not silently dropped at
+    the normalization stage."""
+    raw = {
+        "post_type": "message",
+        "message_type": "group",
+        "message_id": 1,
+        "user_id": 1000000001,
+        "group_id": 2000000001,
+        "self_id": 111,
+        "time": 1,
+        "message": [
+            {
+                "type": "image",
+                "data": {"file": "no_url_image.jpg"},
+            }
+        ],
+    }
+    ev = _normalize_event(raw, "111")
+    assert ev is not None
+    assert len(ev.resources) == 1
+    r = ev.resources[0]
+    assert r.kind == "image"
+    assert r.url is None
+    # file_id falls back to file when file_id field is absent
+    assert r.file_id == "no_url_image.jpg"
+
+
 def test_normalize_preserves_image_file_and_url_resources() -> None:
     raw = {
         "post_type": "message",

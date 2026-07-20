@@ -297,18 +297,19 @@ def _url_resources(text: str, source_segment: int) -> list[ChatResource]:
 def _resource_from_segment(raw_type: str, data: dict[str, Any], idx: int) -> ChatResource | None:
     if raw_type == "image":
         logger.info(
-            "onebot_image_segment url=%s file=%s mime=%s size=%s",
+            "onebot_image_segment url=%s file=%s file_id=%s file_size=%s mime=%s",
             data.get("url", "")[:120],
             data.get("file", ""),
+            data.get("file_id", ""),
+            data.get("file_size", data.get("size", "")),
             data.get("mime_type", ""),
-            data.get("size", ""),
         )
         return ChatResource(
             kind="image",
             url=_str_or_none(data.get("url")),
-            file_id=_str_or_none(data.get("file")),
+            file_id=_str_or_none(data.get("file_id")) or _str_or_none(data.get("file")),
             name=_str_or_none(data.get("file")) or _str_or_none(data.get("name")),
-            size=_int_or_none(data.get("size")),
+            size=_int_or_none(data.get("file_size", data.get("size"))),
             mime_type=_str_or_none(data.get("mime_type")),
             source_segment=idx,
             raw_data=data,
@@ -323,7 +324,7 @@ def _resource_from_segment(raw_type: str, data: dict[str, Any], idx: int) -> Cha
                 or _str_or_none(data.get("file_name"))
                 or _str_or_none(data.get("file"))
             ),
-            size=_int_or_none(data.get("size")),
+            size=_int_or_none(data.get("file_size", data.get("size"))),
             mime_type=_str_or_none(data.get("mime_type")),
             source_segment=idx,
             raw_data=data,
@@ -343,9 +344,9 @@ def _resource_from_segment(raw_type: str, data: dict[str, Any], idx: int) -> Cha
         return ChatResource(
             kind="voice",
             url=_str_or_none(data.get("url")),
-            file_id=_str_or_none(data.get("file")),
+            file_id=_str_or_none(data.get("file_id")) or _str_or_none(data.get("file")),
             name=_str_or_none(data.get("file")),
-            size=_int_or_none(data.get("size")),
+            size=_int_or_none(data.get("file_size", data.get("size"))),
             mime_type=_str_or_none(data.get("mime_type")),
             duration_seconds=_int_or_none(data.get("duration"))
             or _int_or_none(data.get("duration_seconds")),
@@ -356,9 +357,9 @@ def _resource_from_segment(raw_type: str, data: dict[str, Any], idx: int) -> Cha
         return ChatResource(
             kind="video",
             url=_str_or_none(data.get("url")),
-            file_id=_str_or_none(data.get("file")),
+            file_id=_str_or_none(data.get("file_id")) or _str_or_none(data.get("file")),
             name=_str_or_none(data.get("file")),
-            size=_int_or_none(data.get("size")),
+            size=_int_or_none(data.get("file_size", data.get("size"))),
             source_segment=idx,
             raw_data=data,
         )
