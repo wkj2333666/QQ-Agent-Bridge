@@ -7,6 +7,8 @@ import shutil
 import wave
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
@@ -770,6 +772,7 @@ def test_rejects_outbox_that_is_not_inside_workspace(tmp_path: Path) -> None:
     assert warnings == ["已拒绝发送资源：输出目录未授权"]
 
 
+@pytest.mark.requires_local_env
 def test_rejects_outbox_replaced_by_symlink_after_job_start(tmp_path: Path) -> None:
     outbox = make_outbox(tmp_path)
     started = outbox.lstat()

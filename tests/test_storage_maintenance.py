@@ -180,6 +180,7 @@ def test_delete_candidate_removes_regular_tree(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+@pytest.mark.requires_local_env
 def test_delete_candidate_rejects_inode_replacement(tmp_path: Path) -> None:
     cfg, home = make_storage_cfg(tmp_path)
     target = _write(Path(cfg.agent.trace_root) / "old.jsonl", b"old")
@@ -195,6 +196,7 @@ def test_delete_candidate_rejects_inode_replacement(tmp_path: Path) -> None:
     assert target.read_bytes() == b"replacement"
 
 
+@pytest.mark.requires_local_env
 def test_delete_candidate_rechecks_identity_at_recursive_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
