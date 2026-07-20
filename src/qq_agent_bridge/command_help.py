@@ -104,6 +104,12 @@ COMMAND_HELP_METADATA: dict[str, CommandHelpSpec] = {
         examples=("/reload",),
         restrictions=("通常需要 owner 权限；正在运行的任务按现有策略处理。",),
     ),
+    "reboot": CommandHelpSpec(
+        summary="通过 systemd 重启 bridge 进程（不影响 napcat）。",
+        usage=("/reboot",),
+        examples=("/reboot",),
+        restrictions=("仅 owner 可用；重启过程约需数秒。",),
+    ),
     "schedule": CommandHelpSpec(
         summary="创建、查看和管理定时任务。",
         usage=(

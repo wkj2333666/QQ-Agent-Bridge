@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 import logging
 import re
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -389,6 +391,26 @@ class App:
             await self._send_text(ev.chat_id, ev.is_group, msg, ev.id)
             if okc:
                 await self._cleanup_policy()
+            return
+
+        if parsed.name == "reboot":
+            if not shutil.which("systemctl"):
+                await self._send_text(
+                    ev.chat_id, ev.is_group,
+                    "[error] systemctl 不可用，无法重启 bridge",
+                    ev.id,
+                )
+            else:
+                await self._send_text(
+                    ev.chat_id, ev.is_group,
+                    "bridge 正在重启，稍后恢复...",
+                    ev.id,
+                )
+                await self._cleanup_policy()
+                subprocess.Popen(
+                    ["systemctl", "--user", "restart", "qq-bridge.service"],
+                    start_new_session=True,
+                )
             return
 
         if parsed.name == "stop":

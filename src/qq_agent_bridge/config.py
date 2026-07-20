@@ -14,7 +14,7 @@ MENTION_MODES = frozenset(MENTION_MODE_OPTIONS)
 CommandAccess = Literal["disabled", "user", "owner"]
 COMMAND_ACCESS_LEVELS = frozenset({"disabled", "user", "owner"})
 # Preserve the authorization implied by the historical commands: true/false format.
-LEGACY_OWNER_COMMANDS = frozenset({"code", "shell", "reset", "stop", "approve", "reload"})
+LEGACY_OWNER_COMMANDS = frozenset({"code", "shell", "reset", "stop", "approve", "reload", "reboot"})
 
 
 @dataclass
