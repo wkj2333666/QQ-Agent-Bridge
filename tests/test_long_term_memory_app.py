@@ -592,7 +592,7 @@ def test_private_long_term_retrieval_uses_trusted_sender_scope(
     calls: list[tuple[Any, ...]] = []
 
     class CapturingRetriever:
-        def retrieve(self, *args: Any, **kwargs: Any) -> str:
+        def retrieve(self, *args: Any) -> str:
             calls.append(args)
             return "private context"
 

@@ -481,27 +481,21 @@ def test_retrieval_returns_empty_when_scope_or_feature_is_disabled(
     assert LongTermMemoryRetriever(store, cfg).retrieve(GROUP, "u1", (), None, "继续") == ""
 
 
-def test_owner_sees_all_group_memories_standard_user_only_sees_own(
+def test_owner_sees_all_via_memory_list_all_selector(
     store: LongTermMemoryStore,
 ) -> None:
+    """The /memory list command for owner uses "all" selector, not the retriever."""
     add_memory(store, GROUP, subject_kind="group", subject_id=GROUP.id, content="GROUP-RULE")
     add_memory(store, GROUP, subject_kind="user", subject_id="u1", content="U1-PREFERENCE")
     add_memory(store, GROUP, subject_kind="user", subject_id="u2", content="U2-FACT")
 
+    # Owner "all" (no subject filter) returns everything in the scope
+    all_items = store.list_items(GROUP, statuses=("active", "candidate", "dormant"), limit=10_000)
+    assert len(all_items) == 3
+    contents = {item.content for item in all_items}
+    assert contents == {"GROUP-RULE", "U1-PREFERENCE", "U2-FACT"}
+
+    # Retriever path unchanged — regular user still gets scoped retrieval
     retriever = make_retriever(store)
-
-    # Owner sees all 3 memories
-    owner_text = retriever.retrieve(GROUP, "owner", ("u2",), None, "", is_owner=True)
-    assert "GROUP-RULE" in owner_text
-    assert "U1-PREFERENCE" in owner_text
-    assert "U2-FACT" in owner_text
-
-    # Regular user u1 only sees group + their own + mentioned u2
-    user_text = retriever.retrieve(GROUP, "u1", ("u2",), None, "")
-    assert "GROUP-RULE" in user_text
-    assert "U1-PREFERENCE" in user_text
-    assert "U2-FACT" in user_text  # u2 is mentioned, so visible
-
-    # Regular user u1 without mentioning u2 cannot see u2's memory
     solo_text = retriever.retrieve(GROUP, "u1", (), None, "")
     assert "U2-FACT" not in solo_text
