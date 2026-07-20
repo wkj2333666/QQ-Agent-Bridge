@@ -31,6 +31,7 @@ COMMANDS: set[str] = {
     "mode",
     "reset",
     "reload",
+    "reboot",
     "schedule",
     "memory",
 }

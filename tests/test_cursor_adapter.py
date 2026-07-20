@@ -346,7 +346,7 @@ def test_streaming_sends_tool_call_progress_before_process_exit() -> None:
             stderr.feed_eof()
         out, _err = await task
 
-        assert progress == ["正在查看相关说明。"]
+        assert progress == ["正在查看相关说明…"]
         return out
 
     out = asyncio.run(run_case())
@@ -423,7 +423,7 @@ def test_streaming_flushes_assistant_progress_before_tool_call_progress() -> Non
 
     assert progress[:2] == [
         "正在生成说明图，先查看图片生成与 QQ 发送规范。",
-        "正在查看相关说明。",
+        "正在查看相关说明…",
     ]
     assert out == "画好啦！"
 
@@ -457,10 +457,10 @@ def test_streaming_tool_call_progress_hides_internal_tool_details() -> None:
         }
     )
 
-    assert started == "正在生成语音。"
-    assert completed == "语音生成完成。"
+    assert started == "正在处理语音…"
+    assert completed == "语音处理完成。"
     assert generic == ""
-    assert transcription == "正在转写视频字幕。"
+    assert transcription == "正在转写语音…"
     visible = "\n".join((started, completed, generic, transcription)).lower()
     assert "edge" not in visible
     assert "tts" not in visible
