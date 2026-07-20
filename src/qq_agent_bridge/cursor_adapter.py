@@ -930,19 +930,19 @@ class CursorAdapter:
             item in text for item in ("bilibili", "b站", "video", "视频")
         ):
             return "视频内容获取完成。" if completed else "正在获取视频内容…"
+        # Read / reference — before image so "查看图片规范" means reading, not image work
+        if any(item in text for item in ("read", "reference", "skill", "规范", "说明", "查看", "读取")):
+            return "相关说明已看完。" if completed else "正在查看相关说明…"
         # Image — skip for pure inspection
         if not is_inspect and any(
             item in text
             for item in ("image", "picture", "draw", "paint", "图片", "图像", "绘图", "画")
         ):
             return "图片处理完成。" if completed else "正在处理图片…"
-        # Download — generic, after voice/video/image so specific matches win.
+        # Download — generic, after voice/video so specific matches win.
         # Skip pure inspection (e.g. "check download status" is not downloading).
         if not is_inspect and any(item in text for item in ("download", "下载")):
             return "下载完成。" if completed else "正在下载…"
-        # Read / reference
-        if any(item in text for item in ("read", "reference", "skill", "规范", "说明", "查看", "读取")):
-            return "相关说明已看完。" if completed else "正在查看相关说明…"
         # Search — applies to search, fetch, web
         if any(item in text for item in ("search", "web", "browse", "fetch", "搜索", "联网", "网页", "资料")):
             return "资料查找完成。" if completed else "正在查找资料…"

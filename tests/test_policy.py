@@ -208,6 +208,15 @@ def test_parse_reload_command() -> None:
     assert parsed.args == ""
 
 
+def test_parse_reboot_command() -> None:
+    cfg = BridgeConfig()
+    pol = Policy(cfg, fake_runner)
+    parsed = pol.parse("@1000000001 /reboot")
+    assert parsed is not None
+    assert parsed.name == "reboot"
+    assert parsed.args == ""
+
+
 def test_parse_profile_command() -> None:
     cfg = BridgeConfig()
     pol = Policy(cfg, fake_runner)

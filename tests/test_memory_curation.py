@@ -441,6 +441,25 @@ def test_parse_curator_output_rejects_non_json_numeric_constants(
 
 
 @pytest.mark.parametrize(
+    "wrapped",
+    [
+        '```json\n{"operations":[]}\n```',
+        '```\n{"operations":[]}\n```',
+        'Sure! Here is the JSON:\n\n{"operations":[]}',
+        '{"operations":[]}\n\nHope that helps!',
+        '  {"operations":[]}  ',
+        '\n{"operations":[]}\n',
+    ],
+)
+def test_parse_curator_output_extracts_json_from_markdown_and_text(
+    wrapped: str,
+) -> None:
+    """Model outputs often wrap JSON in markdown fences or add prose."""
+    parsed = parse_curator_output(wrapped)
+    assert parsed == ()
+
+
+@pytest.mark.parametrize(
     "operation",
     [
         {"operation": "add"},

@@ -423,11 +423,39 @@ class MemoryCollector:
         return self.store.collect(source) is not None
 
 
+def _extract_curator_json(text: str) -> str:
+    """Extract a JSON object from model output that may have markdown or prose."""
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    # Strip markdown code fences: ```json / ```  pairs
+    import re as _re
+
+    fence = _re.match(r"```(?:json)?\s*\n(.*?)\n```", stripped, _re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    # Find the outermost { … } pair
+    start = stripped.find("{")
+    if start == -1:
+        return stripped
+    depth = 0
+    for i in range(start, len(stripped)):
+        ch = stripped[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : i + 1]
+    return stripped
+
+
 def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
     """Parse the curator's exact JSON envelope without coercing field types."""
+    extracted = _extract_curator_json(text)
     try:
         payload = json.loads(
-            text,
+            extracted,
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
