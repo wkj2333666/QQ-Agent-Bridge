@@ -866,6 +866,34 @@ def test_non_owner_explicit_count_cap_per_chat(tmp_path: Path) -> None:
     asyncio.run(go())
 
 
+def test_schedule_help_shows_non_owner_constraints(tmp_path: Path) -> None:
+    """Non-owner help text includes safety constraint information."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        await app._handle(make_event("/schedule help", sender="reader"))
+        reply = adapter.sent[-1][2]
+        assert "非 owner 用户结构化限制" in reply
+        assert "最小周期" in reply
+        assert "最多次数" in reply
+        assert "冷却" in reply
+
+    asyncio.run(go())
+
+
+def test_schedule_help_omits_constraints_for_owner(tmp_path: Path) -> None:
+    """Owner help text does not show non-owner constraint section."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        await app._handle(make_event("/schedule help", sender="owner"))
+        reply = adapter.sent[-1][2]
+        assert "每天早上八点" in reply  # still has examples
+        assert "非 owner 用户" not in reply
+
+    asyncio.run(go())
+
+
 def test_owner_bypasses_all_non_owner_constraints(tmp_path: Path) -> None:
     """Owner schedules are never gated by non-owner safety constraints."""
 
