@@ -200,6 +200,12 @@ class MemoryCommandService:
         scope = self._scope(ev)
         if not self.store.is_scope_enabled(scope):
             return MemoryCommandResult("长期记忆尚未开启，请先使用 /memory enable。")
+        # Reject structured commands that mention other QQ users — only
+        # record facts about yourself. The natural-language curator path
+        # has its own LLM gate and is not affected by this check.
+        mentioned = _qq_numbers_in_text(content)
+        if any(qq != ev.sender_id for qq in mentioned):
+            return MemoryCommandResult("只能记录关于你自己的记忆，不能提到别人的 QQ 号。")
         proposal = MemoryProposal.add(
             subject_kind="user",
             subject_id=ev.sender_id,
@@ -885,6 +891,12 @@ class MemoryCommandService:
             "help": "/memory help [子命令]",
         }
         return MemoryCommandResult(f"用法：{usage[command]}")
+
+
+def _qq_numbers_in_text(text: str) -> list[str]:
+    """Extract QQ-like numbers from @mentions in text."""
+    import re as _re
+    return [m.group(1) for m in _re.finditer(r"@(\d{5,12})\b", text)]
 
 
 def build_memory_command_interpreter(
