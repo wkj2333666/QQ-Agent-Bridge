@@ -580,3 +580,53 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("schedule draft must be an object")
     return value
+
+
+# -- Non-owner schedule safety helpers -------------------------------------------
+
+_FREQ_BASE_SECONDS: dict[str, int] = {
+    "SECONDLY": 1,
+    "MINUTELY": 60,
+    "HOURLY": 3600,
+    "DAILY": 86400,
+    "WEEKLY": 604800,
+    "MONTHLY": 2592000,  # 30-day nominal lower bound
+    "YEARLY": 31536000,  # 365-day nominal lower bound
+}
+
+
+def rrule_min_interval_seconds(rrule_str: str) -> int:
+    """Conservative lower bound on the recurrence interval in seconds.
+
+    Parses FREQ and INTERVAL from a normalised RRULE string.  BYxxx constraints
+    can only filter occurrences out, so FREQ × INTERVAL is the shortest possible
+    gap.  Returns 0 when the RRULE cannot be parsed.
+    """
+    try:
+        parts = dict(p.split("=", 1) for p in rrule_str.upper().split(";"))
+    except (ValueError, TypeError):
+        return 0
+    freq = parts.get("FREQ", "")
+    interval = int(parts.get("INTERVAL", "1"))
+    base = _FREQ_BASE_SECONDS.get(freq, 0)
+    if base == 0 or interval < 1:
+        return 0
+    return base * interval
+
+
+def rrule_is_unbounded(rrule_str: str) -> bool:
+    """True when the RRULE has no COUNT or UNTIL — it repeats forever."""
+    upper = rrule_str.upper()
+    return "COUNT=" not in upper and "UNTIL=" not in upper
+
+
+def rrule_occurrence_count(rrule_str: str) -> int | None:
+    """Return the COUNT value, or None if not present."""
+    upper = rrule_str.upper()
+    for part in upper.split(";"):
+        if part.startswith("COUNT="):
+            try:
+                return int(part.split("=", 1)[1])
+            except (ValueError, TypeError):
+                return None
+    return None

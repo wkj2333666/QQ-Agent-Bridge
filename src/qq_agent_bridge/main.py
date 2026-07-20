@@ -51,6 +51,9 @@ from .schedule_parser import (
     NaturalScheduleOutcome,
     ScheduleParseError,
     parse_explicit_schedule,
+    rrule_is_unbounded,
+    rrule_min_interval_seconds,
+    rrule_occurrence_count,
 )
 from .schedule_store import ScheduleStore
 from .scheduler import Schedule, ScheduleExecutionResult, ScheduleRun, Scheduler
@@ -1404,6 +1407,11 @@ class App:
             await self._send_text(ev.chat_id, ev.is_group, f"设置失败：{exc}", ev.id)
             return
         if spec is not None:
+            if not self.cfg.is_owner(ev.sender_id):
+                denied = self._check_non_owner_schedule_safety(spec, ev)
+                if denied:
+                    await self._send_text(ev.chat_id, ev.is_group, f"设置失败：{denied}", ev.id)
+                    return
             try:
                 schedule = self.scheduler.create(
                     replace(spec, reply_to_message_id=self._schedule_reply_to(ev)),
@@ -1517,6 +1525,64 @@ class App:
             return "cmd-disabled"
         if access == "owner" and not self.cfg.is_owner(sender_id):
             return "owner-only"
+        return None
+
+    def _check_non_owner_schedule_safety(
+        self,
+        spec: object,
+        ev: ChatEvent,
+    ) -> str | None:
+        """Hard safety constraints for non-owner explicit schedule creation.
+
+        These are conservative, non-LLM checks that mirror the rules in the
+        natural-language safety prompt (skills/…/schedule-safety.md).  Owners
+        always bypass this gate.  The natural-language path has its own LLM
+        safety review and does not route through this method.
+        """
+        cfg = self.cfg.scheduler
+        # Cooldown — prevent rapid-fire creation
+        if cfg.non_owner_cooldown_seconds > 0:
+            recent = self.schedule_store.list_for_chat(
+                ev.chat_id, ev.is_group, creator_id=ev.sender_id, active_only=True
+            )
+            if recent:
+                now = int(time.time())
+                newest_created = max(item.created_at for item in recent)
+                if now - newest_created < cfg.non_owner_cooldown_seconds:
+                    return f"创建太频繁，请 {cfg.non_owner_cooldown_seconds} 秒后再试"
+
+        # Total active count per chat
+        user_active = self.schedule_store.list_for_chat(
+            ev.chat_id, ev.is_group, creator_id=ev.sender_id, active_only=True
+        )
+        if len(user_active) >= max(1, cfg.non_owner_max_schedules_per_chat):
+            return f"每个会话最多 {cfg.non_owner_max_schedules_per_chat} 个定时任务"
+
+        rrule = getattr(spec, "rrule", None)
+        kind = getattr(spec, "kind", None)
+        mentions = getattr(spec, "mentions", ())
+
+        # Recurring-schedule checks
+        if kind == "rrule" and isinstance(rrule, str) and rrule:
+            # Interval floor
+            min_iv = rrule_min_interval_seconds(rrule)
+            if 0 < min_iv < max(1, cfg.non_owner_min_interval_seconds):
+                return f"定时任务周期不能少于 {cfg.non_owner_min_interval_seconds} 秒"
+
+            # No forever schedules for non-owners
+            if rrule_is_unbounded(rrule) and not cfg.non_owner_allow_unbounded:
+                return "不允许创建无限次数的定时任务"
+
+            # Occurrence cap
+            count = rrule_occurrence_count(rrule)
+            if count is not None and count > max(1, cfg.non_owner_max_occurrences):
+                return f"定时任务次数不能超过 {cfg.non_owner_max_occurrences}"
+
+        # @mention cap
+        mention_count = len(mentions)
+        if mention_count > max(0, cfg.non_owner_max_mentions):
+            return f"最多只能 @ {cfg.non_owner_max_mentions} 个人"
+
         return None
 
     def _schedule_mentions(self, ev: ChatEvent) -> tuple[str, ...]:

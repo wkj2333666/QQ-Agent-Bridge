@@ -241,6 +241,15 @@ class SchedulerConfig:
     misfire_grace_seconds: int = 300
     max_consecutive_failures: int = 5
     debug: bool = False
+    # Non-owner safety constraints — hardened defaults for explicit structured
+    # schedule creation.  Owners always bypass these; the natural-language path
+    # runs its own LLM safety review and is not affected by these limits.
+    non_owner_min_interval_seconds: int = 300
+    non_owner_allow_unbounded: bool = True
+    non_owner_max_occurrences: int = 10
+    non_owner_max_mentions: int = 1
+    non_owner_max_schedules_per_chat: int = 5
+    non_owner_cooldown_seconds: int = 30
 
 
 @dataclass

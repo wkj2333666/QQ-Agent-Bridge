@@ -176,6 +176,14 @@ scheduler:
   misfire_grace_seconds: 300
   max_consecutive_failures: 5
   debug: false
+  # Non-owner safety constraints for explicit structured schedule creation.
+  # (Natural language path uses LLM safety review; these limits do not apply.)
+  non_owner_min_interval_seconds: 300    # floor for recurrence interval
+  non_owner_allow_unbounded: true        # allow "forever" for non-owners
+  non_owner_max_occurrences: 10          # max COUNT for finite schedules
+  non_owner_max_mentions: 1              # max @-targets per schedule
+  non_owner_max_schedules_per_chat: 5    # per-chat active limit
+  non_owner_cooldown_seconds: 30         # minimum seconds between creations
 
 proactive:
   enabled: true
