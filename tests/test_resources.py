@@ -828,3 +828,250 @@ def test_forward_chat_record_context_truncates_long_user_text(tmp_path: Path) ->
     assert len(context) < 1200
     assert long_text not in context
     assert "..." in context
+
+
+# ── resource pipeline e2e tests ──────────────────────────────────────────────
+
+
+def test_image_with_valid_url_is_downloaded_and_appears_in_context(
+    tmp_path: Path,
+) -> None:
+    """Image resource with valid URL is fetched, staged, and referenced in context."""
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        assert url == "https://qq.example/photo.jpg"
+        assert limit == 1024
+        return b"tiny-image-payload", "image/jpeg"
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (ChatResource(kind="image", url="https://qq.example/photo.jpg", name="photo.jpg"),)
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert len(refs) == 1
+    assert refs[0].kind == "image"
+    assert refs[0].local_path is not None
+    assert refs[0].local_path.endswith(".jpg")
+    local = tmp_path / refs[0].local_path
+    assert local.read_bytes() == b"tiny-image-payload"
+    assert local.exists()
+
+    context = format_resource_context(refs)
+    assert "- image:" in context
+    assert refs[0].local_path in context
+
+
+def test_image_with_empty_url_is_silently_skipped(tmp_path: Path) -> None:
+    """Image resource with url="" is not treated as an error — prepare skips it."""
+    fetch_called = False
+
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        nonlocal fetch_called
+        fetch_called = True
+        return b"", "image/jpeg"
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (ChatResource(kind="image", url="", name="empty.jpg"),)
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert refs == ()
+    assert not fetch_called
+    # format_resource_context must not crash on an empty tuple
+    assert format_resource_context(()) == ""
+    assert format_resource_context(refs) == ""
+
+
+def test_file_resource_is_downloaded_and_staged(tmp_path: Path) -> None:
+    """File resource is downloaded, staged under workspace, and appears in context."""
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        assert url == "https://qq.example/doc.txt"
+        return b"file-payload", "text/plain"
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (ChatResource(kind="file", url="https://qq.example/doc.txt", name="doc.txt"),)
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert len(refs) == 1
+    assert refs[0].kind == "file"
+    assert refs[0].local_path is not None
+    local = tmp_path / refs[0].local_path
+    assert local.read_bytes() == b"file-payload"
+    assert local.exists()
+
+    context = format_resource_context(refs)
+    assert "- file:" in context
+    assert refs[0].local_path in context
+
+
+def test_url_resource_is_passed_through_without_download(tmp_path: Path) -> None:
+    """URL resource keeps its original url; fetch is never called."""
+    fetch_called = False
+
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        nonlocal fetch_called
+        fetch_called = True
+        return b"", "text/plain"
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (ChatResource(kind="url", url="https://example.com/article", name="article"),)
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert not fetch_called
+    assert len(refs) == 1
+    assert refs[0].kind == "url"
+    assert refs[0].url == "https://example.com/article"
+    assert refs[0].local_path is None
+
+    context = format_resource_context(refs)
+    assert "- url:" in context
+    assert "https://example.com/article" in context
+
+
+def test_forward_resource_text_is_captured(tmp_path: Path) -> None:
+    """Forward resource text is captured without any download."""
+    manager = ResourceManager(make_cfg(tmp_path))
+    ev = make_ev(
+        (
+            ChatResource(
+                kind="forward",
+                name="群聊的聊天记录",
+                raw_data={
+                    "messages": [
+                        {
+                            "sender_id": "111",
+                            "sender_name": "Alice",
+                            "text": "第一条消息",
+                        },
+                        {
+                            "sender_id": "222",
+                            "sender_name": "Bob",
+                            "text": "第二条消息 https://example.com/link",
+                        },
+                    ]
+                },
+            ),
+        )
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert len(refs) == 1
+    assert refs[0].kind == "forward"
+    assert refs[0].local_path is None
+    assert refs[0].text is not None
+    assert "QQ批量转发" in refs[0].text
+    assert "Alice" in refs[0].text
+    assert "第一条消息" in refs[0].text
+
+    context = format_resource_context(refs)
+    assert "Alice" in context
+    assert "第一条消息" in context
+    assert "Bob" in context
+    assert "https://example.com/link" in context
+
+
+def test_multiple_resources_are_all_prepared_not_just_the_first(
+    tmp_path: Path,
+) -> None:
+    """Event with image + file + url — all three appear in prepared results."""
+    fetch_count = 0
+
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        nonlocal fetch_count
+        fetch_count += 1
+        if "photo" in url:
+            return b"image-payload", "image/jpeg"
+        if "doc" in url:
+            return b"file-payload", "text/plain"
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (
+            ChatResource(
+                kind="image", url="https://qq.example/photo.jpg", name="photo.jpg"
+            ),
+            ChatResource(
+                kind="file", url="https://qq.example/doc.txt", name="doc.txt"
+            ),
+            ChatResource(
+                kind="url", url="https://example.com/link", name="link"
+            ),
+        )
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    assert len(refs) == 3
+    assert fetch_count == 2  # image + file downloaded; url skipped
+
+    kinds = [r.kind for r in refs]
+    assert "image" in kinds
+    assert "file" in kinds
+    assert "url" in kinds
+
+    # Image was downloaded and staged
+    image_ref = next(r for r in refs if r.kind == "image")
+    assert image_ref.local_path is not None
+    assert (tmp_path / image_ref.local_path).read_bytes() == b"image-payload"
+
+    # File was downloaded and staged
+    file_ref = next(r for r in refs if r.kind == "file")
+    assert file_ref.local_path is not None
+    assert (tmp_path / file_ref.local_path).read_bytes() == b"file-payload"
+
+    # URL was passed through
+    url_ref = next(r for r in refs if r.kind == "url")
+    assert url_ref.url == "https://example.com/link"
+    assert url_ref.local_path is None
+
+    context = format_resource_context(refs)
+    assert "- image:" in context
+    assert "- file:" in context
+    assert "- url:" in context
+
+
+def test_resource_download_failure_does_not_block_remaining_resources(
+    tmp_path: Path,
+) -> None:
+    """A failed download is silently skipped; subsequent valid resources still process."""
+    async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+        if "unreachable" in url:
+            raise RuntimeError("connection refused")
+        return b"good-payload", "image/jpeg"
+
+    manager = ResourceManager(make_cfg(tmp_path), fetch=fetch)
+    ev = make_ev(
+        (
+            ChatResource(
+                kind="image", url="https://unreachable.example/bad.jpg", name="bad.jpg"
+            ),
+            ChatResource(
+                kind="image", url="https://qq.example/good.jpg", name="good.jpg"
+            ),
+        )
+    )
+
+    refs = asyncio.run(manager.prepare(ev))
+
+    # Only the second (valid) resource should survive
+    assert len(refs) == 1
+    assert refs[0].kind == "image"
+    assert refs[0].local_path is not None
+    local = tmp_path / refs[0].local_path
+    assert local.read_bytes() == b"good-payload"
+
+    # The failed resource must not leak into context
+    context = format_resource_context(refs)
+    assert "bad.jpg" not in context
+    assert "- image:" in context
