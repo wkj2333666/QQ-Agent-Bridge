@@ -1078,6 +1078,88 @@ def test_curator_accepts_markdown_wrapped_json_output(
     assert outcome.accepted[0].content == "喜欢喝咖啡"
 
 
+def test_e2e_collection_trigger_review_commit_pipeline(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    """Full MemoryReviewCoordinator pipeline: collection -> trigger -> review -> commit.
+
+    Verifies that after a successful review triggered via review_now:
+    - memory_items table has new rows with the expected content
+    - review_buffer has no remaining pending rows
+    """
+    async def go() -> None:
+        # Step 1: Collect messages into review_buffer
+        source_id_1 = collect_source(store, message_id="m1", text="我喜欢简洁回答")
+        source_id_2 = collect_source(store, message_id="m2", text="我每天都喝咖啡")
+        assert store.status(GROUP).pending_count == 2
+
+        # Step 2: Build coordinator with a FakeAgent that returns clean JSON
+        # (not markdown-wrapped -- the real model may return clean JSON directly)
+        agent = FakeAgent(
+            json.dumps(
+                {
+                    "operations": [
+                        {
+                            "operation": "add",
+                            "source_ids": [source_id_1],
+                            "subject_kind": "user",
+                            "subject_id": "u1",
+                            "category": "preference",
+                            "content": "喜欢简洁回答",
+                            "confidence": 0.91,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "self_statement",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        },
+                        {
+                            "operation": "add",
+                            "source_ids": [source_id_2],
+                            "subject_kind": "user",
+                            "subject_id": "u1",
+                            "category": "preference",
+                            "content": "每天都喝咖啡",
+                            "confidence": 0.91,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "self_statement",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        },
+                    ]
+                }
+            )
+        )
+        coordinator = make_coordinator(store, agent, cfg, tmp_path)
+
+        # Step 3: Trigger a review
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        # Step 4: Verify items appear in memory_items table
+        assert outcome.error is None
+        assert len(outcome.committed) == 2
+        committed_contents = {item.content for item in outcome.committed}
+        assert "喜欢简洁回答" in committed_contents
+        assert "每天都喝咖啡" in committed_contents
+
+        # Step 5: Verify review_buffer has no remaining pending rows
+        assert store.status(GROUP).pending_count == 0
+
+        # Step 6: Verify items are retrievable via list_items
+        items = store.list_items(GROUP, limit=10)
+        assert len(items) == 2
+        item_contents = {item.content for item in items}
+        assert "喜欢简洁回答" in item_contents
+        assert "每天都喝咖啡" in item_contents
+
+    asyncio.run(go())
+
+
 def test_stop_cancels_an_uncommitted_explicit_review(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,
