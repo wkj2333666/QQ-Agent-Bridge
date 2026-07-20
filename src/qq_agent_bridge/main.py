@@ -1607,29 +1607,41 @@ class App:
     def _schedule_help_text(self, ev: ChatEvent | None = None) -> str:
         zone = self.cfg.scheduler.timezone
         permission = self.cfg.command_access("schedule", ev.chat_id if ev and ev.is_group else None)
-        return "\n".join(
-            [
-                f"/schedule 权限：{permission}。",
-                "用法：/schedule <自然语言规则>，或 /schedule <结构化规则>。",
-                f"定时任务使用时区：{zone}",
-                "自然语言（推荐）：",
-                "/schedule 明天早上十点提醒我喝水 噔噔噔",
-                "/schedule 每天早上八点告诉我北京市天气",
-                "/schedule 每月最后一个工作日下午六点整理本月工作",
-                "结构化写法：",
-                "/schedule once 2026-07-14 08:00 -- send 记得开会",
-                "/schedule in 10m -- send 起来活动一下",
-                "/schedule daily 08:00 -- task 查询北京市天气",
-                "/schedule weekly 周二 08:00 -- send 喝水",
-                "/schedule every 2h count 5 -- task 检查服务状态",
-                "/schedule every 30m from 2026-07-14 09:00 until 2026-07-14 12:00 -- ask 讲个笑话",
-                "/schedule every 1h forever -- task 检查服务状态",
-                "任意周期高级写法：",
-                "/schedule rrule 2026-07-31 18:00 FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1 -- task 整理本月工作",
-                "管理：/schedule list、show <索引>、pause <索引>、resume <索引>、run <索引>、cancel <索引>",
-                "索引支持 0、1、2 和 -1、-2；省略时默认 -1，例如 /schedule cancel -1。",
-            ]
-        )
+        is_owner = ev is not None and self.cfg.is_owner(ev.sender_id)
+        lines = [
+            f"/schedule 权限：{permission}。",
+            "用法：/schedule <自然语言规则>，或 /schedule <结构化规则>。",
+            f"定时任务使用时区：{zone}",
+            "自然语言（推荐）：",
+            "/schedule 明天早上十点提醒我喝水 噔噔噔",
+            "/schedule 每天早上八点告诉我北京市天气",
+            "/schedule 每月最后一个工作日下午六点整理本月工作",
+            "结构化写法：",
+            "/schedule once 2026-07-14 08:00 -- send 记得开会",
+            "/schedule in 10m -- send 起来活动一下",
+            "/schedule daily 08:00 -- task 查询北京市天气",
+            "/schedule weekly 周二 08:00 -- send 喝水",
+            "/schedule every 2h count 5 -- task 检查服务状态",
+            "/schedule every 30m from 2026-07-14 09:00 until 2026-07-14 12:00 -- ask 讲个笑话",
+            "/schedule every 1h forever -- task 检查服务状态",
+            "任意周期高级写法：",
+            "/schedule rrule 2026-07-31 18:00 FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1 -- task 整理本月工作",
+            "管理：/schedule list、show <索引>、pause <索引>、resume <索引>、run <索引>、cancel <索引>",
+            "索引支持 0、1、2 和 -1、-2；省略时默认 -1，例如 /schedule cancel -1。",
+        ]
+        if not is_owner:
+            cfg = self.cfg.scheduler
+            lines.append("")
+            lines.append("非 owner 用户结构化限制：")
+            lines.append(f"  最小周期：{cfg.non_owner_min_interval_seconds} 秒")
+            lines.append(f"  最多次数：{cfg.non_owner_max_occurrences}")
+            if not cfg.non_owner_allow_unbounded:
+                lines.append("  无限循环：不允许")
+            lines.append(f"  最大 @人数：{cfg.non_owner_max_mentions}")
+            lines.append(f"  每会话最多：{cfg.non_owner_max_schedules_per_chat} 个定时任务")
+            lines.append(f"  创建冷却：{cfg.non_owner_cooldown_seconds} 秒")
+            lines.append("自然语言创建不受上述限制，但需通过安全审查。")
+        return "\n".join(lines)
 
     def _schedule_list_text(self, ev: ChatEvent) -> str:
         schedules = self.schedule_store.list_for_chat(
