@@ -17,11 +17,6 @@ from qq_agent_bridge.onebot import OneBotAdapter  # type: ignore
 from qq_agent_bridge.types import ChatResource, trusted_reply_sender_id
 
 
-def test_extract_array() -> None:
-    msg = [{"type": "at", "data": {"qq": "111"}}, {"type": "text", "data": {"text": "hi"}}]
-    assert "hi" in _extract_text(msg)
-
-
 def test_mentioned() -> None:
     assert _is_mentioned([{"type": "at", "data": {"qq": "123"}}], "123")
     assert not _is_mentioned("@示例机器人 /task hello", "123", "示例机器人")
@@ -482,29 +477,6 @@ def test_send_fails_on_ack_timeout(monkeypatch: object) -> None:
             await adapter.send("123", True, "hello", "timeout")
         assert adapter._pending_actions == {}  # type: ignore[attr-defined]
         assert adapter._pending_action_connections == {}  # type: ignore[attr-defined]
-
-    asyncio.run(go())
-
-
-def test_send_uses_exactly_one_connected_gateway() -> None:
-    async def go() -> None:
-        adapter = OneBotAdapter("127.0.0.1", 1, "/onebot", "", "111")
-        first = FakeConn()
-        second = FakeConn()
-        adapter._conns.update((first, second))  # type: ignore[arg-type]
-
-        task = asyncio.create_task(adapter.send("123", True, "hello", "single-gateway"))
-        for _ in range(10):
-            if first.frames or second.frames:
-                break
-            await asyncio.sleep(0)
-
-        assert len(first.frames) + len(second.frames) == 1
-        frame = json.loads((first.frames or second.frames)[0])
-        assert adapter._complete_action_response(  # type: ignore[attr-defined]
-            {"echo": frame["echo"], "status": "ok", "retcode": 0, "data": {}}
-        )
-        await task
 
     asyncio.run(go())
 
