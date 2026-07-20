@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
-from qq_agent_bridge.policy import Job, Policy  # type: ignore
+from qq_agent_bridge.policy import COMMANDS, Job, Policy  # type: ignore
 from qq_agent_bridge.types import ChatEvent  # type: ignore
 
 
@@ -717,3 +717,23 @@ def test_cleanup_prunes_excess_waiting_approval_jobs() -> None:
     waiting = [job for job in pol.jobs.values() if job.state == "waiting_approval"]
     assert len(waiting) == 1
     assert waiting[0].args == "2"
+
+
+def test_all_config_commands_are_registered() -> None:
+    """Every command listed in config.yaml and config.example.yaml must
+    be in the COMMANDS set so that /reboot-class bugs don't ship again."""
+
+    root = Path(__file__).resolve().parents[1]
+    missing: dict[str, set[str]] = {}
+    for config_name in ("config.yaml", "config.example.yaml"):
+        config_path = root / config_name
+        if not config_path.exists():
+            continue
+        cfg = BridgeConfig.load(config_path)
+        for name in cfg.commands:
+            if name not in COMMANDS:
+                missing.setdefault(config_name, set()).add(name)
+
+    assert missing == {}, (
+        f"Commands in config but not in policy.COMMANDS: {missing}"
+    )
