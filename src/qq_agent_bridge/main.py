@@ -2535,7 +2535,6 @@ class App:
                 real_mentions,
                 quoted_sender,
                 query,
-                is_owner=self.cfg.is_owner(str(current_sender)),
             )
         except Exception as exc:  # noqa: BLE001 - memory lookup must not block chat
             logger.warning(

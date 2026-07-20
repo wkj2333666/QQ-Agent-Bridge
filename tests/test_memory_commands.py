@@ -167,12 +167,24 @@ def test_group_member_and_owner_lists_do_not_cross_subjects(tmp_path: Path) -> N
     service = MemoryCommandService(config(), db)
 
     member_list = run(service.handle(event(), "list"))
-    owner_list = run(service.handle(event("owner"), "list"))
+    # Owner defaults to "all" — sees every memory in the group.
+    owner_all = run(service.handle(event("owner"), "list"))
+    # Owner can also explicitly request "group" or "me".
+    owner_group = run(service.handle(event("owner"), "list group"))
+    owner_me = run(service.handle(event("owner"), "list me"))
 
+    # Member sees only own facts
     assert own_id in member_list.text and "member fact" in member_list.text
     assert other_id not in member_list.text and "other fact" not in member_list.text
-    assert group_id in owner_list.text and "group fact" in owner_list.text
-    assert own_id not in owner_list.text and other_id not in owner_list.text
+    # Owner "all" sees all: their own + others + group
+    assert own_id in owner_all.text and "member fact" in owner_all.text
+    assert other_id in owner_all.text and "other fact" in owner_all.text
+    assert group_id in owner_all.text and "group fact" in owner_all.text
+    # Owner "group" sees only group facts
+    assert group_id in owner_group.text and "group fact" in owner_group.text
+    assert own_id not in owner_group.text and other_id not in owner_group.text
+    # Owner "me" sees only their own facts — owner hasn't stored any, so empty
+    assert "没有可见" in owner_me.text
 
 
 def test_page_index_is_bound_to_visible_list_snapshot(tmp_path: Path) -> None:
@@ -215,7 +227,10 @@ def test_owner_can_clear_member_without_browse_access(tmp_path: Path) -> None:
     hidden = seed(db, subject_kind="user", subject_id="other", content="private-in-group")
     service = MemoryCommandService(config(), db)
 
-    assert hidden not in run(service.handle(event("owner"), "list")).text
+    # Owner "all" sees everything including other members
+    assert hidden in run(service.handle(event("owner"), "list")).text
+    # Owner "group" only sees group facts, not user facts
+    assert hidden not in run(service.handle(event("owner"), "list group")).text
     request = run(service.handle(event("owner"), "clear user other"))
     token = request.text.rsplit(" ", 1)[-1]
     result = run(service.handle(event("owner"), f"clear user other {token}"))

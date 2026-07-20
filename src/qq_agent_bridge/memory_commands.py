@@ -218,10 +218,10 @@ class MemoryCommandService:
         return MemoryCommandResult("已记住。")
 
     def _list(self, ev: ChatEvent, args: Sequence[str]) -> MemoryCommandResult:
-        selector = "group" if ev.is_group and self._is_owner(ev) else "me"
+        selector = "all" if ev.is_group and self._is_owner(ev) else "me"
         page = 1
         if args:
-            if args[0].lower() in {"group", "me", "candidate"}:
+            if args[0].lower() in {"group", "me", "candidate", "all"}:
                 selector = args[0].lower()
                 args = args[1:]
             if args:
@@ -562,6 +562,14 @@ class MemoryCommandService:
         self, ev: ChatEvent, selector: str
     ) -> tuple[MemoryItem, ...] | MemoryCommandResult:
         scope = self._scope(ev)
+        if selector == "all":
+            if not ev.is_group or not self._is_owner(ev):
+                return self._denied("只有群 owner 可以浏览全部记忆。")
+            return self.store.list_items(
+                scope,
+                statuses=("active", "candidate", "dormant"),
+                limit=10_000,
+            )
         if selector == "group":
             if not ev.is_group or not self._is_owner(ev):
                 return self._denied("只有群 owner 可以浏览群主体记忆。")
