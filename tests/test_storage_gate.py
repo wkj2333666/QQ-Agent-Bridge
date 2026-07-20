@@ -203,6 +203,10 @@ def test_restricted_adapter_disposal_removes_only_its_owned_private_paths(
     fake_home.mkdir(mode=0o700)
     unrelated = fake_home / ".local" / "state" / "qq-agent-bridge" / "keep.txt"
     unrelated.parent.mkdir(parents=True, mode=0o700)
+    # mkdir(parents=True) respects umask on intermediate directories, so
+    # .local and state may be group-writable when umask is 0002.
+    for d in [fake_home / ".local", fake_home / ".local" / "state"]:
+        d.chmod(0o700)
     unrelated.write_text("keep", encoding="utf-8")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     cfg = BridgeConfig()
