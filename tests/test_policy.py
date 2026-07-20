@@ -737,3 +737,33 @@ def test_all_config_commands_are_registered() -> None:
     assert missing == {}, (
         f"Commands in config but not in policy.COMMANDS: {missing}"
     )
+
+
+def test_all_registered_commands_have_dispatch_handlers() -> None:
+    """Every command in policy.COMMANDS must have a handler in main.py dispatch."""
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    main_path = root / "src" / "qq_agent_bridge" / "main.py"
+    source = main_path.read_text()
+
+    handlers: set[str] = set()
+    # Pattern 1: if parsed.name == "xxx":
+    for m in re.finditer(r'parsed\.name\s*==\s*"(\w+)"', source):
+        handlers.add(m.group(1))
+    # Pattern 2: if parsed.name in {"xxx", "yyy"}:
+    for m in re.finditer(r'parsed\.name\s+in\s+\{([^}]+)\}', source):
+        for name in re.findall(r'"(\w+)"', m.group(1)):
+            handlers.add(name)
+    # Pattern 3: cmd == "xxx" (fallthrough dispatch in _agent_runner_inner)
+    for m in re.finditer(r'\bcmd\s*==\s*"(\w+)"', source):
+        handlers.add(m.group(1))
+    # Pattern 4: cmd in {"xxx", "yyy"} (fallthrough dispatch)
+    for m in re.finditer(r'\bcmd\s+in\s+\{([^}]+)\}', source):
+        for name in re.findall(r'"(\w+)"', m.group(1)):
+            handlers.add(name)
+
+    missing = COMMANDS - handlers
+    assert missing == set(), (
+        f"Commands in COMMANDS but no dispatch handler in main.py: {missing}"
+    )
