@@ -592,9 +592,13 @@ class OneBotAdapter:
         self._recent_messages: dict[str, ChatReply] = {}
         self._recent_message_ids: deque[str] = deque()
         self._max_recent_messages = 500
+        self._on_connected: Any = None
 
     def is_connected(self) -> bool:
         return bool(self._conns)
+
+    def set_on_connected(self, callback: Any) -> None:
+        self._on_connected = callback
 
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
@@ -616,6 +620,11 @@ class OneBotAdapter:
                     return
             self._conns.add(conn)
             logger.info("gateway connected")
+            if self._on_connected:
+                try:
+                    await self._on_connected()
+                except Exception:  # noqa: BLE001
+                    logger.warning("on_connected callback failed", exc_info=True)
             try:
                 async for raw in conn:
                     try:
