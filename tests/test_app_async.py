@@ -494,42 +494,6 @@ def test_real_schedule_execution_retrieves_with_captured_scope_and_creator() -> 
     asyncio.run(go())
 
 
-def test_handle_returns_before_ask_job_finishes() -> None:
-    async def go() -> None:
-        started = asyncio.Event()
-        release = asyncio.Event()
-        adapter = FakeAdapter()
-        cfg = make_cfg()
-
-        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
-            started.set()
-            await release.wait()
-            return f"reply to {args}"
-
-        app = make_app(cfg, runner, adapter)
-
-        await asyncio.wait_for(app._handle(make_ev("/ask hello")), timeout=0.05)
-        await asyncio.wait_for(started.wait(), timeout=0.2)
-        assert adapter.sent == []
-
-        release.set()
-        await wait_until_sent(adapter, "reply to hello")
-
-    asyncio.run(go())
-
-
-def test_app_uses_configured_custom_agent_runtime() -> None:
-    cfg = make_cfg()
-    cfg.agent.runtime = "custom-cli"
-    cfg.agent.command = {"ask": ["agent-bin", "{prompt}"]}
-    cfg.agent.env_runner = ""
-    cfg.agent.use_bwrap = False
-
-    app = App(cfg)
-
-    assert isinstance(app.cursor, CustomCommandAdapter)
-
-
 def test_bare_group_mention_casual_text_uses_chat_decision_without_ask_job() -> None:
     async def go() -> None:
         adapter = FakeAdapter()

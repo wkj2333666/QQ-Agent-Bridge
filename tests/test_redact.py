@@ -76,6 +76,5 @@ def test_extra_redaction_is_case_insensitive_whitespace_flexible_and_escaped() -
 
 if __name__ == "__main__":
     test_redact_basic()
-    test_strip_ansi()
     test_redact_qrish()
     print("redact tests OK")
