@@ -406,6 +406,7 @@ class App:
                     "bridge 正在重启，稍后恢复...",
                     ev.id,
                 )
+                self._write_reboot_notification(ev)
                 await self._cleanup_policy()
                 subprocess.Popen(
                     ["systemctl", "--user", "restart", "qq-bridge.service"],
@@ -2293,6 +2294,50 @@ class App:
         )
         return safe[:64] or "job"
 
+    # -- reboot notification (persist chat destination across restarts) --
+
+    _REBOOT_NOTIFY_FILE = Path("data") / ".reboot-notify.json"
+
+    def _write_reboot_notification(self, ev: ChatEvent) -> None:
+        import json as _json
+
+        payload = {
+            "chat_id": ev.chat_id,
+            "is_group": ev.is_group,
+        }
+        try:
+            self._REBOOT_NOTIFY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._REBOOT_NOTIFY_FILE.write_text(
+                _json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    async def _send_reboot_complete(self) -> None:
+        import json as _json
+
+        try:
+            data = _json.loads(
+                self._REBOOT_NOTIFY_FILE.read_text(encoding="utf-8"),
+            )
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                self._REBOOT_NOTIFY_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        chat_id: str = data.get("chat_id", "")
+        is_group: bool = data.get("is_group", False)
+        if not chat_id:
+            return
+        try:
+            await self._send_text(chat_id, is_group, "重启完毕。", "")
+        except Exception:
+            logger.warning("failed to send reboot-complete notification", exc_info=True)
+
     def _build_resource_manager(self, cfg: BridgeConfig) -> ResourceManager:
         self.transcriber, resources = self._resource_manager_parts(cfg)
         return resources
@@ -2330,6 +2375,7 @@ class App:
                     type(exc).__name__,
                 )
             await self.adapter.start(self._handle)
+            await self._send_reboot_complete()
             if not self.echo_only:
                 await self.scheduler.start()
             await asyncio.Future()  # run forever
