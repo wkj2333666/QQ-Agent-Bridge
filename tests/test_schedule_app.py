@@ -704,3 +704,197 @@ def test_group_schedule_created_under_user_permission_runs_for_non_owner(
         assert any(item[2] == "非 owner 定时提醒" for item in adapter.sent)
 
     asyncio.run(go())
+
+
+# -- Non-owner explicit schedule safety constraints ---------------------------------
+
+
+def test_non_owner_explicit_too_frequent_interval_blocked(tmp_path: Path) -> None:
+    """Non-owner cannot create a schedule with recurrence faster than the floor."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_min_interval_seconds = 300
+
+        # every 30s — too fast
+        await app._handle(
+            make_event(
+                "/schedule every 30s forever -- send fast-spam",
+                sender="reader",
+                mid="fast-1",
+            )
+        )
+        assert "周期不能少于" in adapter.sent[-1][2]
+        assert app.schedule_store.list_for_chat("group", True) == []
+
+        # every 10m — ok (600s > 300s)
+        await app._handle(
+            make_event(
+                "/schedule every 10m count 3 -- send slow-ok",
+                sender="reader",
+                mid="slow-1",
+            )
+        )
+        assert "已经设置好了" in adapter.sent[-1][2]
+        assert len(app.schedule_store.list_for_chat("group", True)) == 1
+
+    asyncio.run(go())
+
+
+def test_non_owner_explicit_unbounded_can_be_disabled(tmp_path: Path) -> None:
+    """When non_owner_allow_unbounded=False, forever schedules are rejected."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_allow_unbounded = False
+
+        await app._handle(
+            make_event(
+                "/schedule every 10m forever -- send forever-reminder",
+                sender="reader",
+                mid="forever-1",
+            )
+        )
+        assert "不允许创建无限次数" in adapter.sent[-1][2]
+        assert app.schedule_store.list_for_chat("group", True) == []
+
+    asyncio.run(go())
+
+
+def test_non_owner_explicit_excessive_count_blocked(tmp_path: Path) -> None:
+    """Non-owner is capped at non_owner_max_occurrences."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_max_occurrences = 10
+
+        await app._handle(
+            make_event(
+                "/schedule every 10m count 50 -- send too-many",
+                sender="reader",
+                mid="many-1",
+            )
+        )
+        assert "次数不能超过" in adapter.sent[-1][2]
+        assert app.schedule_store.list_for_chat("group", True) == []
+
+    asyncio.run(go())
+
+
+def test_non_owner_explicit_too_many_mentions_blocked(tmp_path: Path) -> None:
+    """Non-owner cannot @mention more than the allowed number of people."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_max_mentions = 1
+
+        await app._handle(
+            make_event(
+                "/schedule in 10m -- send @111 @222 hello",
+                sender="reader",
+                mid="mentions-1",
+                segments=(
+                    ChatSegment(type="mention", text="@111 ", qq="111", raw_type="at"),
+                    ChatSegment(type="mention", text="@222 ", qq="222", raw_type="at"),
+                    ChatSegment(type="text", text="hello", qq=""),
+                ),
+            )
+        )
+        assert "只能 @" in adapter.sent[-1][2]
+        assert app.schedule_store.list_for_chat("group", True) == []
+
+    asyncio.run(go())
+
+
+def test_non_owner_explicit_cooldown_enforced(tmp_path: Path) -> None:
+    """Rapid schedule creation is rate-limited for non-owners."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_cooldown_seconds = 30
+
+        await app._handle(
+            make_event(
+                "/schedule in 10m -- send first",
+                sender="reader",
+                mid="cd-1",
+            )
+        )
+        assert "已经设置好了" in adapter.sent[-1][2]
+
+        await app._handle(
+            make_event(
+                "/schedule in 20m -- send second",
+                sender="reader",
+                mid="cd-2",
+            )
+        )
+        assert "创建太频繁" in adapter.sent[-1][2]
+        assert len(app.schedule_store.list_for_chat("group", True)) == 1
+
+    asyncio.run(go())
+
+
+def test_non_owner_explicit_count_cap_per_chat(tmp_path: Path) -> None:
+    """Non-owner cannot exceed per-chat active schedule limit."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_max_schedules_per_chat = 2
+        app.cfg.scheduler.non_owner_cooldown_seconds = 0
+
+        for i in range(2):
+            await app._handle(
+                make_event(
+                    f"/schedule in {10 + i * 10}m -- send msg{i}",
+                    sender="reader",
+                    mid=f"cap-{i}",
+                )
+            )
+            assert "已经设置好了" in adapter.sent[-1][2]
+
+        await app._handle(
+            make_event(
+                "/schedule in 30m -- send extra",
+                sender="reader",
+                mid="cap-extra",
+            )
+        )
+        assert "最多" in adapter.sent[-1][2] and "定时任务" in adapter.sent[-1][2]
+        assert len(app.schedule_store.list_for_chat("group", True)) == 2
+
+    asyncio.run(go())
+
+
+def test_owner_bypasses_all_non_owner_constraints(tmp_path: Path) -> None:
+    """Owner schedules are never gated by non-owner safety constraints."""
+
+    async def go() -> None:
+        app, adapter = make_app(tmp_path)
+        app.cfg.scheduler.non_owner_min_interval_seconds = 300
+        app.cfg.scheduler.non_owner_allow_unbounded = False
+        app.cfg.scheduler.non_owner_max_occurrences = 10
+        app.cfg.scheduler.non_owner_cooldown_seconds = 30
+
+        # Owner can still create fast, unbounded, high-count schedules
+        await app._handle(
+            make_event(
+                "/schedule every 30s forever -- send owner-fast",
+                sender="owner",
+                mid="owner-fast",
+            )
+        )
+        assert "已经设置好了" in adapter.sent[-1][2]
+
+        await app._handle(
+            make_event(
+                "/schedule every 5s count 100 -- send owner-many",
+                sender="owner",
+                mid="owner-many",
+            )
+        )
+        assert "已经设置好了" in adapter.sent[-1][2]
+
+        assert len(app.schedule_store.list_for_chat("group", True)) == 2
+
+    asyncio.run(go())
