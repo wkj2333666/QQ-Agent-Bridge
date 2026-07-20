@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 import ipaddress
 import mimetypes
 import os
@@ -73,6 +76,15 @@ class ResourceManager:
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
         if not self.cfg.resources.enabled or not ev.resources:
             return ()
+        for idx, resource in enumerate(ev.resources):
+            logger.info(
+                "resource_prepare chat_id=%s kind=%s has_url=%s url_prefix=%s file_id=%s",
+                ev.chat_id,
+                resource.kind,
+                bool(resource.url),
+                (resource.url or "")[:80] if resource.url else "",
+                resource.file_id or "",
+            )
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
         if not self.cfg.is_workspace_allowed(str(workspace)):
             return ()
