@@ -76,15 +76,6 @@ class ResourceManager:
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
         if not self.cfg.resources.enabled or not ev.resources:
             return ()
-        for idx, resource in enumerate(ev.resources):
-            logger.info(
-                "resource_prepare chat_id=%s kind=%s has_url=%s url_prefix=%s file_id=%s",
-                ev.chat_id,
-                resource.kind,
-                bool(resource.url),
-                (resource.url or "")[:80] if resource.url else "",
-                resource.file_id or "",
-            )
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
         if not self.cfg.is_workspace_allowed(str(workspace)):
             return ()
@@ -119,10 +110,18 @@ class ResourceManager:
                 refs.append(prepared)
                 continue
             if not resource.url:
+                logger.info(
+                    "resource_skip_no_url chat_id=%s kind=%s file_id=%s",
+                    ev.chat_id, resource.kind, resource.file_id or "",
+                )
                 continue
             try:
                 payload, content_type = await self.fetch(resource.url, self.cfg.resources.max_bytes)
             except Exception:  # noqa: BLE001 - resource passthrough should degrade softly
+                logger.info(
+                    "resource_download_failed chat_id=%s kind=%s url=%s",
+                    ev.chat_id, resource.kind, (resource.url or "")[:120],
+                )
                 continue
             total_bytes += len(payload)
             if total_bytes > self.cfg.resources.max_total_bytes:

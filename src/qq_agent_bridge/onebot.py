@@ -296,14 +296,6 @@ def _url_resources(text: str, source_segment: int) -> list[ChatResource]:
 
 def _resource_from_segment(raw_type: str, data: dict[str, Any], idx: int) -> ChatResource | None:
     if raw_type == "image":
-        logger.info(
-            "onebot_image_segment url=%s file=%s file_id=%s file_size=%s mime=%s",
-            data.get("url", "")[:120],
-            data.get("file", ""),
-            data.get("file_id", ""),
-            data.get("file_size", data.get("size", "")),
-            data.get("mime_type", ""),
-        )
         return ChatResource(
             kind="image",
             url=_str_or_none(data.get("url")),
