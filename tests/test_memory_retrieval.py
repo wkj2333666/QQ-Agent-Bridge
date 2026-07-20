@@ -479,3 +479,29 @@ def test_retrieval_returns_empty_when_scope_or_feature_is_disabled(
     store.set_scope_enabled(GROUP, True)
     cfg = LongTermMemoryConfig(enabled=False)
     assert LongTermMemoryRetriever(store, cfg).retrieve(GROUP, "u1", (), None, "继续") == ""
+
+
+def test_owner_sees_all_group_memories_standard_user_only_sees_own(
+    store: LongTermMemoryStore,
+) -> None:
+    add_memory(store, GROUP, subject_kind="group", subject_id=GROUP.id, content="GROUP-RULE")
+    add_memory(store, GROUP, subject_kind="user", subject_id="u1", content="U1-PREFERENCE")
+    add_memory(store, GROUP, subject_kind="user", subject_id="u2", content="U2-FACT")
+
+    retriever = make_retriever(store)
+
+    # Owner sees all 3 memories
+    owner_text = retriever.retrieve(GROUP, "owner", ("u2",), None, "", is_owner=True)
+    assert "GROUP-RULE" in owner_text
+    assert "U1-PREFERENCE" in owner_text
+    assert "U2-FACT" in owner_text
+
+    # Regular user u1 only sees group + their own + mentioned u2
+    user_text = retriever.retrieve(GROUP, "u1", ("u2",), None, "")
+    assert "GROUP-RULE" in user_text
+    assert "U1-PREFERENCE" in user_text
+    assert "U2-FACT" in user_text  # u2 is mentioned, so visible
+
+    # Regular user u1 without mentioning u2 cannot see u2's memory
+    solo_text = retriever.retrieve(GROUP, "u1", (), None, "")
+    assert "U2-FACT" not in solo_text

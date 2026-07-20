@@ -204,7 +204,7 @@ def test_all_agent_job_modes_share_structured_long_term_memory_retrieval() -> No
         retrievals: list[tuple[Any, ...]] = []
 
         class FakeRetriever:
-            def retrieve(self, *args: Any) -> str:
+            def retrieve(self, *args: Any, **kwargs: Any) -> str:
                 retrievals.append(args)
                 return "SHARED-LONG-TERM-CONTEXT"
 
@@ -283,7 +283,7 @@ def test_normal_agent_trace_redactions_include_retrieved_memory_but_output_stays
         seen_redactions: tuple[str, ...] = ()
 
         class FakeRetriever:
-            def retrieve(self, *_args: Any) -> str:
+            def retrieve(self, *_args: Any, **kwargs: Any) -> str:
                 return context
 
         async def fake_agent(
@@ -411,7 +411,7 @@ def test_real_schedule_execution_retrieves_with_captured_scope_and_creator() -> 
         retrievals: list[tuple[Any, ...]] = []
 
         class FakeRetriever:
-            def retrieve(self, *args: Any) -> str:
+            def retrieve(self, *args: Any, **kwargs: Any) -> str:
                 retrievals.append(args)
                 return "SCHEDULE-LONG-TERM-CONTEXT"
 

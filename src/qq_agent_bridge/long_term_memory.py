@@ -1578,25 +1578,37 @@ class LongTermMemoryRetriever:
         real_mentions: Iterable[str],
         quoted_sender: str | None,
         query: str,
+        *,
+        is_owner: bool = False,
     ) -> str:
         if not self.enabled or not self.store.is_scope_enabled(scope):
             return ""
         if scope.kind == "private" and str(current_sender) != scope.id:
             return ""
-        subjects = self._authorized_subjects(
-            scope,
-            str(current_sender),
-            tuple(str(item) for item in real_mentions),
-            str(quoted_sender) if quoted_sender is not None else None,
-        )
-        items = self.store.retrieve_candidates(
-            scope,
-            authorized_subjects=subjects,
-            query=query,
-            minimum_score=self.cfg.minimum_score,
-            sensitivity="normal",
-            limit=self.cfg.max_items,
-        )
+        if is_owner and scope.kind == "group":
+            # Owner sees all memories in their groups without subject filtering.
+            items = self.store.retrieve_candidates(
+                scope,
+                query=query,
+                minimum_score=self.cfg.minimum_score,
+                sensitivity="normal",
+                limit=self.cfg.max_items,
+            )
+        else:
+            subjects = self._authorized_subjects(
+                scope,
+                str(current_sender),
+                tuple(str(item) for item in real_mentions),
+                str(quoted_sender) if quoted_sender is not None else None,
+            )
+            items = self.store.retrieve_candidates(
+                scope,
+                authorized_subjects=subjects,
+                query=query,
+                minimum_score=self.cfg.minimum_score,
+                sensitivity="normal",
+                limit=self.cfg.max_items,
+            )
         if not items:
             return ""
         return self._format(items)
