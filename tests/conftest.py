@@ -1,6 +1,7 @@
 """Global test safeguards for local deployment state."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -14,6 +15,24 @@ import qq_agent_bridge.config_block_store as config_block_store  # noqa: E402
 
 
 LOCAL_CONFIG = (ROOT / "config.yaml").resolve(strict=False)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "requires_local_env: test needs bwrap, cursor-cli, or Pi filesystem",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item],
+) -> None:
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    skip_local = pytest.mark.skip(reason="requires local environment (bwrap/cursor-cli/Pi fs)")
+    for item in items:
+        if item.get_closest_marker("requires_local_env"):
+            item.add_marker(skip_local)
 
 
 @pytest.fixture(autouse=True)

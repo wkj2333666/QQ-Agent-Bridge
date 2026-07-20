@@ -589,6 +589,7 @@ def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
 
 
+@pytest.mark.requires_local_env
 def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -873,6 +874,7 @@ def test_non_bwrap_task_keeps_cursor_sandbox_enabled_without_force() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "enabled"
 
 
+@pytest.mark.requires_local_env
 def test_bwrap_mounts_cursor_runtime_read_only_and_workspace_writable() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.use_bwrap = True
@@ -968,6 +970,7 @@ def test_bwrap_mounts_home_before_cursor_runtime() -> None:
     assert home_bind < local_bin_bind
 
 
+@pytest.mark.requires_local_env
 def test_bwrap_prepare_copies_cursor_state_to_sandbox_home(tmp_path: Path, monkeypatch: object) -> None:
     fake_home = tmp_path / "real-home"
     fake_home.mkdir()
@@ -996,6 +999,7 @@ def test_bwrap_prepare_copies_cursor_state_to_sandbox_home(tmp_path: Path, monke
     assert oct((sandbox_home / ".config" / "cursor" / "auth.json").stat().st_mode & 0o777) == "0o600"
 
 
+@pytest.mark.requires_local_env
 def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1131,6 +1135,7 @@ def test_hardened_prepare_fails_closed_without_safe_auth(
     assert not hardened_home.exists() or tuple(hardened_home.iterdir()) == ()
 
 
+@pytest.mark.requires_local_env
 def test_bwrap_accepts_private_persistent_sandbox_home(
     tmp_path: Path, monkeypatch: object
 ) -> None:
@@ -1293,6 +1298,7 @@ def test_bwrap_rejects_path_resolved_from_tmp(
     assert error == "[error] 助手沙箱未配置"
 
 
+@pytest.mark.requires_local_env
 def test_bwrap_prepare_trusts_only_current_sandbox_workspace(
     tmp_path: Path, monkeypatch: object
 ) -> None:

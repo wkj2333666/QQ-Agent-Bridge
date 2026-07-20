@@ -5,6 +5,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
@@ -32,6 +34,7 @@ def test_search_command_uses_literal_query_after_separator(tmp_path: Path) -> No
     assert argv[separator + 1] == "--glob *.py"
 
 
+@pytest.mark.requires_local_env
 def test_search_returns_matches_but_skips_sensitive_files(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("needle visible\n", encoding="utf-8")
