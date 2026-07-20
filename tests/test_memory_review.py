@@ -236,6 +236,7 @@ def test_curator_logs_only_metadata(
     assert "malformed_output" in rendered
 
 
+@pytest.mark.requires_local_env
 def test_production_builder_constructs_dedicated_restricted_agent_config(
     cfg: BridgeConfig,
     tmp_path: Path,
@@ -1182,5 +1183,39 @@ def test_stop_cancels_an_uncommitted_explicit_review(
         assert (await review).error == "cancelled"
         assert (await queued).error == "cancelled"
         assert store.status(GROUP).pending_count == 1
+
+    asyncio.run(go())
+
+
+def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    """Curator blocks forever -> coordinator returns timeout, retains sources, stays usable."""
+    async def go() -> None:
+        collect_source(store, message_id="m1")
+        # Agent that sleeps forever (release event never set)
+        slow_agent = FakeAgent()
+        slow_agent.release = asyncio.Event()
+        cfg.long_term_memory.review.timeout_seconds = 0.01  # type: ignore[assignment]
+        coordinator = make_coordinator(store, slow_agent, cfg, tmp_path)
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error == "timeout", "blocking curator must produce timeout, not malformed_output"
+        assert outcome.source_count == 1
+        # Sources must be retained — timeout does not consume them
+        assert store.status(GROUP).pending_count == 1
+
+        # Coordinator must remain operational after a timeout.
+        # The original source is deferred with backoff; collect a fresh one.
+        collect_source(store, message_id="m2")
+        healthy_agent = FakeAgent()
+        coordinator.curator.agent = healthy_agent
+        coordinator.curator.cfg = cfg.long_term_memory.review
+        second = await coordinator.review_now(GROUP, actor=OWNER)
+        assert second.error is None, f"coordinator should be usable after timeout, got {second.error}"
+        assert store.status(GROUP).pending_count == 1  # only the deferred original remains
 
     asyncio.run(go())

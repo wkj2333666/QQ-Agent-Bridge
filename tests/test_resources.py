@@ -780,6 +780,27 @@ def test_resource_manager_formats_forward_chat_record_context_without_downloadin
     assert "Bob(333): [image] pic.jpg https://qq.example/pic.jpg" in context
 
 
+def test_voice_without_transcriber_stages_audio_and_degrades_gracefully(tmp_path: Path) -> None:
+    """Voice downloads without whisper binary — audio stays staged, no crash, no hallucinated transcript."""
+    async def go() -> None:
+        async def fetch(url: str, limit: int) -> tuple[bytes, str]:
+            assert url == "https://qq.example/voice.wav"
+            return tiny_wav_bytes(), "audio/wav"
+
+        manager = ResourceManager(make_cfg(tmp_path), fetch=fetch, transcriber=None)
+        refs = await manager.prepare(make_ev((wav_voice(),), mid="voice-no-whisper"))
+
+        assert len(refs) == 1
+        assert refs[0].local_path is not None, "voice file should still be staged"
+        assert refs[0].transcript is None, "no transcript without transcriber"
+        assert refs[0].transcript_status is None, "no transcription attempted when transcriber is missing"
+        context = format_resource_context(refs)
+        assert "verified" not in context, "should not claim verified transcript"
+        assert "transcript:" not in context, "should not emit misleading transcript line without transcriber"
+
+    asyncio.run(go())
+
+
 def test_forward_chat_record_context_truncates_long_user_text(tmp_path: Path) -> None:
     manager = ResourceManager(make_cfg(tmp_path))
     long_text = "很长" * 2000
