@@ -26,6 +26,7 @@ OWNER_COMMANDS: tuple[tuple[str, str], ...] = (
     ("code", "改代码"),
     ("approve", "确认执行"),
     ("reload", "重载配置"),
+    ("reboot", "重启"),
 )
 
 

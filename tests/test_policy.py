@@ -767,3 +767,21 @@ def test_all_registered_commands_have_dispatch_handlers() -> None:
     assert missing == set(), (
         f"Commands in COMMANDS but no dispatch handler in main.py: {missing}"
     )
+
+
+def test_all_registered_commands_show_in_help() -> None:
+    """Every command in policy.COMMANDS must appear in /help output lists."""
+    from qq_agent_bridge.self_knowledge import (
+        OWNER_COMMANDS as HELP_OWNER,
+        READABLE_COMMANDS as HELP_READABLE,
+    )
+
+    help_names = {name for name, _desc in HELP_READABLE}
+    help_names.update(name for name, _desc in HELP_OWNER)
+    # Commands intentionally excluded from help (dangerous, disabled by default)
+    excluded = {"shell"}
+
+    missing = COMMANDS - help_names - excluded
+    assert missing == set(), (
+        f"Commands not in self_knowledge help lists (READABLE_COMMANDS + OWNER_COMMANDS): {missing}"
+    )
