@@ -76,6 +76,7 @@ class MemoryCurator:
         existing: Sequence[MemoryItem],
         actor: MemoryActor | None = None,
     ) -> CuratorOutcome:
+        redact_extra = self._redaction_values(sources, existing)
         prompt = self._prompt(scope, sources, existing)
         try:
             output = await asyncio.wait_for(
@@ -85,7 +86,7 @@ class MemoryCurator:
                     self.workspace,
                     "ask",
                     model=self.cfg.model,
-                    redact_extra=self._redaction_values(sources, existing),
+                    redact_extra=redact_extra,
                 ),
                 timeout=max(0.001, float(self.cfg.timeout_seconds)),
             )
@@ -97,12 +98,24 @@ class MemoryCurator:
             return self._failure(scope, len(sources), "agent_error")
 
         if not isinstance(output, str):
+            logger.warning(
+                "memory curator non-string output type=%s", type(output).__name__
+            )
             return self._failure(scope, len(sources), "malformed_output")
         if len(output) > MAX_CURATOR_OUTPUT_CHARS:
             return self._failure(scope, len(sources), "output_too_large")
         try:
             proposals = parse_curator_output(output)
         except ValueError:
+            stripped = output.strip()
+            preview = (
+                stripped[:1] if stripped else "(empty)"
+            )
+            logger.warning(
+                "memory curator malformed output len=%d starts_with=%s",
+                len(stripped),
+                preview,
+            )
             return self._failure(scope, len(sources), "malformed_output")
 
         validation = self.validator.validate(scope, sources, proposals, actor)
