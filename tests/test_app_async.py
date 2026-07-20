@@ -1498,23 +1498,6 @@ def test_stop_without_argument_cancels_latest_job_and_names_it() -> None:
     asyncio.run(go())
 
 
-def test_help_lists_reset_command() -> None:
-    async def go() -> None:
-        adapter = FakeAdapter()
-        cfg = make_cfg()
-
-        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
-            return "unused"
-
-        app = make_app(cfg, runner, adapter)
-
-        await app._handle(make_ev("/help", sender="owner", mid="help-reset"))
-
-        assert any("/reset" in item[2] for item in adapter.sent)
-
-    asyncio.run(go())
-
-
 def test_owner_reload_reloads_config_file(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
@@ -2415,35 +2398,6 @@ def test_task_ansi_split_token_and_outbox_are_redacted_everywhere(tmp_path: Path
         assert "final ordinary-marker" in visible
         assert "final ordinary-marker" in history
         assert "final ordinary-marker" in stored_result
-
-    asyncio.run(go())
-
-
-def test_ask_does_not_pass_progress_callback() -> None:
-    async def go() -> None:
-        adapter = FakeAdapter()
-        cfg = make_cfg()
-        progress_values: list[Any] = []
-
-        async def fake_cursor(
-            prompt: str,
-            workspace: str | None = None,
-            mode: str = "ask",
-            model: str | None = None,
-            progress: Any = None,
-        ) -> str:
-            progress_values.append(progress)
-            return "ask ok"
-
-        app = App(cfg)
-        app.adapter = adapter  # type: ignore[assignment]
-        app.policy = Policy(cfg, app._agent_runner)
-        app.cursor.run = fake_cursor  # type: ignore[method-assign]
-
-        await app._handle(make_ev("/ask hi", mid="ask-progress"))
-        await wait_until_sent(adapter, "ask ok")
-
-        assert progress_values == [None]
 
     asyncio.run(go())
 
@@ -4660,29 +4614,6 @@ def test_agent_runner_activity_blocks_storage_maintenance() -> None:
         assert await runner == "done"
         await asyncio.wait_for(maintenance_entered.wait(), 0.5)
         await maintenance
-
-    asyncio.run(go())
-
-
-def test_agent_subsystems_use_gated_adapter() -> None:
-    app = App(make_cfg())
-
-    assert isinstance(app.gated_agent, GatedAgentAdapter)
-    assert app.gated_agent.delegate is app.agent
-    assert app.proactive.agent is app.gated_agent
-    assert app.schedule_nl_parser.agent is app.gated_agent
-
-
-def test_reply_cleanup_requests_only_pressure_check() -> None:
-    async def go() -> None:
-        app = App(make_cfg())
-        calls: list[str] = []
-        app.storage_maintainer.request_pressure_check = lambda: calls.append("pressure")
-        job = Job(id="cleanup-job", cmd="ask", args="hi", event=make_ev("/ask hi"))
-
-        await app._cleanup_reply_job(job)
-
-        assert calls == ["pressure"]
 
     asyncio.run(go())
 

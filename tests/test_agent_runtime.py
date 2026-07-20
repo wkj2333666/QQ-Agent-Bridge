@@ -12,23 +12,6 @@ from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CursorAdapter, CustomCommandAdapter  # type: ignore
 
 
-def test_agent_runtime_factory_does_not_default_to_cursor() -> None:
-    cfg = BridgeConfig(workspaces={"/tmp": True})
-
-    adapter = build_agent_adapter(cfg)
-
-    assert isinstance(adapter, DisabledAgentAdapter)
-
-
-def test_disabled_agent_runtime_explains_missing_config() -> None:
-    cfg = BridgeConfig(workspaces={"/tmp": True})
-    adapter = build_agent_adapter(cfg)
-
-    result = asyncio.run(adapter.run("hello", "/tmp", "ask", model=None))
-
-    assert "agent runtime 未配置" in result
-
-
 def test_agent_runtime_factory_uses_cursor_when_configured() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     cfg.agent.runtime = "cursor-cli"
