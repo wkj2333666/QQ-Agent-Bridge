@@ -244,7 +244,7 @@ class MemoryCommandService:
         )
         lines = [f"长期记忆（第 {page} 页）："]
         lines.extend(
-            f"{index}. [{item.short_id}] {self._item_label(item)}：{item.content}"
+            f"{index}. [{item.short_id}] {self._item_label(item, ev.sender_id)}：{item.content}"
             for index, item in enumerate(page_items, 1)
         )
         return MemoryCommandResult("\n".join(lines))
@@ -257,7 +257,7 @@ class MemoryCommandService:
             return item_or_error
         item = item_or_error
         return MemoryCommandResult(
-            f"[{item.short_id}] {self._item_label(item)}\n"
+            f"[{item.short_id}] {self._item_label(item, ev.sender_id)}\n"
             f"状态：{item.status}；敏感级别：{item.sensitivity}\n{item.content}"
         )
 
@@ -719,7 +719,7 @@ class MemoryCommandService:
         used = 0
         for item in self._all_visible_items(ev)[:100]:
             summary = (
-                f"[{item.short_id}] {self._item_label(item)} "
+                f"[{item.short_id}] {self._item_label(item, ev.sender_id)} "
                 f"status={item.status}: {item.content}"
             )
             if used + len(summary) > 16_000:
@@ -843,8 +843,13 @@ class MemoryCommandService:
         return self.cfg.is_owner(ev.sender_id)
 
     @staticmethod
-    def _item_label(item: MemoryItem) -> str:
-        return "群" if item.subject_kind == "group" else "我"
+    @staticmethod
+    def _item_label(item: MemoryItem, current_sender: str = "") -> str:
+        if item.subject_kind == "group":
+            return "群"
+        if not current_sender or item.subject_id == current_sender:
+            return "我"
+        return f"用户{item.subject_id}"
 
     @staticmethod
     def _snapshot_key(ev: ChatEvent) -> tuple[str, str, str]:
