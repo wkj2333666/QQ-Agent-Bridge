@@ -1033,6 +1033,51 @@ def test_reload_updates_curator_limits_and_wakes_maintenance_interval(
     asyncio.run(go())
 
 
+def test_curator_accepts_markdown_wrapped_json_output(
+    tmp_path: Path, cfg: BridgeConfig, store: LongTermMemoryStore,
+) -> None:
+    """Full pipeline: model returns markdown-wrapped JSON -> parse -> validate -> commit."""
+    scope = MemoryScope("group", "g1")
+    store.set_scope_enabled(scope, True)
+
+    source = MemorySource(
+        id=1,
+        scope=scope,
+        message_id="m1", sender_id="u1",
+        text="我喜欢喝咖啡", message_timestamp=1000,
+    )
+    store.collect(source)
+
+    # Model output wrapped in markdown fence with trailing prose
+    model_output = (
+        '```json\n'
+        '{"operations":['
+        '{"operation":"add","source_ids":[1],'
+        '"subject_kind":"user","subject_id":"u1",'
+        '"category":"preference","content":"喜欢喝咖啡",'
+        '"confidence":0.91,"status":"active",'
+        '"sensitivity":"normal","source_kind":"self_statement",'
+        '"explicit_memory":false,"decay_exempt":false,"expires_at":null}'
+        ']}\n'
+        '```\n'
+        '这是提取的记忆。'
+    )
+
+    curator = MemoryCurator(
+        FakeAgent(model_output),
+        MemoryValidator(cfg, store=store),
+        cfg.long_term_memory.review,
+        workspace=tmp_path,
+    )
+
+    outcome = asyncio.run(curator.review(scope, (source,), ()))
+
+    assert outcome.error is None
+    assert outcome.proposed_count == 1
+    assert len(outcome.accepted) == 1
+    assert outcome.accepted[0].content == "喜欢喝咖啡"
+
+
 def test_stop_cancels_an_uncommitted_explicit_review(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,
