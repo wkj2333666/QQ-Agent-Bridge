@@ -686,11 +686,38 @@ def test_resource_manager_keeps_plain_url_without_downloading(tmp_path: Path) ->
     assert refs[0].local_path is None
 
 
-def test_default_http_fetch_rejects_loopback_targets(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080/metadata",
+        "http://localhost/admin",
+        "http://0.0.0.0:80/secret",
+        "http://[::1]:8080/api",
+    ],
+)
+def test_default_http_fetch_rejects_loopback_targets(
+    tmp_path: Path, url: str
+) -> None:
     async def go() -> None:
         manager = ResourceManager(make_cfg(tmp_path))
-        with pytest.raises(ValueError, match="private network"):
-            await manager._fetch_http("http://127.0.0.1:8080/metadata", 1024)
+        with pytest.raises(ValueError, match="blocked resource target"):
+            await manager._fetch_http(url, 1024)
+
+    asyncio.run(go())
+
+
+def test_default_http_fetch_allows_public_domains(tmp_path: Path) -> None:
+    """QQ CDN domains must pass validation regardless of DNS resolution."""
+    manager = ResourceManager(make_cfg(tmp_path))
+    # _fetch_http calls _validate_http_target first. Domain-based check
+    # should allow multimedia.nt.qq.com.cn — only localhost/127.0.0.1 blocked.
+    async def go() -> None:
+        try:
+            await manager._fetch_http("https://multimedia.nt.qq.com.cn/x", 1024)
+        except ValueError as exc:
+            assert "blocked" not in str(exc), f"domain should pass: {exc}"
+        except Exception:
+            pass  # network error is expected, validation passed
 
     asyncio.run(go())
 

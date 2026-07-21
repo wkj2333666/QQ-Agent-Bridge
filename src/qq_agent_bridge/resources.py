@@ -6,11 +6,9 @@ import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
-import ipaddress
 import mimetypes
 import os
 import re
-import socket
 import stat
 import wave
 from collections.abc import Awaitable, Callable
@@ -77,10 +75,7 @@ class ResourceManager:
         self.animation_extractor = animation_extractor or AnimatedImageExtractor(cfg.resources).extract
 
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
-        if not self.cfg.resources.enabled:
-            return ()
-        if not ev.resources:
-            logger.info("resource_prepare_empty chat_id=%s text=%s", ev.chat_id, ev.text[:80])
+        if not self.cfg.resources.enabled or not ev.resources:
             return ()
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
         if not self.cfg.is_workspace_allowed(str(workspace)):
@@ -125,18 +120,10 @@ class ResourceManager:
                 refs.append(prepared)
                 continue
             if not resource.url:
-                logger.info(
-                    "resource_skip_no_url chat_id=%s kind=%s file_id=%s",
-                    ev.chat_id, resource.kind, resource.file_id or "",
-                )
                 continue
             try:
                 payload, content_type = await self.fetch(resource.url, self.cfg.resources.max_bytes)
             except Exception:  # noqa: BLE001 - resource passthrough should degrade softly
-                logger.info(
-                    "resource_download_failed chat_id=%s kind=%s url=%s",
-                    ev.chat_id, resource.kind, (resource.url or "")[:120],
-                )
                 continue
             total_bytes += len(payload)
             if total_bytes > self.cfg.resources.max_total_bytes:
@@ -425,39 +412,26 @@ class ResourceManager:
         total_bytes: int,
     ) -> tuple[PreparedResource, int]:
         source_url: str | None = resource.url
-        logger.info(
-            "image_prepare_start file_id=%s url=%s has_api=%s",
-            resource.file_id or "", (resource.url or "")[:120], bool(self.image_url),
-        )
         if self.image_url:
             try:
                 resolved = await self.image_url(resource)
-            except Exception as exc:
-                logger.info("image_get_image_api_failed error=%s", exc)
+            except Exception:
                 resolved = None
             if resolved:
-                logger.info("image_get_image_api_ok resolved=%s", resolved[:120])
                 source_url = resolved
         if not source_url:
-            logger.info("image_prepare_no_url file_id=%s", resource.file_id or "")
             return self._unavailable_resource(resource, "image", "QQ image URL unavailable"), 0
 
         if self._is_http_url(source_url):
             try:
                 payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
-            except Exception as exc:
-                logger.info("image_download_failed url=%s error=%s", source_url[:120], exc)
+            except Exception:
                 return self._unavailable_resource(resource, "image", "QQ image download unavailable"), 0
         else:
             try:
                 payload, content_type = self._read_local_record(source_url, total_bytes, resource)
             except ValueError as exc:
                 return self._unavailable_resource(resource, "image", str(exc)), 0
-
-        logger.info(
-            "image_download_ok size=%d content_type=%s chat_id=%s",
-            len(payload), content_type, ev.chat_id,
-        )
 
         if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
             return self._unavailable_resource(resource, "image", "QQ image download limit exceeded"), len(payload)
@@ -610,32 +584,13 @@ class ResourceManager:
         parsed = urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             raise ValueError("unsupported resource URL")
-        try:
-            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-        except ValueError as exc:
-            raise ValueError("invalid resource URL") from exc
-        try:
-            infos = await asyncio.get_running_loop().run_in_executor(
-                None,
-                socket.getaddrinfo,
-                parsed.hostname,
-                port,
-                socket.AF_UNSPEC,
-                socket.SOCK_STREAM,
-            )
-            addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
-        except OSError as exc:
-            raise ValueError("resource host unavailable") from exc
-        if not addresses or any(
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-            for address in addresses
-        ):
-            raise ValueError("private network resource target")
+        hostname = parsed.hostname.lower()
+        # Block internal/loopback hostnames, not resolved IP addresses.
+        # DNS-based checks break with TUN/fakeip networking.
+        # urlsplit strips brackets from IPv6, so check both forms.
+        for blocked in ("localhost", "127.", "0.", "::1", "[::1]", "[::]"):
+            if hostname == blocked or hostname.startswith(blocked):
+                raise ValueError(f"blocked resource target: {hostname}")
 
 
 def format_resource_context(resources: tuple[PreparedResource, ...]) -> str:
