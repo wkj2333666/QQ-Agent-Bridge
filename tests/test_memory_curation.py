@@ -1753,9 +1753,10 @@ def test_explicit_and_decay_exempt_flags_require_structured_explicit_evidence(
     assert result.rejected[0].reason == reason
 
 
-def test_group_owner_can_confirm_only_non_sensitive_third_party_candidate(
+def test_group_owner_can_confirm_any_third_party_candidate_including_sensitive(
     cfg: BridgeConfig,
 ) -> None:
+    """Owner has full authority — can confirm both normal and sensitive items."""
     normal = MemoryProposal.add(
         subject_kind="user",
         subject_id="123",
@@ -1785,8 +1786,8 @@ def test_group_owner_can_confirm_only_non_sensitive_third_party_candidate(
         actor=MemoryActor("owner", "group_owner"),
     )
 
-    assert result.accepted == (normal,)
-    assert result.rejected[0].reason == "sensitivity_consent_required"
+    assert result.accepted == (normal, sensitive)
+    assert result.rejected == ()
 
 
 def test_group_member_cannot_mutate_another_subject(cfg: BridgeConfig) -> None:

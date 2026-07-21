@@ -772,12 +772,65 @@ def test_candidate_confirmation_respects_subject_and_sensitivity(tmp_path: Path)
 
     assert "已确认" in run(service.handle(event(), f"confirm {own}")).text
     assert "已确认" in run(service.handle(event("owner"), f"confirm {other_normal}")).text
-    denied = run(service.handle(event("owner"), f"confirm {other_sensitive}"))
+    # Owner can confirm other members' sensitive candidates — owner has full access.
+    assert "已确认" in run(service.handle(event("owner"), f"confirm {other_sensitive}")).text
 
-    assert denied.text.startswith("[denied]")
     assert db.get_item(GROUP, own).status == "active"  # type: ignore[union-attr]
     assert db.get_item(GROUP, other_normal).status == "active"  # type: ignore[union-attr]
-    assert db.get_item(GROUP, other_sensitive).status == "candidate"  # type: ignore[union-attr]
+    assert db.get_item(GROUP, other_sensitive).status == "active"  # type: ignore[union-attr]
+
+
+def test_owner_has_full_access_to_all_group_memories(tmp_path: Path) -> None:
+    """Owner can show, forget, and correct any member's item."""
+    db = store(tmp_path)
+    own = seed(db, subject_kind="user", subject_id="owner", content="owner fact")
+    member = seed(db, subject_kind="user", subject_id="member", content="member fact")
+    other = seed(db, subject_kind="user", subject_id="other", content="other fact")
+    group = seed(db, subject_kind="group", subject_id="g1", content="group fact")
+    service = MemoryCommandService(config(), db)
+
+    # Owner can show any item
+    assert "member fact" in run(service.handle(event("owner"), f"show {member}")).text
+    assert "other fact" in run(service.handle(event("owner"), f"show {other}")).text
+    assert "group fact" in run(service.handle(event("owner"), f"show {group}")).text
+
+    # Owner can forget another member's item
+    assert "已忘记" in run(service.handle(event("owner"), f"forget {member}")).text
+    assert db.get_item(GROUP, member) is None
+
+    # Owner can correct another member's item
+    assert "已更正" in run(service.handle(event("owner"), f"correct {other} updated by owner")).text
+    corrected = db.get_item(GROUP, other)
+    assert corrected is not None
+    assert corrected.content == "updated by owner"
+
+
+def test_member_cannot_access_other_member_items(tmp_path: Path) -> None:
+    """Member cannot show or forget another member's items."""
+    db = store(tmp_path)
+    seed(db, subject_kind="user", subject_id="member", content="member fact")
+    other_id = seed(db, subject_kind="user", subject_id="other", content="other fact")
+    service = MemoryCommandService(config(), db)
+
+    # Member cannot show other's item
+    assert run(service.handle(event(), f"show {other_id}")).text.startswith("[denied]")
+    # Member cannot forget other's item
+    assert run(service.handle(event(), f"forget {other_id}")).text.startswith("[denied]")
+    assert db.get_item(GROUP, other_id) is not None
+
+
+def test_natural_language_owner_forget_other_member_item(tmp_path: Path) -> None:
+    """Owner's natural-language forget should work on other members' items."""
+    db = store(tmp_path)
+    other_id = seed(db, subject_kind="user", subject_id="other", content="other fact")
+
+    async def interpreter(_prompt: str) -> str:
+        return json.dumps({"intent": "forget", "references": [other_id]})
+
+    service = MemoryCommandService(config(), db, interpreter=interpreter)
+    result = run(service.handle(event("owner"), "删掉 other fact"))
+    assert "已忘记" in result.text
+    assert db.get_item(GROUP, other_id) is None
 
 
 def test_interpreter_exception_makes_no_change(tmp_path: Path) -> None:
