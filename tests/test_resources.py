@@ -726,7 +726,10 @@ def test_resource_manager_does_not_pass_unstaged_attachment_urls(tmp_path: Path)
 
     refs = asyncio.run(manager.prepare(ev))
 
-    assert refs == ()
+    # Image with failed download returns a degraded resource, not silently dropped.
+    assert len(refs) == 1
+    assert refs[0].kind == "image"
+    assert refs[0].local_path is None
 
 
 def test_resource_manager_formats_forward_chat_record_context_without_downloading(tmp_path: Path) -> None:
@@ -862,8 +865,8 @@ def test_image_with_valid_url_is_downloaded_and_appears_in_context(
     assert refs[0].local_path in context
 
 
-def test_image_with_empty_url_is_silently_skipped(tmp_path: Path) -> None:
-    """Image resource with url="" is not treated as an error — prepare skips it."""
+def test_image_with_empty_url_is_gracefully_degraded(tmp_path: Path) -> None:
+    """Image resource with url="" returns a degraded resource, not an error."""
     fetch_called = False
 
     async def fetch(url: str, limit: int) -> tuple[bytes, str]:
@@ -878,11 +881,10 @@ def test_image_with_empty_url_is_silently_skipped(tmp_path: Path) -> None:
 
     refs = asyncio.run(manager.prepare(ev))
 
-    assert refs == ()
-    assert not fetch_called
-    # format_resource_context must not crash on an empty tuple
-    assert format_resource_context(()) == ""
-    assert format_resource_context(refs) == ""
+    assert len(refs) == 1
+    assert refs[0].kind == "image"
+    assert refs[0].local_path is None  # degraded, not staged
+    assert not fetch_called  # never attempted since url is empty
 
 
 def test_file_resource_is_downloaded_and_staged(tmp_path: Path) -> None:
@@ -1064,11 +1066,13 @@ def test_resource_download_failure_does_not_block_remaining_resources(
 
     refs = asyncio.run(manager.prepare(ev))
 
-    # Only the second (valid) resource should survive
-    assert len(refs) == 1
+    # First image degraded (no local_path), second succeeds
+    assert len(refs) == 2
     assert refs[0].kind == "image"
-    assert refs[0].local_path is not None
-    local = tmp_path / refs[0].local_path
+    assert refs[0].local_path is None  # degraded
+    assert refs[1].kind == "image"
+    assert refs[1].local_path is not None  # staged
+    local = tmp_path / refs[1].local_path
     assert local.read_bytes() == b"good-payload"
 
     # The failed resource must not leak into context
