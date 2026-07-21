@@ -77,7 +77,10 @@ class ResourceManager:
         self.animation_extractor = animation_extractor or AnimatedImageExtractor(cfg.resources).extract
 
     async def prepare(self, ev: ChatEvent) -> tuple[PreparedResource, ...]:
-        if not self.cfg.resources.enabled or not ev.resources:
+        if not self.cfg.resources.enabled:
+            return ()
+        if not ev.resources:
+            logger.info("resource_prepare_empty chat_id=%s text=%s", ev.chat_id, ev.text[:80])
             return ()
         workspace = Path(self.cfg.agent.default_workspace).expanduser().resolve(strict=False)
         if not self.cfg.is_workspace_allowed(str(workspace)):
