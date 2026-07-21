@@ -627,32 +627,37 @@ class MemoryValidator:
             return None, reason
         evidence_content = proposal.content or (target.content if target is not None else None)
         evidence_sources = sources if cited_sources is None else cited_sources
-        if proposal.source_kind == "owner_confirmed" and evidence_content is not None:
-            explicit_item_confirmation = bool(
-                not proposal.evidence_required
-                and cited_sources is None
-                and proposal.actor_class == "user"
-                and proposal.operation == "reinforce"
-                and proposal.item_id
-                and actor is not None
-                and any(
-                    source.sender_id == actor.id and source.explicit
+        if proposal.source_kind == "owner_confirmed":
+            # For destructive / edit operations (forget, revise, contradict),
+            # the owner's explicit structured command is sufficient
+            # authorization — no content verification needed.  Only
+            # reinforce (confirming a candidate into active) requires
+            # the evidence content to be supported by the owner's message.
+            if evidence_content is not None and proposal.operation == "reinforce":
+                explicit_item_confirmation = bool(
+                    not proposal.evidence_required
+                    and cited_sources is None
+                    and proposal.actor_class == "user"
+                    and proposal.item_id
+                    and actor is not None
+                    and any(
+                        source.sender_id == actor.id and source.explicit
+                        for source in evidence_sources
+                    )
+                )
+                owner_supports_content = actor is not None and any(
+                    source.sender_id == actor.id
+                    and _content_affirmatively_supported_by_source(
+                        evidence_content, source.text
+                    )
+                    and (
+                        not _curator_proposal_can_activate(proposal)
+                        or _content_is_direct_assertion(evidence_content, source.text)
+                    )
                     for source in evidence_sources
                 )
-            )
-            owner_supports_content = actor is not None and any(
-                source.sender_id == actor.id
-                and _content_affirmatively_supported_by_source(
-                    evidence_content, source.text
-                )
-                and (
-                    not _curator_proposal_can_activate(proposal)
-                    or _content_is_direct_assertion(evidence_content, source.text)
-                )
-                for source in evidence_sources
-            )
-            if not explicit_item_confirmation and not owner_supports_content:
-                return None, "owner_confirmation_required"
+                if not explicit_item_confirmation and not owner_supports_content:
+                    return None, "owner_confirmation_required"
         elif cited_sources is not None and evidence_content is not None:
             matching_sources = tuple(
                 source
@@ -682,7 +687,13 @@ class MemoryValidator:
             for source in evidence_sources
         )
         if proposal.explicit_memory and not explicit_evidence:
-            return None, "explicit_consent_required"
+            # Owner acting on another user's item does not need subject consent.
+            if not (
+                proposal.source_kind == "owner_confirmed"
+                and actor is not None
+                and actor.role == "group_owner"
+            ):
+                return None, "explicit_consent_required"
         if proposal.decay_exempt:
             allowed_exemption = bool(
                 explicit_evidence
@@ -701,7 +712,13 @@ class MemoryValidator:
             if not explicit_evidence or (
                 actor is not None and actor.id != proposal.subject_id
             ):
-                return None, "sensitivity_consent_required"
+                # Owner-operations bypass sensitivity consent requirements.
+                if not (
+                    proposal.source_kind == "owner_confirmed"
+                    and actor is not None
+                    and actor.role == "group_owner"
+                ):
+                    return None, "sensitivity_consent_required"
         proposal = self._candidate_if_ambiguous(proposal)
         duplicate = None
         if proposal.operation in CONTENT_OPERATIONS:
@@ -1107,12 +1124,16 @@ class MemoryValidator:
                 return "actor_not_authorized"
             if not any(source.sender_id == actor.id for source in sources):
                 return "owner_confirmation_required"
-            if proposal.content is not None and not any(
-                source.sender_id == actor.id
-                and _content_affirmatively_supported_by_source(
-                    proposal.content, source.text
+            if (
+                proposal.operation == "reinforce"
+                and proposal.content is not None
+                and not any(
+                    source.sender_id == actor.id
+                    and _content_affirmatively_supported_by_source(
+                        proposal.content, source.text
+                    )
+                    for source in sources
                 )
-                for source in sources
             ):
                 return "owner_confirmation_required"
             return None

@@ -273,13 +273,15 @@ class MemoryCommandService:
         item_or_error = self._resolve_reference(ev, args[0], operation="correct")
         if isinstance(item_or_error, MemoryCommandResult):
             return item_or_error
+        item = item_or_error
         content = " ".join(args[1:]).strip()
+        source_kind = self._source_kind_for_action(ev, item)
         proposal = MemoryProposal(
             operation="revise",
-            item_id=item_or_error.id,
+            item_id=item.id,
             content=content,
             confidence=0.95,
-            source_kind="explicit_request",
+            source_kind=source_kind,
             explicit_memory=True,
             actor_class="user",
         )
@@ -315,10 +317,12 @@ class MemoryCommandService:
         item_or_error = self._resolve_reference(ev, args[0], operation="forget")
         if isinstance(item_or_error, MemoryCommandResult):
             return item_or_error
+        item = item_or_error
+        source_kind = self._source_kind_for_action(ev, item)
         proposal = MemoryProposal(
             operation="forget",
-            item_id=item_or_error.id,
-            source_kind="explicit_request",
+            item_id=item.id,
+            source_kind=source_kind,
             actor_class="user",
         )
         result = self._validate_and_commit(ev, (proposal,))
@@ -504,7 +508,7 @@ class MemoryCommandService:
                 MemoryProposal(
                     operation="forget",
                     item_id=item.id,
-                    source_kind="explicit_request",
+                    source_kind=self._source_kind_for_action(ev, item),
                     actor_class="user",
                 )
                 for item in resolved
@@ -674,23 +678,20 @@ class MemoryCommandService:
     def _can_access_item(self, ev: ChatEvent, item: MemoryItem, operation: str) -> bool:
         if item.scope != self._scope(ev):
             return False
+        # Owner has full access to every item in their group.
+        if ev.is_group and self._is_owner(ev):
+            return True
+        # User can access their own items.
         if item.subject_kind == "user" and item.subject_id == ev.sender_id:
             return True
+        # In group, non-owner members can access group-subject items.
         if (
             ev.is_group
-            and self._is_owner(ev)
             and item.subject_kind == "group"
             and item.subject_id == ev.chat_id
         ):
             return True
-        return bool(
-            operation == "confirm"
-            and ev.is_group
-            and self._is_owner(ev)
-            and item.subject_kind == "user"
-            and item.status == "candidate"
-            and item.sensitivity == "normal"
-        )
+        return False
 
     def _parse_clear_target(
         self, ev: ChatEvent, args: Sequence[str]
@@ -848,7 +849,17 @@ class MemoryCommandService:
     def _is_owner(self, ev: ChatEvent) -> bool:
         return self.cfg.is_owner(ev.sender_id)
 
-    @staticmethod
+    def _source_kind_for_action(self, ev: ChatEvent, item: MemoryItem) -> str:
+        """Return owner_confirmed when the owner acts on another user's item."""
+        if (
+            ev.is_group
+            and self._is_owner(ev)
+            and item.subject_kind == "user"
+            and item.subject_id != ev.sender_id
+        ):
+            return "owner_confirmed"
+        return "explicit_request"
+
     @staticmethod
     def _item_label(item: MemoryItem, current_sender: str = "") -> str:
         if item.subject_kind == "group":
