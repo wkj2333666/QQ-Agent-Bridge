@@ -425,26 +425,39 @@ class ResourceManager:
         total_bytes: int,
     ) -> tuple[PreparedResource, int]:
         source_url: str | None = resource.url
+        logger.info(
+            "image_prepare_start file_id=%s url=%s has_api=%s",
+            resource.file_id or "", (resource.url or "")[:120], bool(self.image_url),
+        )
         if self.image_url:
             try:
                 resolved = await self.image_url(resource)
-            except Exception:
+            except Exception as exc:
+                logger.info("image_get_image_api_failed error=%s", exc)
                 resolved = None
             if resolved:
+                logger.info("image_get_image_api_ok resolved=%s", resolved[:120])
                 source_url = resolved
         if not source_url:
+            logger.info("image_prepare_no_url file_id=%s", resource.file_id or "")
             return self._unavailable_resource(resource, "image", "QQ image URL unavailable"), 0
 
         if self._is_http_url(source_url):
             try:
                 payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
-            except Exception:
+            except Exception as exc:
+                logger.info("image_download_failed url=%s error=%s", source_url[:120], exc)
                 return self._unavailable_resource(resource, "image", "QQ image download unavailable"), 0
         else:
             try:
                 payload, content_type = self._read_local_record(source_url, total_bytes, resource)
             except ValueError as exc:
                 return self._unavailable_resource(resource, "image", str(exc)), 0
+
+        logger.info(
+            "image_download_ok size=%d content_type=%s chat_id=%s",
+            len(payload), content_type, ev.chat_id,
+        )
 
         if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
             return self._unavailable_resource(resource, "image", "QQ image download limit exceeded"), len(payload)
