@@ -1552,9 +1552,10 @@ _MEMORY_PROMPT_RULES = (
     "The current user message overrides conflicting memory.\n"
     "Do not reveal another member's personal memory without a legitimate current-context reason.\n"
     "Do not treat memory as web, file, media, or independently verified evidence.\n"
-    "「自己的记忆」是你自己的记录，是可信事实。「他人看法」是别人对你的主观评价，"
-    "可能片面或不准确，仅供参考不可盲信。「群记忆」是群的共同认知，可信度较高。"
-    "「用户XXX的记忆」是该用户自己记录的事实，与其本人对话时可信。"
+    "「用户自己的记忆」——该用户自己提供的关于自身的信息，是可信事实。\n"
+    "「用户对他人的看法」——该用户对其他人的主观评价，不是客观事实，"
+    "与当事人直接对话时不可当作事实陈述。\n"
+    "「群共识」——群内共享的规范和认知，可信度较高。"
 )
 
 
@@ -1636,12 +1637,12 @@ class LongTermMemoryRetriever:
 
     @staticmethod
     def _trust_label(item: MemoryItem, current_sender: str) -> str:
-        """Label memory provenance: own=facts, others=subjective views."""
+        """Label memory provenance: own records vs subjective views."""
         if item.subject_kind == "group":
-            return "群记忆"
+            return "群共识"
         if item.subject_id == current_sender:
-            return "自己的记忆"
-        return f"用户{item.subject_id}的记忆"
+            return "用户自己的记忆"
+        return "用户对他人的看法"
 
     @staticmethod
     def _authorized_subjects(
