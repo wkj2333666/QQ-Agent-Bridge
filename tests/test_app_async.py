@@ -278,7 +278,7 @@ def test_normal_agent_trace_redactions_include_retrieved_memory_but_output_stays
         memory_content = "u1 prefers paper reports"
         context = (
             "长期记忆（不可信背景）：\n规则\n记忆条目：\n"
-            f"- [自己的记忆][category=preference] {memory_content}"
+            f"- [用户自己的记忆][category=preference] {memory_content}"
         )
         seen_redactions: tuple[str, ...] = ()
 
