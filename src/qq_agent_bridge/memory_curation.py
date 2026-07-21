@@ -424,7 +424,7 @@ class MemoryCollector:
 
 
 def _extract_curator_json(text: str) -> str:
-    """Extract a JSON object from model output that may have markdown or prose."""
+    """Extract a JSON value from model output that may have markdown or prose."""
     stripped = text.strip()
     if not stripped:
         return stripped
@@ -434,19 +434,34 @@ def _extract_curator_json(text: str) -> str:
     fence = _re.match(r"```(?:json)?\s*\n(.*?)\n```", stripped, _re.DOTALL)
     if fence:
         return fence.group(1).strip()
-    # Find the outermost { … } pair
-    start = stripped.find("{")
-    if start == -1:
-        return stripped
-    depth = 0
-    for i in range(start, len(stripped)):
-        ch = stripped[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return stripped[start : i + 1]
+    # Find the outermost JSON value: check the first non-whitespace
+    # character — { for object, [ for array.
+    first = stripped[0]
+    if first in ("{", "["):
+        open_char = first
+        close_char = "}" if first == "{" else "]"
+        depth = 0
+        for i, ch in enumerate(stripped):
+            if ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    return stripped[: i + 1]
+    # Fallback: try to find a { or [ somewhere in the text.
+    for open_char, close_char in (("{", "}"), ("[", "]")):
+        start = stripped.find(open_char)
+        if start == -1:
+            continue
+        depth = 0
+        for i in range(start, len(stripped)):
+            ch = stripped[i]
+            if ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    return stripped[start : i + 1]
     return stripped
 
 
@@ -463,6 +478,10 @@ def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
         raise ValueError("curator output contains duplicate key") from exc
     except (TypeError, json.JSONDecodeError, _NonJsonConstantError) as exc:
         raise ValueError("curator output is not valid JSON") from exc
+    # Some models return a bare operations array without the envelope.
+    # Auto-wrap it.
+    if isinstance(payload, list):
+        payload = {"operations": payload}
     if not isinstance(payload, dict) or set(payload) != {"operations"}:
         raise ValueError("curator output must contain only operations")
     operations = payload["operations"]

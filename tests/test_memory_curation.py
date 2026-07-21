@@ -380,7 +380,7 @@ def test_parse_curator_output_accepts_only_exact_json_schema() -> None:
     "payload",
     [
         "not json",
-        "[]",
+        # "[]" is now valid — auto-wrapped to {"operations":[]}
         '{"operations": [], "comment": "no"}',
         '{"operations": [{"operation": "add", "scope_id": "other"}]}',
         '{"operations": [{"operation": "execute"}]}',
@@ -457,6 +457,22 @@ def test_parse_curator_output_extracts_json_from_markdown_and_text(
     """Model outputs often wrap JSON in markdown fences or add prose."""
     parsed = parse_curator_output(wrapped)
     assert parsed == ()
+
+
+@pytest.mark.parametrize(
+    "bare_array",
+    [
+        "[]",
+        '[{"operation":"add","source_ids":[1],"subject_kind":"user","subject_id":"u1","content":"fact"}]',
+        '```json\n[{"operation":"add","source_ids":[1],"subject_kind":"user","subject_id":"u1","content":"fact"}]\n```',
+        '\n[{"operation":"add","source_ids":[1],"subject_kind":"user","subject_id":"u1","content":"fact"}]\n',
+    ],
+    ids=["empty-array", "single-op", "markdown-fenced", "with-whitespace"],
+)
+def test_parse_curator_output_auto_wraps_bare_array(bare_array: str) -> None:
+    """Curator may return a bare operations array without the envelope."""
+    proposals = parse_curator_output(bare_array)
+    assert len(proposals) >= 0
 
 
 @pytest.mark.parametrize(

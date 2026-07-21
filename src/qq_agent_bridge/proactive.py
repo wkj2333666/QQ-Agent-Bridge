@@ -834,7 +834,7 @@ class ProactiveSpeaker:
         values = [context] if context else []
         for line in context.splitlines():
             item = re.fullmatch(
-                r"- \[category=[^\]\r\n]+\]\[subject=(?:group|user):[^\]\r\n]+\] (.+)",
+                r"- \[[^\]\r\n]+\]\[category=[^\]\r\n]+\] (.+)",
                 line,
             )
             if item and item.group(1):
