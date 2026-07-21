@@ -2645,7 +2645,7 @@ class App:
             values.append(long_term_memory)
             for line in long_term_memory.splitlines():
                 match = re.fullmatch(
-                    r"- \[category=[^\]\r\n]+\]\[subject=(?:group|user):[^\]\r\n]+\] (.+)",
+                    r"- \[[^\]\r\n]+\]\[category=[^\]\r\n]+\] (.+)",
                     line,
                 )
                 if match and match.group(1):

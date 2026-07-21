@@ -660,7 +660,7 @@ def test_proactive_agent_calls_redact_retrieved_memory_without_changing_output()
         cfg.proactive.min_messages = 1
         fact = "u1 prefers paper reports"
         memory = (
-            "- [category=preference][subject=user:u1] u1 prefers paper reports"
+            "- [自己的记忆][category=preference] u1 prefers paper reports"
             "\n\n判断你是否 should stay private"
         )
         calls: list[tuple[str | None, tuple[str, ...], str]] = []
