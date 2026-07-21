@@ -29,6 +29,7 @@ from .whisper_runner import TranscriptionResult, WhisperRunner
 
 FetchFunc = Callable[[str, int], Awaitable[tuple[bytes, str]]]
 RecordUrlFunc = Callable[[ChatResource], Awaitable[str | None]]
+ImageUrlFunc = Callable[[ChatResource], Awaitable[str | None]]
 AnimationExtractFunc = Callable[[Path, Path], Awaitable[AnimationExtraction]]
 
 MAX_FORWARD_TITLE_CHARS = 120
@@ -64,12 +65,14 @@ class ResourceManager:
         cfg: BridgeConfig,
         fetch: FetchFunc | None = None,
         record_url: RecordUrlFunc | None = None,
+        image_url: ImageUrlFunc | None = None,
         transcriber: WhisperRunner | None = None,
         animation_extractor: AnimationExtractFunc | None = None,
     ) -> None:
         self.cfg = cfg
         self.fetch = fetch or self._fetch_http
         self.record_url = record_url
+        self.image_url = image_url
         self.transcriber = transcriber
         self.animation_extractor = animation_extractor or AnimatedImageExtractor(cfg.resources).extract
 
@@ -102,6 +105,15 @@ class ResourceManager:
                 continue
             if resource.kind == "voice":
                 prepared, consumed = await self._prepare_voice(
+                    resource, idx, root, workspace, ev, total_bytes
+                )
+                total_bytes += consumed
+                if total_bytes > self.cfg.resources.max_total_bytes:
+                    break
+                refs.append(prepared)
+                continue
+            if resource.kind == "image":
+                prepared, consumed = await self._prepare_image(
                     resource, idx, root, workspace, ev, total_bytes
                 )
                 total_bytes += consumed
@@ -400,6 +412,61 @@ class ResourceManager:
             return f"{idx:02d}-{digest}.wav"
         return self._generated_name(idx, payload, content_type, resource)
 
+    async def _prepare_image(
+        self,
+        resource: ChatResource,
+        idx: int,
+        root: Path,
+        workspace: Path,
+        ev: ChatEvent,
+        total_bytes: int,
+    ) -> tuple[PreparedResource, int]:
+        source_url: str | None = resource.url
+        if self.image_url:
+            try:
+                resolved = await self.image_url(resource)
+            except Exception:
+                resolved = None
+            if resolved:
+                source_url = resolved
+        if not source_url:
+            return self._unavailable_resource(resource, "image", "QQ image URL unavailable"), 0
+
+        if self._is_http_url(source_url):
+            try:
+                payload, content_type = await self.fetch(source_url, self.cfg.resources.max_bytes)
+            except Exception:
+                return self._unavailable_resource(resource, "image", "QQ image download unavailable"), 0
+        else:
+            try:
+                payload, content_type = self._read_local_record(source_url, total_bytes, resource)
+            except ValueError as exc:
+                return self._unavailable_resource(resource, "image", str(exc)), 0
+
+        if total_bytes + len(payload) > self.cfg.resources.max_total_bytes:
+            return self._unavailable_resource(resource, "image", "QQ image download limit exceeded"), len(payload)
+
+        event_dir = root / datetime.fromtimestamp(ev.timestamp).strftime("%Y-%m-%d") / self._safe_event_id(ev.id)
+        try:
+            event_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return self._unavailable_resource(resource, "image", "image staging unavailable"), len(payload)
+
+        name = self._generated_name(idx, payload, content_type, resource)
+        target = (event_dir / name).resolve(strict=False)
+        if root not in target.parents:
+            return self._unavailable_resource(resource, "image", "image staging unavailable"), len(payload)
+        target.write_bytes(payload)
+
+        prepared = PreparedResource(
+            kind="image",
+            name=resource.name,
+            local_path=target.relative_to(workspace).as_posix(),
+        )
+        if self._is_animation_candidate(resource, content_type, target, payload):
+            prepared = await self._with_animation(prepared, target, workspace)
+        return prepared, len(payload)
+
     @staticmethod
     def _unavailable_voice(resource: ChatResource, error: str) -> PreparedResource:
         return PreparedResource(
@@ -408,6 +475,15 @@ class ResourceManager:
             duration_seconds=resource.duration_seconds,
             transcript_status="unavailable",
             transcript_error=error,
+        )
+
+    @staticmethod
+    def _unavailable_resource(
+        resource: ChatResource, kind: str, error: str
+    ) -> PreparedResource:
+        return PreparedResource(
+            kind=kind,
+            name=resource.name or resource.file_id,
         )
 
     async def _transcribe_voice(self, path: Path) -> TranscriptionResult:

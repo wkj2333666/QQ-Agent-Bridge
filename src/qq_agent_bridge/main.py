@@ -2352,9 +2352,11 @@ class App:
             else None
         )
         record_url = getattr(self.adapter, "resolve_record_url", None)
+        image_url = getattr(self.adapter, "resolve_image_url", None)
         resources = ResourceManager(
             cfg,
             record_url=record_url if callable(record_url) else None,
+            image_url=image_url if callable(image_url) else None,
             transcriber=transcriber,
         )
         return transcriber, resources
