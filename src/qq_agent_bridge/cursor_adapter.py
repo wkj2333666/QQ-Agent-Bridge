@@ -399,11 +399,11 @@ class CursorAdapter:
             else:
                 self._seed_cursor_state(sandbox_home)
                 self._seed_workspace_trust(sandbox_home, workspace_path)
-        except OSError as exc:
-            logger.warning("sandbox preparation OSError: %s", exc)
+        except OSError:
+            logger.warning("sandbox OSError workspace=%s", workspace_path)
             return "[error] 助手沙箱未配置"
-        except ValueError as exc:
-            logger.warning("sandbox preparation ValueError: %s", exc)
+        except ValueError:
+            logger.warning("sandbox ValueError workspace=%s", workspace_path)
             return "[error] 助手沙箱未配置"
         return None
 
