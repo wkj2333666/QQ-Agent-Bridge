@@ -625,7 +625,7 @@ def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
         "/workspace",
     )
     assert cmd[cmd.index("--mode") + 1] == "ask"
-    assert cmd[cmd.index("--sandbox") + 1] == "enabled"
+    assert cmd[cmd.index("--sandbox") + 1] == "disabled"  # bwrap provides sandbox
     for forbidden in ("--force", "--trust", "--auto-review", "--approve-mcps"):
         assert forbidden not in cmd
 
@@ -1076,7 +1076,7 @@ def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
         "toolApprovals": {},
     }
     assert mcp_policy == {"mcpServers": {}}
-    assert not (hardened_home / ".cursor" / "projects").exists()
+    assert (hardened_home / ".cursor" / "projects").exists()  # /workspace trust seeded
     assert marker not in "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
         for path in hardened_home.rglob("*")
@@ -1106,7 +1106,7 @@ def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
         json.loads((hardened_home / ".cursor" / "cli-config.json").read_text())
         == cli_policy
     )
-    assert not (hardened_home / ".cursor" / "projects").exists()
+    assert (hardened_home / ".cursor" / "projects").exists()  # /workspace trust seeded
 
 
 def test_hardened_prepare_fails_closed_without_safe_auth(

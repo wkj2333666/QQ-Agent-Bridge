@@ -116,11 +116,10 @@ class CursorAdapter:
         if self.cfg.agent.hardened_read_only and mode != "ask":
             raise ValueError("hardened read-only agent only supports ask mode")
         cursor_cmd: list[str] = [self.binary, "-p", "--workspace", workspace]
-        cursor_sandbox = (
-            "enabled"
-            if self.cfg.agent.hardened_read_only or not self.cfg.agent.use_bwrap
-            else "disabled"
-        )
+        # bwrap already provides a full container sandbox, so disable
+        # cursor-agent's own sandbox (which requires AppArmor).
+        # Without bwrap, let cursor-agent manage its own sandbox.
+        cursor_sandbox = "disabled" if self.cfg.agent.use_bwrap else "enabled"
         if model:
             cursor_cmd.extend(["--model", model])
         if stream:
@@ -388,6 +387,10 @@ class CursorAdapter:
             if self.cfg.agent.hardened_read_only:
                 self._hardened_cursor_runtime(workspace_path)
                 self._prepare_hardened_cursor_state(sandbox_home)
+                # The hardened workspace is remapped to /workspace inside
+                # the sandbox.  Seed trust for that path so cursor-agent
+                # runs without prompting.
+                self._seed_workspace_trust(sandbox_home, Path("/workspace"))
             else:
                 self._seed_cursor_state(sandbox_home)
                 self._seed_workspace_trust(sandbox_home, workspace_path)
