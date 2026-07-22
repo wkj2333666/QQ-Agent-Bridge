@@ -131,13 +131,16 @@ class AgentTrace:
             self._safe_text(event_type, 80),
             subtype=subtype or None,
             summary=self._event_summary(payload),
+            payload=payload,
         )
 
     def record_stdout_text(self, text: str) -> None:
+        self.record("stdout", "raw", raw=text)
         for line in text.splitlines():
             self.record_stdout_line(line)
 
     def record_stderr_text(self, text: str) -> None:
+        self.record("stderr", "raw", raw=text)
         for line in text.splitlines():
             if line.strip():
                 self.record("stderr", "text", summary=line)
@@ -292,13 +295,13 @@ class AgentTrace:
 
     def _safe_value(self, value: Any) -> Any:
         if isinstance(value, str):
-            return self._safe_text(value, 1000)
+            return self._safe_text(value, 100_000)
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, (list, tuple)):
-            return [self._safe_value(item) for item in value[:12]]
+            return [self._safe_value(item) for item in value[:64]]
         if isinstance(value, dict):
-            return {str(key)[:80]: self._safe_value(item) for key, item in list(value.items())[:12]}
+            return {str(key)[:200]: self._safe_value(item) for key, item in list(value.items())[:64]}
         return f"<{type(value).__name__}>"
 
     def _safe_text(self, value: Any, limit: int) -> str:
