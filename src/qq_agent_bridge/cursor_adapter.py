@@ -378,6 +378,11 @@ class CursorAdapter:
             return None
         workspace_path = Path(workspace).expanduser().resolve(strict=False)
         if not self._has_trusted_bwrap(workspace_path):
+            logger.warning(
+                "bwrap not trusted: bwrap=%s workspace=%s",
+                self.bwrap,
+                workspace_path,
+            )
             return "[error] 助手沙箱未配置"
         sandbox_home = self._sandbox_home(workspace_path)
         try:
@@ -395,9 +400,10 @@ class CursorAdapter:
                 self._seed_cursor_state(sandbox_home)
                 self._seed_workspace_trust(sandbox_home, workspace_path)
         except OSError as exc:
-            logger.warning("sandbox preparation failed: %s", type(exc).__name__)
+            logger.warning("sandbox preparation OSError: %s", exc)
             return "[error] 助手沙箱未配置"
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("sandbox preparation ValueError: %s", exc)
             return "[error] 助手沙箱未配置"
         return None
 
