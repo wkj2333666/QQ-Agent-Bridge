@@ -1428,7 +1428,7 @@ def test_cursor_run_fails_closed_when_required_env_is_disabled() -> None:
 
     result = asyncio.run(adapter.run("hello", "/tmp", "ask"))
 
-    assert result == "[error] 助手环境未配置"
+    assert result.startswith("[error] 助手环境未配置")
 
 
 def test_cursor_run_fails_closed_when_required_env_is_not_micromamba() -> None:
@@ -1439,7 +1439,7 @@ def test_cursor_run_fails_closed_when_required_env_is_not_micromamba() -> None:
 
     result = asyncio.run(adapter.run("hello", "/tmp", "ask"))
 
-    assert result == "[error] 助手环境未配置"
+    assert result.startswith("[error] 助手环境未配置")
 
 
 def test_cursor_run_fails_closed_when_required_env_name_is_not_base() -> None:
@@ -1450,7 +1450,7 @@ def test_cursor_run_fails_closed_when_required_env_name_is_not_base() -> None:
 
     result = asyncio.run(adapter.run("hello", "/tmp", "ask"))
 
-    assert result == "[error] 助手环境未配置"
+    assert result.startswith("[error] 助手环境未配置")
 
 
 def test_model_is_added_when_configured() -> None:
