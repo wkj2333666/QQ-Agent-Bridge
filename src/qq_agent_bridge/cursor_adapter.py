@@ -664,14 +664,15 @@ class CursorAdapter:
         if not self.cfg.is_workspace_allowed(ws):
             return f"[denied] workspace {ws} not allowed"
         if self.cfg.agent.require_env:
-            if (
-                not self.env_runner
-                or os.path.basename(self.env_runner) != "micromamba"
-                or self.cfg.agent.env_name != "base"
-            ):
-                return "[error] 助手环境未配置"
+            if not self.env_runner:
+                return "[error] 助手环境未配置 (no env_runner)"
+            if os.path.basename(self.env_runner) != "micromamba":
+                return f"[error] 助手环境未配置 (env_runner={self.env_runner})"
+            if self.cfg.agent.env_name != "base":
+                return f"[error] 助手环境未配置 (env_name={self.cfg.agent.env_name})"
         sandbox_error = self._prepare_bwrap(ws, mode)
         if sandbox_error:
+            logger.warning("cursor adapter sandbox error: %s", sandbox_error)
             return sandbox_error
 
         env = {k: os.environ.get(k, "") for k in self.cfg.agent.env_allowlist if k in os.environ}
