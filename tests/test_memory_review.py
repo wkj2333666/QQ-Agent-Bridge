@@ -63,6 +63,51 @@ class FakeAgent:
             self.active -= 1
 
 
+def valid_add_result(source_id: int, content: str = "喜欢简洁回答") -> str:
+    return json.dumps(
+        {
+            "operations": [
+                {
+                    "operation": "add",
+                    "source_ids": [source_id],
+                    "subject_kind": "user",
+                    "subject_id": "u1",
+                    "category": "preference",
+                    "content": content,
+                    "confidence": 0.91,
+                    "status": "active",
+                    "sensitivity": "normal",
+                    "source_kind": "self_statement",
+                    "explicit_memory": False,
+                    "decay_exempt": False,
+                    "expires_at": None,
+                }
+            ]
+        }
+    )
+
+
+class FirstSourceProposalAgent(FakeAgent):
+    """Return a valid proposal for the first source in each curator input."""
+
+    async def run(
+        self,
+        prompt: str,
+        workspace: str | None = None,
+        mode: str = "ask",
+        **kwargs: Any,
+    ) -> str:
+        if workspace is not None:
+            input_path = Path(workspace) / "curator-input" / "review-data.json"
+            payload = json.loads(input_path.read_text(encoding="utf-8"))
+            first_source = payload["sources"][0]
+            self.result = valid_add_result(
+                int(first_source["source_id"]),
+                str(first_source["text"]),
+            )
+        return await super().run(prompt, workspace, mode, **kwargs)
+
+
 @pytest.fixture
 def cfg() -> BridgeConfig:
     result = BridgeConfig()
@@ -155,7 +200,7 @@ def test_curator_uses_bounded_json_only_ask_contract(
 
         outcome = await curator.review(GROUP, (source("x" * 20_000),), ())
 
-        assert outcome.error is None
+        assert outcome.error == "empty_proposals"
         assert outcome.accepted == ()
         assert len(agent.calls) == 1
         call = agent.calls[0]
@@ -357,7 +402,7 @@ def test_threshold_review_waits_for_idle_deadline(
         cfg.long_term_memory.review.idle_seconds = 10
         collect_source(store, message_id="m1")
         collect_source(store, message_id="m2")
-        agent = FakeAgent()
+        agent = FirstSourceProposalAgent()
         coordinator = make_coordinator(store, agent, cfg, tmp_path, now=100)
 
         coordinator.notify(GROUP)
@@ -403,7 +448,7 @@ def test_periodic_minimum_and_explicit_review_bypass_threshold(
         cfg.long_term_memory.review.message_threshold = 40
         cfg.long_term_memory.review.minimum_messages = 2
         collect_source(store, message_id="m1")
-        agent = FakeAgent()
+        agent = FirstSourceProposalAgent()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
 
         assert await coordinator.run_periodic(now=1_000) == ()
@@ -428,7 +473,7 @@ def test_reviews_are_serialized_one_at_a_time(
 ) -> None:
     async def go() -> None:
         collect_source(store, message_id="m1")
-        agent = FakeAgent()
+        agent = FirstSourceProposalAgent()
         agent.release = asyncio.Event()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
 
@@ -453,7 +498,7 @@ def test_interactive_background_cancel_does_not_cancel_explicit_review(
 ) -> None:
     async def go() -> None:
         collect_source(store, message_id="m1")
-        agent = FakeAgent()
+        agent = FirstSourceProposalAgent()
         agent.release = asyncio.Event()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
         explicit = asyncio.create_task(coordinator.review_now(GROUP, actor=OWNER))
@@ -584,6 +629,34 @@ def test_failed_review_keeps_sources_and_backs_off(
         assert outcome.next_attempt_at == 1_060
         assert store.status(GROUP).pending_count == 1
         assert store.pending_sources(GROUP, limit=10, now=1_059) == ()
+        pending = store.pending_sources(GROUP, limit=10, now=1_060)
+        assert [value.id for value in pending] == [source_id]
+        assert pending[0].attempt_count == 1
+
+    asyncio.run(go())
+
+
+def test_empty_curator_result_keeps_sources_for_retry(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(store, message_id="empty-proposals")
+        coordinator = make_coordinator(
+            store,
+            FakeAgent('{"operations":[]}'),
+            cfg,
+            tmp_path,
+            now=1_000,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error == "empty_proposals"
+        assert outcome.accepted == ()
+        assert outcome.next_attempt_at == 1_060
+        assert store.status(GROUP).pending_count == 1
         pending = store.pending_sources(GROUP, limit=10, now=1_060)
         assert [value.id for value in pending] == [source_id]
         assert pending[0].attempt_count == 1
@@ -1211,7 +1284,7 @@ def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
         # Coordinator must remain operational after a timeout.
         # The original source is deferred with backoff; collect a fresh one.
         collect_source(store, message_id="m2")
-        healthy_agent = FakeAgent()
+        healthy_agent = FirstSourceProposalAgent()
         coordinator.curator.agent = healthy_agent
         coordinator.curator.cfg = cfg.long_term_memory.review
         second = await coordinator.review_now(GROUP, actor=OWNER)
