@@ -110,6 +110,11 @@ class MemoryCurator:
             return self._failure(scope, len(sources), "malformed_output")
         if len(output) > MAX_CURATOR_OUTPUT_CHARS:
             return self._failure(scope, len(sources), "output_too_large")
+        logger.debug(
+            "memory curator raw output len=%d preview=%s",
+            len(output.strip()),
+            output.strip()[:200],
+        )
         try:
             proposals = parse_curator_output(output)
         except ValueError as exc:
@@ -137,6 +142,13 @@ class MemoryCurator:
             source_count=len(sources),
         )
         self._log(scope, len(sources), outcome)
+        if len(proposals) == 0 and len(sources) > 0:
+            logger.warning(
+                "memory curator returned zero proposals from %d sources; "
+                "first 3 source previews: %s",
+                len(sources),
+                [s.text[:80] for s in sources[:3]],
+            )
         return outcome
 
     def _write_curator_input(
@@ -189,12 +201,14 @@ class MemoryCurator:
 
     @staticmethod
     def _file_instructions(input_dir: Path) -> str:
+        # Use a relative path: the agent's CWD is the exposed workspace
+        # in both hardened (remapped to /workspace) and non-hardened modes.
         return (
-            f"\n\n数据文件在 {input_dir / 'review-data.json'}，"
-            f"用文件读取工具读它，然后根据内容输出操作。"
-            f"文件是 JSON 格式：scope_kind, scope_id, sources 数组,"
-            f"existing_memories 数组。"
-            f"处理后只输出 JSON，不输出其他内容。"
+            "\n\n数据文件在 ./curator-input/review-data.json，"
+            "用文件读取工具读它，然后根据内容输出操作。"
+            "文件是 JSON 格式：scope_kind, scope_id, sources 数组,"
+            "existing_memories 数组。"
+            "处理后只输出 JSON，不输出其他内容。"
         )
 
     @staticmethod

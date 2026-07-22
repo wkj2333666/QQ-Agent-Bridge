@@ -533,7 +533,11 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
         app.adapter = adapter  # type: ignore[assignment]
         app._prepare_runtime_skill_bundle = lambda: ""  # type: ignore[method-assign]
 
-        # Manual memory wiring with real curator
+        # Manual memory wiring with production-equivalent curator.
+        # Use build_memory_review_coordinator which creates a hardened
+        # curator (hardened_read_only=True, use_bwrap=True) exactly
+        # like production — workspace remapped to /workspace, cursor
+        # runtime at /opt/qq-agent-curator.
         store = LongTermMemoryStore(tmp_path / "mem-app-e2e.sqlite3")
         store.initialize()
         scope = MemoryScope("group", "group")
@@ -544,16 +548,9 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
             store, cfg.long_term_memory
         )
 
-        real_curator_agent = build_agent_adapter(cfg)
-        curator = MemoryCurator(
-            real_curator_agent,
-            MemoryValidator(cfg, store=store),
-            cfg.long_term_memory.review,
-            workspace=tmp_path,
-        )
-        coordinator = MemoryReviewCoordinator(
-            store, curator, cfg.long_term_memory, StorageActivityGate()
-        )
+        from qq_agent_bridge.memory_review import build_memory_review_coordinator as _build_coord
+
+        coordinator = _build_coord(cfg, store, StorageActivityGate(), tmp_path)
         app.memory_review_coordinator = coordinator
 
         async def _ack(ev: ChatEvent, text: str) -> None:

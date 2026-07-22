@@ -272,10 +272,10 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     assert restricted is not cfg
     assert restricted.agent is not cfg.agent
     assert restricted.agent.use_bwrap is True
-    assert restricted.agent.share_network is False
+    assert restricted.agent.share_network is True  # follows cfg.agent.share_network
     assert restricted.agent.force_task_tools is False
     assert restricted.agent.hardened_read_only is True
-    assert restricted.agent.log_subprocess_output is False
+    assert restricted.agent.log_subprocess_output is True  # follows cfg.agent.log_subprocess_output
     assert restricted.agent.trace_enabled is True  # follows cfg.agent.trace_enabled
     curator_workspace = Path(restricted.agent.default_workspace)
     curator_home = Path(restricted.agent.sandbox_home)
@@ -307,9 +307,9 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
         model=cfg.long_term_memory.review.model,
     )
     rendered_cmd = "\0".join(cmd)
-    assert "--unshare-net" in cmd
-    assert "--share-net" not in cmd
-    assert cmd[cmd.index("--sandbox") + 1] == "enabled"
+    assert "--share-net" in cmd  # follows cfg.agent.share_network
+    assert "--unshare-net" not in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "disabled"  # bwrap provides sandbox
     assert _has_mount(
         cmd,
         "--ro-bind",
@@ -334,7 +334,7 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
         assert isinstance(coordinator.curator.agent, GatedAgentAdapter)
         assert coordinator.curator.workspace == coordinator.curator.agent.cfg.agent.default_workspace
         assert coordinator.curator.workspace != str(project_workspace)
-        assert coordinator.curator.agent.cfg.agent.share_network is False
+        assert coordinator.curator.agent.cfg.agent.share_network is True  # follows cfg.agent.share_network
         assert coordinator.curator.agent.cfg.agent.trace_enabled is True  # follows cfg.agent.trace_enabled
     finally:
         store.close()

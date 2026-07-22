@@ -5,9 +5,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
+import logging
 import os
 from pathlib import Path
 import shutil
+
+logger = logging.getLogger(__name__)
 import stat
 import tempfile
 from typing import Any
@@ -167,14 +170,20 @@ def build_restricted_agent_adapter(
         restricted.max_output_chars = max(1, int(max_output_chars))
         restricted.agent.default_workspace = resolved_workspace
         restricted.agent.use_bwrap = True
-        restricted.agent.share_network = False
+        restricted.agent.share_network = cfg.agent.share_network
         restricted.agent.force_task_tools = False
         restricted.agent.hardened_read_only = True
-        restricted.agent.log_subprocess_output = False
+        restricted.agent.log_subprocess_output = cfg.agent.log_subprocess_output
         restricted.agent.sandbox_home = str(curator_home)
         restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
         restricted.agent.max_output_chars = restricted.max_output_chars
         restricted.agent.trace_enabled = cfg.agent.trace_enabled
+        logger.info(
+            "restricted agent config: trace_enabled=%s log_subprocess=%s share_network=%s",
+            restricted.agent.trace_enabled,
+            restricted.agent.log_subprocess_output,
+            restricted.agent.share_network,
+        )
         restricted.progress.enabled = False
         restricted.resources.enabled = False
         return GatedAgentAdapter(
