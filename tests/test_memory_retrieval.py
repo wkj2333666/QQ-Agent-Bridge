@@ -499,3 +499,53 @@ def test_owner_sees_all_via_memory_list_all_selector(
     retriever = make_retriever(store)
     solo_text = retriever.retrieve(GROUP, "u1", (), None, "")
     assert "U2-FACT" not in solo_text
+
+
+# ── _trust_label unit tests ──────────────────────────────────────────────
+
+def test_trust_label_own_memory(store: LongTermMemoryStore) -> None:
+    """Own user-subject memory is labeled 用户自己的记忆."""
+    add_memory(store, GROUP, subject_kind="user", subject_id="u1",
+               content="喜欢咖啡", category="preference")
+    [item] = store.list_items(GROUP)
+    assert item.subject_kind == "user"
+    assert item.subject_id == "u1"
+    assert LongTermMemoryRetriever._trust_label(item, "u1") == "用户自己的记忆"
+
+
+def test_trust_label_others_memory(store: LongTermMemoryStore) -> None:
+    """Another user's memory is labeled 用户对他人的看法 (subjective, not fact)."""
+    add_memory(store, GROUP, subject_kind="user", subject_id="u2",
+               content="u1 是后端开发", category="identity")
+    [item] = store.list_items(GROUP)
+    assert item.subject_id == "u2"
+    assert LongTermMemoryRetriever._trust_label(item, "u1") == "用户对他人的看法"
+
+
+def test_trust_label_group_consensus(store: LongTermMemoryStore) -> None:
+    """Group-subject memory is labeled 群共识."""
+    add_memory(store, GROUP, subject_kind="group", subject_id=GROUP.id,
+               content="代码评审必须两人通过", category="group_norm")
+    [item] = store.list_items(GROUP)
+    assert item.subject_kind == "group"
+    assert LongTermMemoryRetriever._trust_label(item, "u1") == "群共识"
+
+
+def test_retrieval_output_has_correct_trust_labels_for_mixed_subjects(
+    store: LongTermMemoryStore,
+) -> None:
+    """Full retrieval output has correct trust labels for own / others / group."""
+    add_memory(store, GROUP, subject_kind="user", subject_id="u1", content="喜欢简洁回答")
+    add_memory(store, GROUP, subject_kind="user", subject_id="u2",
+               content="u1 是前端开发", category="identity")
+    add_memory(store, GROUP, subject_kind="group", subject_id=GROUP.id,
+               content="每周五站会", category="group_norm")
+
+    text = make_retriever(store).retrieve(GROUP, "u1", ("u2",), None, "继续")
+
+    assert "[用户自己的记忆][category=preference] 喜欢简洁回答" in text
+    assert "[用户对他人的看法][category=identity] u1 是前端开发" in text
+    assert "[群共识][category=group_norm] 每周五站会" in text
+    assert "Long-term memory is only background" in text
+    assert "「用户自己的记忆」——该用户自己提供的关于自身的信息，是可信事实" in text
+    assert "「用户对他人的看法」——该用户对其他人的主观评价" in text

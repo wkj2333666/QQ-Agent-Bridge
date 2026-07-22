@@ -476,6 +476,33 @@ def test_parse_curator_output_auto_wraps_bare_array(bare_array: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "non_json_bracket",
+    [
+        "[no operations]",
+        "[no new memories]",
+        "[no durable memory is justified]",
+        "[none]",
+        "[No operations needed]",
+    ],
+    ids=["no-ops", "no-memories", "no-durable", "none", "capitalized"],
+)
+def test_parse_curator_output_treats_plain_bracket_text_as_empty(
+    non_json_bracket: str,
+) -> None:
+    """Non-JSON bracket text like [no operations] means empty proposals."""
+    proposals = parse_curator_output(non_json_bracket)
+    assert len(proposals) == 0
+
+
+def test_parse_curator_output_finds_json_after_non_json_bracket() -> None:
+    """When LLM starts with non-JSON bracket text but includes real JSON later."""
+    text = "[no operations needed]\n{\"operations\":[{\"operation\":\"add\",\"source_ids\":[1],\"subject_kind\":\"user\",\"subject_id\":\"u1\",\"content\":\"fact\"}]}"
+    proposals = parse_curator_output(text)
+    assert len(proposals) == 1
+    assert proposals[0].content == "fact"
+
+
+@pytest.mark.parametrize(
     "operation",
     [
         {"operation": "add"},

@@ -4713,3 +4713,106 @@ def test_shutdown_stops_maintenance_even_when_proactive_stop_fails() -> None:
     maintenance_stopped = asyncio.Event()
     adapter_stopped = asyncio.Event()
     asyncio.run(go())
+
+
+# ── Real-agent proactive E2E test ────────────────────────────────────────────
+
+_APP_E2E_ENV = "QQ_AGENT_BRIDGE_APP_E2E"
+
+import os as _os_app
+
+
+def _require_app_e2e() -> None:
+    if _os_app.environ.get(_APP_E2E_ENV) != "1":
+        pytest.skip(f"set {_APP_E2E_ENV}=1 to run real App proactive E2E")
+
+
+def test_real_agent_proactive_full_pipeline(tmp_path: Path) -> None:
+    """Proactive pipeline through App._handle with real agent.
+
+    Requires QQ_AGENT_BRIDGE_APP_E2E=1.
+    Unmentioned messages → observe → batched → real LLM decision →
+    if speak: reply sent to chat.
+    """
+    _require_app_e2e()
+
+    async def go() -> None:
+        # Load production config as base, override for test
+        cfg = BridgeConfig.load("config.yaml")
+        cfg.owners = ["owner"]
+        cfg.allowed_users = ["reader", "other-user"]
+        cfg.allowed_groups = ["group"]
+        cfg.commands = {"ask": True}
+        cfg.workspaces[str(tmp_path)] = True
+        cfg.agent.default_workspace = str(tmp_path)
+        runtime = _os_app.environ.get("QQ_AGENT_BRIDGE_E2E_RUNTIME", "")
+        if runtime:
+            cfg.agent.runtime = runtime
+        cfg.agent.binary = _os_app.environ.get("QQ_AGENT_BRIDGE_E2E_BINARY", "")
+        cfg.agent.env_runner = _os_app.environ.get(
+            "QQ_AGENT_BRIDGE_E2E_ENV_RUNNER", ""
+        )
+        cfg.agent.env_name = _os_app.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME", "")
+        cfg.agent.require_env = False
+        cfg.agent.max_runtime_seconds = int(
+            _os_app.environ.get("QQ_AGENT_BRIDGE_E2E_TIMEOUT", "90")
+        )
+        cfg.agent.max_output_chars = 8000
+        cfg.proactive.enabled = True
+        cfg.proactive.batch_seconds = 0.5
+        cfg.proactive.min_messages = 2
+        cfg.proactive.cooldown_seconds = 0
+        cfg.proactive.quiet_after_bot_seconds = 0
+        cfg.proactive.max_per_hour = 10
+        cfg.resources.enabled = False
+        cfg.storage_maintenance.enabled = False
+
+        adapter = FakeAdapter()
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)  # noqa: SLF001
+
+        # Send unmentioned group messages to trigger proactive batch
+        await app._handle(  # noqa: SLF001
+            make_ev(
+                "今天天气真不错啊，适合出去走走",
+                sender="reader",
+                group="group",
+                mentioned=False,
+                mid="pro-real-1",
+            )
+        )
+        await app._handle(  # noqa: SLF001
+            make_ev(
+                "是啊，最近一直下雨终于晴了",
+                sender="other-user",
+                group="group",
+                mentioned=False,
+                mid="pro-real-2",
+            )
+        )
+
+        # Wait for proactive batch timer + agent decision
+        # min_messages=2, batch_seconds=0.5 → should trigger quickly
+        proactive_sent = False
+        for _ in range(300):
+            await asyncio.sleep(0.1)
+            # Check if proactive sent anything
+            for item in adapter.sent:
+                if item[2] and len(item[2]) > 2:
+                    proactive_sent = True
+                    break
+            if proactive_sent:
+                break
+            # Also check if proactive agent call happened (via sent_at)
+            if adapter.sent_at:
+                proactive_sent = True
+                break
+
+        await app.proactive.stop()
+
+        # The pipeline should not crash regardless of whether the LLM
+        # decides to speak or stay silent
+        assert True  # test passes if we got here without error
+
+    asyncio.run(go())

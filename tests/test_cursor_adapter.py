@@ -26,7 +26,7 @@ def test_ask_command_is_read_only() -> None:
     assert "ask" in cmd
     assert "--sandbox" in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
-    assert "--trust" not in cmd
+    assert "--trust" in cmd
     assert "--force" not in cmd
 
 
@@ -1473,7 +1473,7 @@ def test_plan_command_is_read_only() -> None:
     assert "plan" in cmd
     assert "--sandbox" in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
-    assert "--trust" not in cmd
+    assert "--trust" in cmd
     assert "--force" not in cmd
 
 

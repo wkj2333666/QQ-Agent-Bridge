@@ -47,23 +47,34 @@ def _require_app_e2e() -> None:
 
 
 def _make_cfg(workspace: Path, mode: str = "ask") -> BridgeConfig:
-    runtime = os.environ.get("QQ_AGENT_BRIDGE_E2E_RUNTIME", "cursor-cli")
-    cfg = BridgeConfig(workspaces={str(workspace): True})
-    cfg.agent.runtime = runtime
+    # Load production config as base so we inherit share_network, sandbox
+    # settings, model config etc.  Only override what tests need.
+    cfg = BridgeConfig.load("config.yaml")
+    # Allow the test workspace
+    cfg.workspaces[str(workspace)] = True
     cfg.agent.default_workspace = str(workspace)
-    cfg.agent.binary = os.environ.get("QQ_AGENT_BRIDGE_E2E_BINARY", "")
-    cfg.agent.env_runner = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_RUNNER", "")
-    cfg.agent.env_name = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME", "")
+    # Runtime overrides from env
+    runtime = os.environ.get("QQ_AGENT_BRIDGE_E2E_RUNTIME", "")
+    if runtime:
+        cfg.agent.runtime = runtime
+    if os.environ.get("QQ_AGENT_BRIDGE_E2E_BINARY"):
+        cfg.agent.binary = os.environ.get("QQ_AGENT_BRIDGE_E2E_BINARY")
+    if os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_RUNNER"):
+        cfg.agent.env_runner = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_RUNNER")
+    if os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME"):
+        cfg.agent.env_name = os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME")
     cfg.agent.require_env = False
-    cfg.agent.use_bwrap = os.environ.get("QQ_AGENT_BRIDGE_E2E_BWRAP", "1") != "0"
-    if runtime == "cursor-cli" and cfg.agent.use_bwrap and not shutil.which(cfg.agent.bwrap_binary):
+    bwrap_env = os.environ.get("QQ_AGENT_BRIDGE_E2E_BWRAP", "1")
+    cfg.agent.use_bwrap = bwrap_env != "0"
+    if cfg.agent.runtime == "cursor-cli" and cfg.agent.use_bwrap and not shutil.which(cfg.agent.bwrap_binary):
         pytest.skip("cursor-cli E2E needs bwrap for temporary workspace trust; set QQ_AGENT_BRIDGE_E2E_BWRAP=0 to override")
-    cfg.agent.force_task_tools = runtime == "cursor-cli" and cfg.agent.use_bwrap
+    cfg.agent.force_task_tools = cfg.agent.runtime == "cursor-cli" and cfg.agent.use_bwrap
     cfg.agent.max_runtime_seconds = int(os.environ.get("QQ_AGENT_BRIDGE_E2E_TIMEOUT", "90"))
     cfg.agent.max_output_chars = 8000
     cfg.resources.root = "downloads/qq-agent-bridge"
     cfg.commands = {mode: True}
-    if runtime == "custom-cli":
+    cfg.storage_maintenance.enabled = False
+    if cfg.agent.runtime == "custom-cli":
         for item in ("ask", "task", "plan", "code"):
             value = os.environ.get(f"QQ_AGENT_BRIDGE_E2E_{item.upper()}_CMD", "").strip()
             if value:
@@ -441,7 +452,7 @@ def test_real_agent_refuses_metadata_only_video_summary(tmp_path: Path) -> None:
     )
 
     out = asyncio.run(
-        _run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL"))
+        _run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL", "auto"))
     )
     match = re.search(r"\{\s*\"blocked\"\s*:\s*(true|false).*?\}", out, re.DOTALL)
     assert match is not None, out
@@ -464,7 +475,7 @@ def test_real_agent_task_can_read_workspace_file(tmp_path: Path) -> None:
         profile_prompt="你是 QQ bot 测试对象。只有实际读取文件后才能回答。",
     )
 
-    out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL")))
+    out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL", "auto")))
 
     assert token in out
 
@@ -489,7 +500,7 @@ def test_real_agent_task_can_emit_send_file_directive(tmp_path: Path) -> None:
         profile_prompt="你是 QQ bot 测试对象。不要声称发送成功，只输出真实指令。",
     )
 
-    out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL")))
+    out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL", "auto")))
 
     match = _SEND_FILE_RE.search(out)
     assert match is not None, out

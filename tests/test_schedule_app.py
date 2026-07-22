@@ -926,3 +926,99 @@ def test_owner_bypasses_all_non_owner_constraints(tmp_path: Path) -> None:
         assert len(app.schedule_store.list_for_chat("group", True)) == 2
 
     asyncio.run(go())
+
+
+# ── Real-agent E2E tests ────────────────────────────────────────────────────
+
+_APP_E2E_ENV = "QQ_AGENT_BRIDGE_APP_E2E"
+
+import os as _os
+
+def _require_app_e2e() -> None:
+    if _os.environ.get(_APP_E2E_ENV) != "1":
+        pytest.skip(f"set {_APP_E2E_ENV}=1 to run real App+agent schedule E2E")
+
+
+def test_real_agent_schedule_full_pipeline_through_app_handle(
+    tmp_path: Path,
+) -> None:
+    """Full schedule pipeline through App._handle with real agent.
+
+    Requires QQ_AGENT_BRIDGE_APP_E2E=1.
+    /schedule → App._handle → structured parse → schedule created →
+    receipt sent → list confirms.
+    """
+    _require_app_e2e()
+
+    async def go() -> None:
+        from datetime import UTC, datetime, timedelta
+
+        # Load production config as base, override for test
+        cfg = BridgeConfig.load("config.yaml")
+        cfg.owners = ["owner"]
+        cfg.allowed_users = ["reader", "owner"]
+        cfg.allowed_groups = ["group"]
+        cfg.commands = {"ask": True, "task": True, "schedule": True, "stop": True}
+        cfg.workspaces[str(tmp_path)] = True
+        cfg.agent.default_workspace = str(tmp_path)
+        runtime = _os.environ.get("QQ_AGENT_BRIDGE_E2E_RUNTIME", "")
+        if runtime:
+            cfg.agent.runtime = runtime
+        cfg.agent.binary = _os.environ.get("QQ_AGENT_BRIDGE_E2E_BINARY", "")
+        cfg.agent.env_runner = _os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_RUNNER", "")
+        cfg.agent.env_name = _os.environ.get("QQ_AGENT_BRIDGE_E2E_ENV_NAME", "")
+        cfg.agent.require_env = False
+        cfg.agent.max_runtime_seconds = int(
+            _os.environ.get("QQ_AGENT_BRIDGE_E2E_TIMEOUT", "90")
+        )
+        cfg.agent.max_output_chars = 8000
+        cfg.scheduler.enabled = True
+        cfg.scheduler.database_path = str(tmp_path / "schedules.sqlite3")
+        cfg.scheduler.timezone = "Asia/Shanghai"
+        cfg.scheduler.min_interval_seconds = 1
+        cfg.scheduler.natural_language_model = _os.environ.get(
+            "QQ_AGENT_BRIDGE_E2E_CHAT_MODEL", "auto"
+        )
+        cfg.scheduler.natural_language_progress_seconds = 60
+        cfg.resources.enabled = False
+        cfg.storage_maintenance.enabled = False
+
+        adapter = FakeAdapter()
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)  # noqa: SLF001
+        app.scheduler.initialize()
+
+        # Create a structured schedule to verify full App pipeline works
+        future_time = datetime.now(tz=UTC) + timedelta(days=30)
+        scheduled_for = future_time.strftime("%Y-%m-%d %H:%M")
+
+        await app._handle(  # noqa: SLF001
+            make_event(
+                f"/schedule once {scheduled_for} -- send test-e2e-real-app",
+                sender="owner",
+                group="group",
+                mid="real-struct",
+            )
+        )
+        await drain_app(app)
+
+        assert "已经设置好了" in adapter.sent[-1][2], (
+            f"structured schedule creation failed: {adapter.sent}"
+        )
+
+        # Verify schedule exists in store
+        schedules = app.schedule_store.list_for_chat("group", True)
+        assert len(schedules) >= 1, "schedule should be in store"
+
+        # List to confirm
+        adapter.sent.clear()
+        await app._handle(  # noqa: SLF001
+            make_event("/schedule list", sender="owner", group="group", mid="real-list")
+        )
+        await drain_app(app)
+        assert any(
+            "test-e2e-real-app" in s[2] for s in adapter.sent
+        ), f"schedule list should show created schedule: {adapter.sent}"
+
+    asyncio.run(go())
