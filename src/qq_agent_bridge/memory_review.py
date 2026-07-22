@@ -139,6 +139,9 @@ class MemoryCurator:
             )
             return self._failure(scope, len(sources), "malformed_output")
 
+        if not proposals:
+            return self._failure(scope, len(sources), "empty_proposals")
+
         validation = self.validator.validate(scope, sources, proposals, actor)
         outcome = CuratorOutcome(
             accepted=validation.accepted,
@@ -147,13 +150,6 @@ class MemoryCurator:
             source_count=len(sources),
         )
         self._log(scope, len(sources), outcome)
-        if len(proposals) == 0 and len(sources) > 0:
-            logger.warning(
-                "memory curator returned zero proposals from %d sources; "
-                "first 3 source previews: %s",
-                len(sources),
-                [s.text[:80] for s in sources[:3]],
-            )
         return outcome
 
     def _write_curator_input(
