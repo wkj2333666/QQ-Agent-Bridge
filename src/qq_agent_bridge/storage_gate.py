@@ -118,8 +118,9 @@ class GatedAgentAdapter:
         redact_extra: tuple[str, ...] | None = None,
     ) -> str:
         ws = workspace or self.cfg.agent.default_workspace
+        logger.info("gated agent run: delegate=%s mode=%s", type(self.delegate).__name__, mode)
         async with self.gate.activity():
-            return await run_agent(
+            result = await run_agent(
                 self.delegate,
                 prompt,
                 ws,
@@ -129,6 +130,7 @@ class GatedAgentAdapter:
                 trace_id=trace_id,
                 redact_extra=redact_extra,
             )
+            return result
 
     def dispose(self) -> None:
         """Remove only private paths created for this adapter."""

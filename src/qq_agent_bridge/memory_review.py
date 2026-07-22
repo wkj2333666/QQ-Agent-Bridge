@@ -77,6 +77,11 @@ class MemoryCurator:
         actor: MemoryActor | None = None,
     ) -> CuratorOutcome:
         redact_extra = self._redaction_values(sources, existing)
+        logger.info(
+            "curator agent type=%s workspace=%s",
+            type(self.agent).__name__,
+            self.workspace,
+        )
         # Write source data to files so the prompt stays small and the
         # agent can process them with tools.  Large inline JSON in the
         # prompt causes models to bail out with empty or broken output.
