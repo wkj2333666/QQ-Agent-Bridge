@@ -174,7 +174,7 @@ def build_restricted_agent_adapter(
         restricted.agent.sandbox_home = str(curator_home)
         restricted.agent.max_runtime_seconds = restricted.max_runtime_seconds
         restricted.agent.max_output_chars = restricted.max_output_chars
-        restricted.agent.trace_enabled = False
+        restricted.agent.trace_enabled = cfg.agent.trace_enabled
         restricted.progress.enabled = False
         restricted.resources.enabled = False
         return GatedAgentAdapter(

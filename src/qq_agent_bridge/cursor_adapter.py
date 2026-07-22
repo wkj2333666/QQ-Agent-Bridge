@@ -125,6 +125,9 @@ class CursorAdapter:
             cursor_cmd.extend(["--model", model])
         if stream:
             cursor_cmd.extend(["--output-format", "stream-json"])
+        # Hardened read-only mode has trust baked into the hardened runtime config.
+        if not self.cfg.agent.hardened_read_only:
+            cursor_cmd.append("--trust")
         if mode == "ask":
             cursor_cmd.extend(["--mode", "ask", "--sandbox", cursor_sandbox])
         elif mode == "plan":
@@ -134,7 +137,7 @@ class CursorAdapter:
             if self.cfg.agent.force_task_tools and self.cfg.agent.use_bwrap:
                 cursor_cmd.append("--force")
         elif mode == "code":
-            cursor_cmd.extend(["--trust", "--force", "--sandbox", cursor_sandbox])
+            cursor_cmd.extend(["--force", "--sandbox", cursor_sandbox])
         else:
             raise ValueError(f"unsupported cursor mode: {mode}")
         cursor_cmd.append(prompt)

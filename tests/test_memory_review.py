@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from qq_agent_bridge.config import BridgeConfig
-from qq_agent_bridge.long_term_memory import LongTermMemoryStore
+from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
 from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope, MemorySource
 from qq_agent_bridge.memory_curation import MemoryActor, MemoryValidator
 from qq_agent_bridge.memory_review import (
@@ -168,9 +168,9 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert "x" * 2_000 in call.kwargs["redact_extra"]
         assert len(call.prompt) <= MAX_CURATOR_PROMPT_CHARS
         assert "untrusted" in call.prompt.lower()
-        assert "QQ_UNTRUSTED_DATA_JSON" in call.prompt
+        assert "review-data.json" in call.prompt
         assert '"operations"' in call.prompt
-        assert "Return JSON only" in call.prompt
+        assert "OUTPUT FORMAT" in call.prompt
         assert "|forget" not in call.prompt
         assert "|merge|" not in call.prompt
         assert "Never propose hard deletion" in call.prompt
@@ -276,7 +276,7 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     assert restricted.agent.force_task_tools is False
     assert restricted.agent.hardened_read_only is True
     assert restricted.agent.log_subprocess_output is False
-    assert restricted.agent.trace_enabled is False
+    assert restricted.agent.trace_enabled is True  # follows cfg.agent.trace_enabled
     curator_workspace = Path(restricted.agent.default_workspace)
     curator_home = Path(restricted.agent.sandbox_home)
     state_root = fake_home / ".local" / "state" / "qq-agent-bridge"
@@ -335,7 +335,7 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
         assert coordinator.curator.workspace == coordinator.curator.agent.cfg.agent.default_workspace
         assert coordinator.curator.workspace != str(project_workspace)
         assert coordinator.curator.agent.cfg.agent.share_network is False
-        assert coordinator.curator.agent.cfg.agent.trace_enabled is False
+        assert coordinator.curator.agent.cfg.agent.trace_enabled is True  # follows cfg.agent.trace_enabled
     finally:
         store.close()
 
@@ -1219,3 +1219,176 @@ def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
         assert store.status(GROUP).pending_count == 1  # only the deferred original remains
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        # Bare array without envelope
+        json.dumps(
+            [
+                {
+                    "operation": "add",
+                    "source_ids": [1],
+                    "subject_kind": "user",
+                    "subject_id": "u1",
+                    "category": "preference",
+                    "content": "喜欢喝咖啡",
+                    "confidence": 0.91,
+                    "status": "active",
+                    "sensitivity": "normal",
+                    "source_kind": "self_statement",
+                    "explicit_memory": False,
+                    "decay_exempt": False,
+                    "expires_at": None,
+                }
+            ]
+        ),
+        # Markdown-fenced bare array (realistic model output)
+        (
+            "```json\n"
+            + json.dumps(
+                [
+                    {
+                        "operation": "add",
+                        "source_ids": [1],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "喜欢喝咖啡",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    }
+                ]
+            )
+            + "\n```"
+        ),
+    ],
+    ids=["bare_array", "markdown_fenced_bare_array"],
+)
+def test_bare_array_auto_wrapped_and_committed(
+    tmp_path: Path, cfg: BridgeConfig, store: LongTermMemoryStore, model_output: str,
+) -> None:
+    """Curator returns bare [...] array — auto-wrapped as {"operations":[...]} — committed."""
+    scope = MemoryScope("group", "g1")
+    store.set_scope_enabled(scope, True)
+
+    source = MemorySource(
+        id=1,
+        scope=scope,
+        message_id="m1", sender_id="u1",
+        text="我喜欢喝咖啡", message_timestamp=1000,
+    )
+    store.collect(source)
+
+    curator = MemoryCurator(
+        FakeAgent(model_output),
+        MemoryValidator(cfg, store=store),
+        cfg.long_term_memory.review,
+        workspace=tmp_path,
+    )
+
+    outcome = asyncio.run(curator.review(scope, (source,), ()))
+
+    assert outcome.error is None
+    assert outcome.proposed_count == 1
+    assert len(outcome.accepted) == 1
+    assert outcome.accepted[0].content == "喜欢喝咖啡"
+
+
+def test_full_pipeline_retrieval_has_correct_trust_labels(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    """Collection → review → commit → retrieve → trust labels for own/others/group."""
+    scope = MemoryScope("group", "g2")
+    store.set_scope_enabled(scope, True)
+
+    # Collect sources for three different subject types
+    sources: list[MemorySource] = []
+    for i, (sid, text) in enumerate(
+        [("u1", "我喜欢简洁回答"), ("u2", "u1 是前端开发"), (scope.id, "每周五站会")], start=1
+    ):
+        s = MemorySource(
+            id=i,
+            scope=scope,
+            message_id=f"m{i}", sender_id=sid,
+            text=text, message_timestamp=1000 + i,
+        )
+        store.collect(s)
+        sources.append(s)
+
+    # Agent returns all three as memories
+    agent = FakeAgent(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [1],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "我喜欢简洁回答",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                    {
+                        "operation": "add",
+                        "source_ids": [2],
+                        "subject_kind": "user",
+                        "subject_id": "u2",
+                        "category": "identity",
+                        "content": "u1 是前端开发",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                    {
+                        "operation": "add",
+                        "source_ids": [3],
+                        "subject_kind": "group",
+                        "subject_id": scope.id,
+                        "category": "group_norm",
+                        "content": "每周五站会",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                ]
+            }
+        )
+    )
+    coordinator = make_coordinator(store, agent, cfg, tmp_path)
+
+    outcome = asyncio.run(coordinator.review_now(scope, actor=None))
+    assert outcome.error is None
+    assert len(outcome.committed) == 3
+
+    # Now retrieve and verify trust labels
+    retriever = LongTermMemoryRetriever(store, cfg.long_term_memory)
+    text = retriever.retrieve(scope, "u1", ("u2",), None, "继续")
+
+    assert "[用户自己的记忆][category=preference] 我喜欢简洁回答" in text
+    assert "[用户对他人的看法][category=identity] u1 是前端开发" in text
+    assert "[群共识][category=group_norm] 每周五站会" in text
+    assert "「用户自己的记忆」——该用户自己提供的关于自身的信息，是可信事实" in text

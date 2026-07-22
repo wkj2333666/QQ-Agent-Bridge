@@ -282,6 +282,7 @@ _PROPOSAL_FIELDS = frozenset(
         "source_ids",
         "item_id",
         "related_item_ids",
+        "candidate_target_id",
         "subject_kind",
         "subject_id",
         "category",
@@ -468,16 +469,74 @@ def _extract_curator_json(text: str) -> str:
 def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
     """Parse the curator's exact JSON envelope without coercing field types."""
     extracted = _extract_curator_json(text)
-    try:
-        payload = json.loads(
-            extracted,
+
+    def _try_parse(candidate: str) -> Any:
+        return json.loads(
+            candidate,
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
+
+    parse_error: ValueError | None = None
+    try:
+        payload = _try_parse(extracted)
     except _DuplicateKeyError as exc:
-        raise ValueError("curator output contains duplicate key") from exc
-    except (TypeError, json.JSONDecodeError, _NonJsonConstantError) as exc:
-        raise ValueError("curator output is not valid JSON") from exc
+        parse_error = ValueError("curator output contains duplicate key")
+        parse_error.__cause__ = exc
+    except _NonJsonConstantError as exc:
+        parse_error = ValueError("curator output is not valid JSON")
+        parse_error.__cause__ = exc
+    except (TypeError, json.JSONDecodeError):
+        # The first extraction isn't syntactically valid JSON
+        # (e.g. "[no operations]").  Try finding a valid JSON value
+        # elsewhere in the raw text.
+        payload = None
+        stripped = text.strip()
+        for open_char in ("{", "["):
+            start = 0
+            while True:
+                pos = stripped.find(open_char, start)
+                if pos == -1:
+                    break
+                close_char = "}" if open_char == "{" else "]"
+                depth = 0
+                for i in range(pos, len(stripped)):
+                    ch = stripped[i]
+                    if ch == open_char:
+                        depth += 1
+                    elif ch == close_char:
+                        depth -= 1
+                        if depth == 0:
+                            candidate = stripped[pos : i + 1]
+                            try:
+                                payload = _try_parse(candidate)
+                            except (ValueError, TypeError, json.JSONDecodeError):
+                                pass
+                            else:
+                                extracted = candidate
+                                break
+                if payload is not None:
+                    break
+                start = pos + 1
+            if payload is not None:
+                break
+
+        if payload is None:
+            # Still no valid JSON.  Treat bracket-delimited plain-text
+            # responses like "[no operations]" as intentional empty output.
+            lower = extracted.strip().lower()
+            if (
+                lower.startswith("[")
+                and lower.endswith("]")
+                and not any(ch in lower[1:-1] for ch in ('"', "{", "[", "]", "}"))
+            ):
+                payload = {"operations": []}
+            else:
+                parse_error = ValueError("curator output is not valid JSON")
+
+    if parse_error is not None:
+        raise parse_error
+
     # Some models return a bare operations array without the envelope.
     # Auto-wrap it.
     if isinstance(payload, list):
