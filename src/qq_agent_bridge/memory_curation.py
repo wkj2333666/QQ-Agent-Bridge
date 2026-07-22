@@ -528,6 +528,7 @@ def parse_curator_output(text: str) -> tuple[MemoryProposal, ...]:
             if (
                 lower.startswith("[")
                 and lower.endswith("]")
+                and "error" not in lower
                 and not any(ch in lower[1:-1] for ch in ('"', "{", "[", "]", "}"))
             ):
                 payload = {"operations": []}
