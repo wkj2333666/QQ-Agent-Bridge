@@ -26,7 +26,7 @@ from .types import ChatEvent, trusted_reply_sender_id
 
 MAX_SOURCE_TEXT_CHARS = 2_000
 MAX_MEMORY_CONTENT_CHARS = 500
-MAX_PROPOSALS_PER_REVIEW = 20
+MAX_PROPOSALS_PER_REVIEW = 64
 ALLOWED_SENSITIVITIES = frozenset({"normal", "sensitive", "secret"})
 ALLOWED_SOURCE_KINDS = frozenset(
     {
@@ -743,7 +743,7 @@ class MemoryValidator:
                 for source in cited_sources
                 if _content_supported_by_source(evidence_content, source.text)
             )
-            if not matching_sources:
+            if len(matching_sources) != len(cited_sources):
                 return None, "source_content_mismatch"
             if not any(
                 _content_affirmatively_supported_by_source(

@@ -63,13 +63,14 @@ class FakeAgent:
             self.active -= 1
 
 
-def valid_add_result(source_id: int, content: str = "喜欢简洁回答") -> str:
+def valid_add_result(source_id: int | list[int], content: str = "喜欢简洁回答") -> str:
+    source_ids = [source_id] if isinstance(source_id, int) else source_id
     return json.dumps(
         {
             "operations": [
                 {
                     "operation": "add",
-                    "source_ids": [source_id],
+                    "source_ids": source_ids,
                     "subject_kind": "user",
                     "subject_id": "u1",
                     "category": "preference",
@@ -88,7 +89,7 @@ def valid_add_result(source_id: int, content: str = "喜欢简洁回答") -> str
 
 
 class FirstSourceProposalAgent(FakeAgent):
-    """Return a valid proposal for the first source in each curator input."""
+    """Return a valid proposal citing every source in each curator input."""
 
     async def run(
         self,
@@ -100,9 +101,10 @@ class FirstSourceProposalAgent(FakeAgent):
         if workspace is not None:
             input_path = Path(workspace) / "curator-input" / "review-data.json"
             payload = json.loads(input_path.read_text(encoding="utf-8"))
-            first_source = payload["sources"][0]
+            sources = payload["sources"]
+            first_source = sources[0]
             self.result = valid_add_result(
-                int(first_source["source_id"]),
+                [int(source["source_id"]) for source in sources],
                 str(first_source["text"]),
             )
         return await super().run(prompt, workspace, mode, **kwargs)
@@ -219,6 +221,8 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert "|forget" not in call.prompt
         assert "|merge|" not in call.prompt
         assert "Never propose hard deletion" in call.prompt
+        assert "every cited source" in call.prompt
+        assert "Preserve distinct durable facts as separate" in call.prompt
 
     asyncio.run(go())
 
@@ -279,6 +283,33 @@ def test_curator_logs_only_metadata(
     assert "not json" not in rendered
     assert "scope=g" not in rendered
     assert "malformed_output" in rendered
+
+
+def test_curator_adapter_error_is_not_malformed_output(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def go() -> None:
+        agent = FakeAgent("[error] 助手存储空间不足，请联系管理员清理运行缓存")
+        curator = MemoryCurator(
+            agent,
+            MemoryValidator(cfg, store=store),
+            cfg.long_term_memory.review,
+            workspace=tmp_path,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="qq_agent_bridge.memory_review"):
+            outcome = await curator.review(GROUP, (source(),), ())
+
+        assert outcome.error == "agent_error"
+        assert outcome.error_detail == "助手存储空间不足，请联系管理员清理运行缓存"
+
+    asyncio.run(go())
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "助手存储空间不足" in rendered
+    assert "malformed output" not in rendered
 
 
 @pytest.mark.requires_local_env
@@ -636,6 +667,52 @@ def test_failed_review_keeps_sources_and_backs_off(
     asyncio.run(go())
 
 
+def test_explicit_review_bypasses_source_retry_deadline(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(store, message_id="deferred")
+        store._conn.execute(  # noqa: SLF001 - arrange a deferred production state
+            "UPDATE review_buffer SET attempt_count = 1, next_attempt_at = ? WHERE id = ?",
+            (2_000, source_id),
+        )
+        agent = FirstSourceProposalAgent()
+        coordinator = make_coordinator(store, agent, cfg, tmp_path, now=1_000)
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error is None
+        assert len(agent.calls) == 1
+        assert store.status(GROUP).pending_count == 0
+
+    asyncio.run(go())
+
+
+def test_coordinator_preserves_adapter_error_detail(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        collect_source(store, message_id="adapter-error")
+        coordinator = make_coordinator(
+            store,
+            FakeAgent("[error] 助手存储空间不足，请联系管理员清理运行缓存"),
+            cfg,
+            tmp_path,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error == "agent_error"
+        assert outcome.error_detail == "助手存储空间不足，请联系管理员清理运行缓存"
+        assert store.status(GROUP).pending_count == 1
+
+    asyncio.run(go())
+
+
 def test_empty_curator_result_keeps_sources_for_retry(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,
@@ -660,6 +737,61 @@ def test_empty_curator_result_keeps_sources_for_retry(
         pending = store.pending_sources(GROUP, limit=10, now=1_060)
         assert [value.id for value in pending] == [source_id]
         assert pending[0].attempt_count == 1
+
+    asyncio.run(go())
+
+
+def test_partial_curator_proposals_keep_uncited_sources_for_retry(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        cited_id = collect_source(store, message_id="cited")
+        uncited_id = collect_source(store, message_id="uncited")
+        coordinator = make_coordinator(
+            store,
+            FakeAgent(valid_add_result(cited_id)),
+            cfg,
+            tmp_path,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error is None
+        assert len(outcome.accepted) == 1
+        assert store.status(GROUP).pending_count == 1
+        pending = store.pending_sources(GROUP, limit=10, now=1_000)
+        assert [value.id for value in pending] == [uncited_id]
+
+    asyncio.run(go())
+
+
+def test_mismatched_multi_source_proposal_keeps_all_sources_for_retry(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        first_id = collect_source(store, message_id="first", text="我喜欢简洁回答")
+        second_id = collect_source(
+            store,
+            message_id="second",
+            text="我的项目代号是 Project-42",
+        )
+        coordinator = make_coordinator(
+            store,
+            FakeAgent(valid_add_result([first_id, second_id])),
+            cfg,
+            tmp_path,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error is None
+        assert outcome.accepted == ()
+        assert outcome.rejected[0].reason == "source_content_mismatch"
+        assert store.status(GROUP).pending_count == 2
 
     asyncio.run(go())
 
@@ -1281,15 +1413,15 @@ def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
         # Sources must be retained — timeout does not consume them
         assert store.status(GROUP).pending_count == 1
 
-        # Coordinator must remain operational after a timeout.
-        # The original source is deferred with backoff; collect a fresh one.
+        # Coordinator must remain operational after a timeout.  Explicit review
+        # is allowed to include the deferred original alongside fresh input.
         collect_source(store, message_id="m2")
         healthy_agent = FirstSourceProposalAgent()
         coordinator.curator.agent = healthy_agent
         coordinator.curator.cfg = cfg.long_term_memory.review
         second = await coordinator.review_now(GROUP, actor=OWNER)
         assert second.error is None, f"coordinator should be usable after timeout, got {second.error}"
-        assert store.status(GROUP).pending_count == 1  # only the deferred original remains
+        assert store.status(GROUP).pending_count == 0
 
     asyncio.run(go())
 

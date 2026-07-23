@@ -541,6 +541,15 @@ class App:
 
     @staticmethod
     def _memory_review_summary(outcome: CuratorOutcome) -> str:
+        if outcome.error == "no_sources":
+            return "当前没有可立即复盘的待整理内容；延迟中的内容未丢失，会在后续自动重试。"
+        if outcome.error == "agent_error":
+            detail = " ".join(
+                strip_ansi(redact(outcome.error_detail or "")).split()
+            )[:240]
+            if detail:
+                return f"复盘失败：{detail}。内容已保留，稍后自动重试。"
+            return "复盘失败：助手暂时不可用。内容已保留，稍后自动重试。"
         if outcome.error is not None:
             return "复盘暂时没有完成，保留的内容会在稍后自动重试。"
         added = revised = reinforced = candidates = 0

@@ -9,6 +9,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -1495,6 +1496,9 @@ def test_owner_reload_reloads_config_file(tmp_path: Path) -> None:
                         "cooldown_seconds": 16,
                         "quiet_after_bot_seconds": 16,
                         "max_per_hour": 180,
+                    },
+                    "long_term_memory": {
+                        "enabled": False,
                     },
                 },
                 allow_unicode=True,
@@ -4614,6 +4618,7 @@ def test_outgoing_job_paths_are_protected_until_reply_cleanup(tmp_path: Path) ->
 def test_reload_reports_storage_root_change(tmp_path: Path) -> None:
     async def go() -> None:
         cfg = make_cfg()
+        cfg.long_term_memory.enabled = False
         cfg.agent.sandbox_home = str(
             tmp_path / "home" / ".local" / "state" / "qq-agent-bridge" / "old-home"
         )
@@ -4633,6 +4638,7 @@ def test_reload_reports_storage_root_change(tmp_path: Path) -> None:
                         ),
                     },
                     "storage_maintenance": {"enabled": False},
+                    "long_term_memory": {"enabled": False},
                 }
             ),
             encoding="utf-8",

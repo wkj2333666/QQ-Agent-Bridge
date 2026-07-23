@@ -621,6 +621,57 @@ def test_curator_proposals_require_cited_sources_with_normalized_content_support
     ]
 
 
+def test_multi_source_proposal_requires_content_support_from_every_cited_source(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text="我喜欢黑咖啡",
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="我的项目代号是 Project-42",
+            message_timestamp=101,
+        ),
+    )
+    proposal = parse_curator_output(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [41, 42],
+                        "subject_kind": "user",
+                        "subject_id": "u1",
+                        "category": "preference",
+                        "content": "喜欢黑咖啡",
+                        "confidence": 0.9,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "self_statement",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    }
+                ]
+            }
+        )
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, proposal, actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_content_mismatch"
+
+
 @pytest.mark.parametrize(
     "source_text",
     [

@@ -222,24 +222,24 @@ class LongTermMemoryStore:
         *,
         now: int | None = None,
         attempts_below: int | None = None,
+        ignore_retry_at: bool = False,
     ) -> tuple[MemorySource, ...]:
         current = int(time.time()) if now is None else int(now)
+        retry_clause = "" if ignore_retry_at else " AND next_attempt_at <= ?"
+        params: list[object] = [*self._scope_params(scope)]
+        if not ignore_retry_at:
+            params.append(current)
+        params.extend((attempts_below, attempts_below, max(1, int(limit))))
         rows = self._conn.execute(
-            """
+            f"""
             SELECT * FROM review_buffer
             WHERE scope_kind = ? AND scope_id = ?
-              AND review_state = 'pending' AND next_attempt_at <= ?
+              AND review_state = 'pending'{retry_clause}
               AND (? IS NULL OR attempt_count < ?)
             ORDER BY created_at, id
             LIMIT ?
             """,
-            (
-                *self._scope_params(scope),
-                current,
-                attempts_below,
-                attempts_below,
-                max(1, int(limit)),
-            ),
+            params,
         ).fetchall()
         return tuple(self._source(row) for row in rows)
 

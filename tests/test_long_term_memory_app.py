@@ -692,6 +692,18 @@ def test_review_command_acknowledges_immediately_then_sends_only_aggregate_count
     asyncio.run(go())
 
 
+def test_memory_review_summary_explains_empty_and_agent_failure() -> None:
+    assert App._memory_review_summary(CuratorOutcome(error="no_sources")) == (
+        "当前没有可立即复盘的待整理内容；延迟中的内容未丢失，会在后续自动重试。"
+    )
+    assert App._memory_review_summary(
+        CuratorOutcome(
+            error="agent_error",
+            error_detail="助手存储空间不足，请联系管理员清理运行缓存",
+        )
+    ) == "复盘失败：助手存储空间不足，请联系管理员清理运行缓存。内容已保留，稍后自动重试。"
+
+
 def test_interactive_agent_and_natural_memory_command_cancel_background_review(
     tmp_path: Path,
     monkeypatch: Any,

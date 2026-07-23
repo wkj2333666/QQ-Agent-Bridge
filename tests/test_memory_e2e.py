@@ -357,6 +357,9 @@ def _make_e2e_cfg(tmp_path: Path) -> BridgeConfig:
     cfg = BridgeConfig.load("config.yaml")
     cfg.workspaces[str(tmp_path)] = True
     cfg.agent.default_workspace = str(tmp_path)
+    # Never let an E2E run inherit production SQLite paths from config.yaml.
+    cfg.long_term_memory.database_path = str(tmp_path / "long-term-memory-e2e.sqlite3")
+    cfg.scheduler.database_path = str(tmp_path / "schedules-e2e.sqlite3")
     # Runtime overrides from env
     runtime = os.environ.get("QQ_AGENT_BRIDGE_E2E_RUNTIME", "")
     if runtime:
@@ -380,6 +383,17 @@ def _make_e2e_cfg(tmp_path: Path) -> BridgeConfig:
     return cfg
 
 
+def _assert_e2e_databases_are_isolated(cfg: BridgeConfig, tmp_path: Path) -> None:
+    database_paths = (
+        Path(cfg.long_term_memory.database_path).resolve(),
+        Path(cfg.scheduler.database_path).resolve(),
+    )
+    for path in database_paths:
+        assert path.parent == tmp_path.resolve(), (
+            f"E2E database escaped pytest temp directory: {path}"
+        )
+
+
 def _build_real_curator(
     cfg: BridgeConfig,
     store: LongTermMemoryStore,
@@ -401,6 +415,7 @@ def test_real_curator_review_and_commit(tmp_path: Path) -> None:
     """Real LLM curator: sources → parse → validate → commit → verify in DB."""
     _require_e2e()
     cfg = _make_e2e_cfg(tmp_path)
+    _assert_e2e_databases_are_isolated(cfg, tmp_path)
     scope = MemoryScope("group", "e2e-review-group")
     db_path = tmp_path / "mem-review.sqlite3"
     store = LongTermMemoryStore(db_path)
@@ -440,6 +455,7 @@ def test_real_curator_output_to_retrieval_with_trust_labels(tmp_path: Path) -> N
     """Real LLM curator → commit → retrieve() → trust labels in formatted output."""
     _require_e2e()
     cfg = _make_e2e_cfg(tmp_path)
+    _assert_e2e_databases_are_isolated(cfg, tmp_path)
     scope = MemoryScope("group", "e2e-retrieval-group")
     db_path = tmp_path / "mem-retrieval.sqlite3"
     store = LongTermMemoryStore(db_path)
@@ -515,12 +531,14 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
         from qq_agent_bridge.storage_gate import StorageActivityGate
 
         cfg = _make_e2e_cfg(tmp_path)
+        _assert_e2e_databases_are_isolated(cfg, tmp_path)
         cfg.owners = list(cfg.owners) + ["owner"]
         cfg.allowed_users = ["owner", "other-user"]
         cfg.allowed_groups = list(cfg.allowed_groups) + ["group"]
         cfg.commands = {"ask": True, "memory": "user"}
         cfg.long_term_memory.enabled = True
         cfg.long_term_memory.database_path = str(tmp_path / "mem-app-e2e.sqlite3")
+        _assert_e2e_databases_are_isolated(cfg, tmp_path)
         cfg.resources.enabled = False
         cfg.storage_maintenance.enabled = False
         cfg.agent.max_runtime_seconds = int(
@@ -637,6 +655,104 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
         ), f"trust labels missing: {text[:300]}"
 
         # Cleanup
+        store.close()
+
+    asyncio.run(go())
+
+
+def test_e2e_memory_review_stress_real_app(tmp_path: Path) -> None:
+    """Stress the real curator with a large, varied pending-source batch."""
+    _require_app_e2e()
+
+    async def go() -> None:
+        from qq_agent_bridge.storage_gate import StorageActivityGate
+
+        cfg = _make_e2e_cfg(tmp_path)
+        cfg.owners = list(cfg.owners) + ["owner"]
+        cfg.allowed_users = ["owner", "other-user"]
+        cfg.allowed_groups = list(cfg.allowed_groups) + ["group"]
+        cfg.commands = {"ask": True, "memory": "user"}
+        cfg.long_term_memory.enabled = True
+        cfg.long_term_memory.database_path = str(tmp_path / "mem-stress-e2e.sqlite3")
+        _assert_e2e_databases_are_isolated(cfg, tmp_path)
+        cfg.resources.enabled = False
+        cfg.storage_maintenance.enabled = False
+        cfg.agent.max_runtime_seconds = int(
+            os.environ.get("QQ_AGENT_BRIDGE_APP_E2E_TIMEOUT", "300")
+        )
+        cfg.long_term_memory.review.timeout_seconds = cfg.agent.max_runtime_seconds
+
+        adapter = _FakeAdapter()
+        app = App(cfg)
+        app.adapter = adapter  # type: ignore[assignment]
+        app._prepare_runtime_skill_bundle = lambda: ""  # type: ignore[method-assign]
+
+        store = LongTermMemoryStore(tmp_path / "mem-stress-e2e.sqlite3")
+        store.initialize()
+        scope = MemoryScope("group", "group")
+        store.set_scope_enabled(scope, True)
+        app.long_term_memory_store = store
+        app.long_term_memory_collector = MemoryCollector(store, cfg)
+        app.long_term_memory_retriever = LongTermMemoryRetriever(
+            store, cfg.long_term_memory
+        )
+
+        from qq_agent_bridge.memory_review import build_memory_review_coordinator
+
+        app.memory_review_coordinator = build_memory_review_coordinator(
+            cfg, store, StorageActivityGate(), tmp_path
+        )
+
+        async def _ack(ev: ChatEvent, text: str) -> None:
+            await app._send_text(ev.chat_id, ev.is_group, text, f"{ev.id}-mem-ack")  # noqa: SLF001
+
+        app.memory_commands = MemoryCommandService(
+            cfg, store, interpreter=None, acknowledge=_ack
+        )
+        app._long_term_memory_accepting = True  # noqa: SLF001
+        app.policy = Policy(cfg, app._agent_runner)  # noqa: SLF001
+
+        for index in range(32):
+            sender = "owner"
+            text = (
+                f"我偏好使用工具 {index} 处理日常任务。"
+                if index % 4 == 0
+                else f"我是第 {index} 类项目的开发者。"
+                if index % 4 == 1
+                else f"我的项目代号是 Project-{index:02d}。"
+                if index % 4 == 2
+                else f"我经常讨论第 {index} 类技术主题。"
+            )
+            store.collect(
+                MemorySource(
+                    id=None,  # type: ignore[arg-type]
+                    scope=scope,
+                    message_id=f"stress-{index}",
+                    sender_id=sender,
+                    text=text,
+                    message_timestamp=int(time.time()) + index,
+                    direct_interaction=index % 2 == 0,
+                    command_class="ask" if index % 2 == 0 else None,
+                )
+            )
+
+        assert store.status(scope).pending_count == 32
+        await app._handle(
+            _make_ev("/memory review now", sender="owner", group="group", mid="stress-review")
+        )
+        await _wait_for_sent(
+            adapter,
+            lambda value: any("复盘完成" in item[2] for item in value.sent),
+            timeout=cfg.agent.max_runtime_seconds * 2,
+        )
+
+        review_msgs = [item[2] for item in adapter.sent if "复盘" in item[2]]
+        assert any("复盘完成" in item for item in review_msgs), review_msgs
+        items = store.list_items(scope, limit=100)
+        # These are intentionally 32 distinct facts.  A category-level
+        # summary is a data-loss regression, even if every source is cited.
+        assert len(items) == 32
+        assert store.status(scope).pending_count == 0
         store.close()
 
     asyncio.run(go())
