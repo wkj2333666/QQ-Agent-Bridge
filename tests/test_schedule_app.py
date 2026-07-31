@@ -8,6 +8,8 @@ import sys
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore

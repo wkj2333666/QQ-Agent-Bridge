@@ -81,6 +81,20 @@ def test_task_command_can_force_tools_inside_bwrap() -> None:
     assert str(Path.home()) not in _rw_bind_sources(cmd)
 
 
+def test_bwrap_uses_minimal_device_binds_instead_of_tmpfs_dev() -> None:
+    cfg = BridgeConfig(workspaces={"/tmp": True})
+    cfg.agent.use_bwrap = True
+    adapter = CursorAdapter(cfg)
+
+    cmd = adapter._build_cmd("hello", "/tmp", "ask", model=None)
+
+    assert "--dev" not in cmd
+    dev_dir = cmd.index("--dir")
+    assert cmd[dev_dir + 1] == "/dev"
+    assert _has_bind(cmd, "--dev-bind", "/dev/null", "/dev/null")
+    assert _has_bind(cmd, "--dev-bind", "/dev/urandom", "/dev/urandom")
+
+
 def test_task_command_uses_stream_json_when_progress_callback_present() -> None:
     cfg = BridgeConfig(workspaces={"/tmp": True})
     adapter = CursorAdapter(cfg)
@@ -1135,6 +1149,42 @@ def test_hardened_prepare_fails_closed_without_safe_auth(
     assert not hardened_home.exists() or tuple(hardened_home.iterdir()) == ()
 
 
+def test_hardened_prepare_uses_configured_cursor_auth_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_home = tmp_path / "service-home"
+    service_home.mkdir(mode=0o700)
+    login_home = tmp_path / "login-home"
+    login_home.mkdir(mode=0o700)
+    auth_path = login_home / ".config" / "cursor" / "auth.json"
+    auth_path.parent.mkdir(parents=True, mode=0o700)
+    auth_path.write_text('{"token":"configured"}', encoding="utf-8")
+    auth_path.chmod(0o600)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: service_home))
+    workspace = service_home / ".local" / "state" / "qq-agent-bridge" / "workspace"
+    workspace.mkdir(parents=True, mode=0o700)
+    hardened_home = workspace.parent / "curator-home"
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.sandbox_home = str(hardened_home)
+    cfg.agent.auth_path = str(auth_path)
+    cfg.agent.hardened_read_only = True
+    adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_has_trusted_bwrap", lambda _workspace: True)
+    monkeypatch.setattr(
+        adapter,
+        "_hardened_cursor_runtime",
+        lambda _workspace: (tmp_path, tmp_path / "cursor-agent"),
+    )
+
+    error = adapter._prepare_bwrap(str(workspace), "ask")  # noqa: SLF001
+
+    assert error is None
+    assert (
+        hardened_home / ".config" / "cursor" / "auth.json"
+    ).read_text(encoding="utf-8") == '{"token":"configured"}'
+
+
 @pytest.mark.requires_local_env
 def test_bwrap_accepts_private_persistent_sandbox_home(
     tmp_path: Path, monkeypatch: object
@@ -1623,6 +1673,344 @@ def test_nonzero_subprocess_reports_storage_exhaustion(tmp_path: Path) -> None:
     result = asyncio.run(adapter.run("hello", str(tmp_path), "ask"))
 
     assert result == "[error] 助手存储空间不足，请联系管理员清理运行缓存"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Cannot use this model: auto. Available models: \n", True),
+        (
+            "Error: [aborted] Client network socket disconnected before "
+            "secure TLS connection was established",
+            True,
+        ),
+        (
+            "Cannot use this model: bad-id. "
+            "Available models: auto, composer-2.5",
+            False,
+        ),
+        ("authentication required", False),
+    ],
+)
+def test_transient_provider_error_detection(message: str, expected: bool) -> None:
+    assert CursorAdapter._is_transient_provider_error(message) is expected  # noqa: SLF001
+
+
+def test_transient_auto_model_failure_retries_then_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = tmp_path / "attempts"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        f"count=$(wc -l < '{attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'Cannot use this model: auto. Available models: \\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'recovered result'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.force_task_tools = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(
+        adapter.run("read image", str(tmp_path), "task", model="auto")
+    )
+
+    assert result == "recovered result"
+    assert attempts.read_text(encoding="utf-8").splitlines() == ["x", "x"]
+    assert sleeps == [1]
+
+
+def test_transient_tls_failure_stops_after_two_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = tmp_path / "attempts"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        "printf 'Error: [aborted] Client network socket disconnected before "
+        "secure TLS connection was established' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask", model="auto"))
+
+    assert result == "[error] 助手执行失败"
+    assert attempts.read_text(encoding="utf-8").splitlines() == ["x", "x", "x"]
+    assert sleeps == [1, 2]
+
+
+def test_tls_error_after_stdout_activity_is_not_retried(tmp_path: Path) -> None:
+    attempts = tmp_path / "attempts"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        f"count=$(wc -l < '{attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'partial agent output'\n"
+        "  printf 'Error: [aborted] Client network socket disconnected before "
+        "secure TLS connection was established' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'duplicated task result'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask", model="auto"))
+
+    assert result == "[error] 助手执行失败"
+    assert attempts.read_text(encoding="utf-8").splitlines() == ["x"]
+
+
+def test_transient_retry_keeps_one_runtime_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = tmp_path / "attempts"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        f"count=$(wc -l < '{attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  sleep 0.03\n"
+        "  printf 'Cannot use this model: auto. Available models: \\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'late recovered result'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.max_runtime_seconds = 0.05
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask", model="auto"))
+
+    assert result == "[error] 助手响应超时"
+    assert attempts.read_text(encoding="utf-8").splitlines() == ["x"]
+    assert sleeps == []
+
+
+def test_subprocess_spawn_time_counts_toward_runtime_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text("#!/bin/sh\nprintf 'too late'\n", encoding="utf-8")
+    fake_cli.chmod(0o755)
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def delayed_spawn(*args: object, **kwargs: object):
+        await asyncio.sleep(0.06)
+        return await real_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.max_runtime_seconds = 0.05
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask", model="auto"))
+
+    assert result == "[error] 助手响应超时"
+
+
+def test_generated_trace_id_correlates_transient_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = tmp_path / "attempts"
+    trace_root = tmp_path.parent / f"{tmp_path.name}-traces"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        f"count=$(wc -l < '{attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'Cannot use this model: auto. Available models: \\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'recovered result'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+
+    async def skip_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", skip_sleep)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.trace_enabled = True
+    cfg.agent.trace_root = str(trace_root)
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(adapter.run("hello", str(tmp_path), "ask", model="auto"))
+
+    assert result == "recovered result"
+    trace_names = sorted(path.name for path in trace_root.glob("*.jsonl"))
+    assert len(trace_names) == 2
+    base_name = next(name for name in trace_names if "-retry-" not in name)
+    assert f"{base_name.removesuffix('.jsonl')}-retry-1.jsonl" in trace_names
+
+
+def test_cancelling_retry_kills_only_the_running_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = tmp_path / "attempts"
+    second_started = tmp_path / "second-started"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        f"printf 'x\\n' >> '{attempts}'\n"
+        f"count=$(wc -l < '{attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'Cannot use this model: auto. Available models: \\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        f"touch '{second_started}'\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    killed_process_groups: list[int] = []
+    real_killpg = os.killpg
+
+    def record_killpg(pid: int, sig: int) -> None:
+        killed_process_groups.append(pid)
+        real_killpg(pid, sig)
+
+    monkeypatch.setattr(os, "killpg", record_killpg)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    adapter = CursorAdapter(cfg)
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(
+            adapter.run("hello", str(tmp_path), "ask", model="auto")
+        )
+        for _ in range(300):
+            if second_started.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert second_started.exists()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_and_cancel())
+
+    assert attempts.read_text(encoding="utf-8").splitlines() == ["x", "x"]
+    assert len(killed_process_groups) == 1
+
+
+def test_usage_limit_fallback_auto_transient_failure_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auto_attempts = tmp_path / "auto-attempts"
+    fake_cli = tmp_path / "fake-cursor"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *'--model composer-2.5'*) "
+        "printf \"You've hit your usage limit\" >&2; exit 1;;\n"
+        "esac\n"
+        f"printf 'x\\n' >> '{auto_attempts}'\n"
+        f"count=$(wc -l < '{auto_attempts}')\n"
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'Cannot use this model: auto. Available models: \\n' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'auto recovered result'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+
+    async def skip_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", skip_sleep)
+    cfg = BridgeConfig(workspaces={str(tmp_path): True})
+    cfg.agent.binary = str(fake_cli)
+    cfg.agent.env_runner = ""
+    cfg.agent.require_env = False
+    cfg.agent.use_bwrap = False
+    cfg.agent.force_task_tools = False
+    adapter = CursorAdapter(cfg)
+
+    result = asyncio.run(
+        adapter.run(
+            "summarize video",
+            str(tmp_path),
+            "task",
+            model="composer-2.5",
+        )
+    )
+
+    assert result == "auto recovered result"
+    assert auto_attempts.read_text(encoding="utf-8").splitlines() == ["x", "x"]
 
 
 def test_explicit_model_usage_limit_falls_back_to_auto(tmp_path: Path) -> None:

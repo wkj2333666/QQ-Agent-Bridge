@@ -156,6 +156,7 @@ def test_agent_config_has_fast_chat_and_task_models() -> None:
     assert not cfg.agent.hardened_read_only
     assert cfg.agent.log_subprocess_output
     assert cfg.agent.sandbox_home == "~/.local/state/qq-agent-bridge/agent-home"
+    assert cfg.agent.auth_path == "~/.config/cursor/auth.json"
     assert not cfg.agent.trace_enabled
     assert cfg.agent.trace_root == "runtime/agent-traces"
     assert cfg.agent.trace_max_bytes == 5242880

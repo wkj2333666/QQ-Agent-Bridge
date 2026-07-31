@@ -41,6 +41,7 @@ class AgentConfig:
     hardened_read_only: bool = False
     log_subprocess_output: bool = True
     sandbox_home: str = "~/.local/state/qq-agent-bridge/agent-home"
+    auth_path: str = "~/.config/cursor/auth.json"
     chat_model: str = "auto"
     task_model: str = "composer"
     env_allowlist: list[str] = field(default_factory=lambda: ["PATH", "HOME", "USER"])

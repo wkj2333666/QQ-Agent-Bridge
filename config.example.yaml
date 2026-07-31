@@ -250,6 +250,9 @@ agent:
   # Persistent disk-backed state outside the Agent workspace. Keep it under this app state root;
   # do not move it to a small tmpfs such as /tmp on long-running deployments.
   sandbox_home: "~/.local/state/qq-agent-bridge/agent-home"
+  # Cursor login artifact copied into hardened read-only Agent homes.
+  # Use an absolute path in systemd if HOME differs from your interactive shell.
+  auth_path: "~/.config/cursor/auth.json"
   chat_model: "auto"                  # fast route for short QQ replies
   task_model: "composer"              # stronger tool-using route for QQ tasks
   max_concurrent_jobs: 2

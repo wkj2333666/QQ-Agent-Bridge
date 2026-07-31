@@ -98,6 +98,16 @@ class CursorAdapter:
         normalized = " ".join(text.lower().split())
         return "enospc" in normalized or "no space left on device" in normalized
 
+    @staticmethod
+    def _is_transient_provider_error(text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        if (
+            "client network socket disconnected before secure tls connection "
+            "was established"
+        ) in normalized:
+            return True
+        return normalized == "cannot use this model: auto. available models:"
+
     def _process_error_class(self, text: str) -> str:
         if self._is_usage_limit_error(text):
             return "usage_limit"
@@ -188,7 +198,7 @@ class CursorAdapter:
                 "/sbin",
                 "--proc",
                 "/proc",
-                "--dev",
+                "--dir",
                 "/dev",
                 "--share-net" if self.cfg.agent.share_network else "--unshare-net",
                 "--unshare-user",
@@ -200,6 +210,8 @@ class CursorAdapter:
                 str(exposed_home),
             ]
         )
+        for src, dst in self._minimal_dev_binds():
+            cmd.extend(["--dev-bind", src, dst])
         if hardened_runtime is not None:
             runtime_root, _runtime_binary = hardened_runtime
             cmd.extend(
@@ -258,6 +270,17 @@ class CursorAdapter:
             "/etc/ssl",
             "/etc/alternatives",
         ]
+        return [(path, path) for path in candidates if Path(path).exists()]
+
+    def _minimal_dev_binds(self) -> list[tuple[str, str]]:
+        candidates = (
+            "/dev/null",
+            "/dev/zero",
+            "/dev/full",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/tty",
+        )
         return [(path, path) for path in candidates if Path(path).exists()]
 
     def _cursor_ro_binds(self, home: Path, exposed_home: Path) -> list[tuple[str, str]]:
@@ -399,11 +422,17 @@ class CursorAdapter:
             else:
                 self._seed_cursor_state(sandbox_home)
                 self._seed_workspace_trust(sandbox_home, workspace_path)
-        except OSError:
-            logger.warning("sandbox preparation failed with OSError")
+        except OSError as exc:
+            logger.warning(
+                "sandbox preparation failed with OSError reason=%s",
+                self._safe_prepare_error_reason(exc),
+            )
             return "[error] 助手沙箱未配置"
-        except ValueError:
-            logger.warning("sandbox preparation failed with ValueError")
+        except ValueError as exc:
+            logger.warning(
+                "sandbox preparation failed with ValueError reason=%s",
+                self._safe_prepare_error_reason(exc),
+            )
             return "[error] 助手沙箱未配置"
         return None
 
@@ -552,17 +581,18 @@ class CursorAdapter:
             self._write_private_file(sandbox_home / relative, payload)
 
     def _read_cursor_auth(self) -> bytes:
-        home = Path.home()
-        relative = Path(".config/cursor/auth.json")
-        current = home
-        for part in relative.parts[:-1]:
-            current = current / part
-            st = current.lstat()
-            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-                raise ValueError("cursor authentication path is unsafe")
-            if st.st_uid != os.getuid():
-                raise ValueError("cursor authentication path is not owned")
-        source = home / relative
+        source = self._expand_user_path(self.cfg.agent.auth_path)
+        if not source.is_absolute():
+            source = Path.home() / source
+        source = Path(os.path.abspath(source))
+        try:
+            parent_stat = source.parent.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError("cursor authentication path is unavailable") from exc
+        if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+            raise ValueError("cursor authentication path is unsafe")
+        if parent_stat.st_uid != os.getuid():
+            raise ValueError("cursor authentication path is not owned")
         source_stat = source.lstat()
         if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
             raise ValueError("cursor authentication artifact is unsafe")
@@ -595,6 +625,26 @@ class CursorAdapter:
         if not payload or len(payload) > _MAX_CURSOR_AUTH_BYTES:
             raise ValueError("cursor authentication artifact is unavailable")
         return payload
+
+    def _expand_user_path(self, value: str) -> Path:
+        if value == "~":
+            return Path.home()
+        if value.startswith("~/"):
+            return Path.home() / value[2:]
+        return Path(value)
+
+    def _safe_prepare_error_reason(self, exc: BaseException) -> str:
+        reason = str(exc).strip()
+        if not reason:
+            return type(exc).__name__
+        for sensitive in (
+            str(Path.home()),
+            str(Path(self.cfg.agent.sandbox_home).expanduser()),
+            str(self._expand_user_path(self.cfg.agent.auth_path)),
+        ):
+            if sensitive:
+                reason = reason.replace(sensitive, "<redacted>")
+        return reason[:200]
 
     def _reset_private_home(self, sandbox_home: Path) -> None:
         for child in sandbox_home.iterdir():
@@ -683,122 +733,190 @@ class CursorAdapter:
 
         env = {k: os.environ.get(k, "") for k in self.cfg.agent.env_allowlist if k in os.environ}
         env["PATH"] = os.environ.get("PATH", "")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.cfg.agent.max_runtime_seconds
+        current_model = model
+        base_trace_id = trace_id
+        phase_trace_id = trace_id
+        current_trace_id = trace_id
+        transient_attempt = 0
 
-        trace = AgentTrace(self.cfg, trace_id, mode, model, ws, redact_extra=redact_extra)
-        if trace.path is not None:
-            logger.info("agent trace: %s", trace.path)
-        proc: asyncio.subprocess.Process | None = None
-        try:
-            cmd = self._build_cmd(prompt, ws, mode, model, stream=progress is not None)
-
-            logger.info("agent invoke: executable=%s mode=%s", cmd[0], mode)
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=ws,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+        while True:
+            trace = AgentTrace(
+                self.cfg,
+                current_trace_id,
+                mode,
+                current_model,
+                ws,
+                redact_extra=redact_extra,
             )
-            trace.record("lifecycle", "spawn")
-            if progress:
-                out, err = await asyncio.wait_for(
-                    self._communicate_streaming(proc, progress, trace=trace),
-                    timeout=self.cfg.agent.max_runtime_seconds,
+            if base_trace_id is None:
+                base_trace_id = trace.job_id
+                phase_trace_id = base_trace_id
+                current_trace_id = base_trace_id
+            if trace.path is not None:
+                logger.info("agent trace: %s", trace.path)
+            proc: asyncio.subprocess.Process | None = None
+            try:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    trace.record("lifecycle", "timeout")
+                    return "[error] 助手响应超时"
+                cmd = self._build_cmd(
+                    prompt,
+                    ws,
+                    mode,
+                    current_model,
+                    stream=progress is not None,
                 )
-            else:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.cfg.agent.max_runtime_seconds
+
+                logger.info("agent invoke: executable=%s mode=%s", cmd[0], mode)
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=ws,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
-                out = (stdout or b"").decode("utf-8", "replace")
-                err = (stderr or b"").decode("utf-8", "replace")
-                trace.record_stdout_text(out)
-                trace.record_stderr_text(err)
-            combined = (out + "\n" + err).strip()
-            cleaned = strip_ansi(combined)
-            cleaned, extra_progress = strip_progress_directives(cleaned)
-            if progress:
-                for item in extra_progress:
-                    try:
-                        await progress(item)
-                    except Exception:  # noqa: BLE001 - progress should not fail the job
-                        logger.exception("progress callback failed")
-            if proc.returncode:
-                error_class = self._process_error_class(cleaned)
-                if self.cfg.agent.log_subprocess_output:
-                    logger.warning(
-                        "agent process failed with exit code %s: %s",
-                        proc.returncode,
-                        redact(cleaned, extra=redact_extra)[:1000],
+                trace.record("lifecycle", "spawn")
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    trace.record("lifecycle", "timeout")
+                    await self._kill_process_group(proc)
+                    return "[error] 助手响应超时"
+                stdout_activity = False
+                if progress:
+                    activity_seen = [False]
+                    out, err = await asyncio.wait_for(
+                        self._communicate_streaming(
+                            proc,
+                            progress,
+                            trace=trace,
+                            activity_seen=activity_seen,
+                        ),
+                        timeout=remaining,
                     )
+                    stdout_activity = activity_seen[0]
                 else:
-                    logger.warning(
-                        "agent process failed: error_class=%s exit_code=%s",
-                        error_class,
-                        proc.returncode,
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=remaining
                     )
-                if (
-                    model
-                    and str(model).strip().lower() != "auto"
-                    and self._is_usage_limit_error(cleaned)
-                ):
+                    stdout_activity = bool((stdout or b"").strip())
+                    out = (stdout or b"").decode("utf-8", "replace")
+                    err = (stderr or b"").decode("utf-8", "replace")
+                    trace.record_stdout_text(out)
+                    trace.record_stderr_text(err)
+                combined = (out + "\n" + err).strip()
+                cleaned = strip_ansi(combined)
+                cleaned, extra_progress = strip_progress_directives(cleaned)
+                if progress:
+                    for item in extra_progress:
+                        try:
+                            await progress(item)
+                        except Exception:  # noqa: BLE001 - progress should not fail the job
+                            logger.exception("progress callback failed")
+                if proc.returncode:
+                    error_class = self._process_error_class(cleaned)
                     if self.cfg.agent.log_subprocess_output:
                         logger.warning(
-                            "model %s hit its usage limit; retrying once with Auto",
-                            model,
+                            "agent process failed with exit code %s: %s",
+                            proc.returncode,
+                            redact(cleaned, extra=redact_extra)[:1000],
                         )
                     else:
-                        logger.warning("agent retry: error_class=usage_limit")
-                    if progress:
-                        try:
-                            await progress("指定模型额度已用尽，正在切换 Auto 重试。")
-                        except Exception:  # noqa: BLE001 - fallback must not fail the job
-                            logger.exception("usage-limit fallback progress failed")
-                    fallback_trace_id = f"{trace_id}-auto-fallback" if trace_id else None
-                    return await self.run(
-                        prompt,
-                        ws,
-                        mode,
-                        model="auto",
-                        progress=progress,
-                        trace_id=fallback_trace_id,
-                        redact_extra=redact_extra,
-                    )
-                if self._is_storage_exhaustion_error(cleaned):
-                    return "[error] 助手存储空间不足，请联系管理员清理运行缓存"
-                return "[error] 助手执行失败"
-            return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"
-        except asyncio.TimeoutError:
-            trace.record("lifecycle", "timeout")
-            await self._kill_process_group(proc)
-            return "[error] 助手响应超时"
-        except asyncio.CancelledError:
-            trace.record("lifecycle", "cancelled")
-            await self._kill_process_group(proc)
-            raise
-        except FileNotFoundError:
-            trace.record("lifecycle", "error", summary="process-not-found")
-            return "[error] 助手暂时不可用"
-        except Exception as e:  # noqa: BLE001
-            trace.record("lifecycle", "error", summary=type(e).__name__)
-            if self.cfg.agent.log_subprocess_output:
-                logger.exception("agent run error")
-            else:
-                logger.warning("agent run error: error_class=%s", type(e).__name__)
-            return f"[error] 助手执行失败：{type(e).__name__}"
-        finally:
-            trace.record(
-                "lifecycle",
-                "exit",
-                returncode=proc.returncode if proc is not None else None,
-            )
-            trace.close()
+                        logger.warning(
+                            "agent process failed: error_class=%s exit_code=%s",
+                            error_class,
+                            proc.returncode,
+                        )
+                    if (
+                        current_model
+                        and str(current_model).strip().lower() != "auto"
+                        and self._is_usage_limit_error(cleaned)
+                    ):
+                        if self.cfg.agent.log_subprocess_output:
+                            logger.warning(
+                                "model %s hit its usage limit; retrying once with Auto",
+                                current_model,
+                            )
+                        else:
+                            logger.warning("agent retry: error_class=usage_limit")
+                        if progress:
+                            try:
+                                await progress(
+                                    "指定模型额度已用尽，正在切换 Auto 重试。"
+                                )
+                            except Exception:  # noqa: BLE001 - fallback must not fail the job
+                                logger.exception("usage-limit fallback progress failed")
+                        current_model = "auto"
+                        phase_trace_id = f"{base_trace_id}-auto-fallback"
+                        current_trace_id = phase_trace_id
+                        transient_attempt = 0
+                        continue
+                    if (
+                        not stdout_activity
+                        and self._is_transient_provider_error(cleaned)
+                        and transient_attempt < 2
+                    ):
+                        retry_number = transient_attempt + 1
+                        logger.warning(
+                            "agent retry: error_class=transient_provider attempt=%s/2",
+                            retry_number,
+                        )
+                        if progress:
+                            try:
+                                await progress(
+                                    "助手连接暂时不稳定，"
+                                    f"正在重试（{retry_number}/2）。"
+                                )
+                            except Exception:  # noqa: BLE001 - retry must continue
+                                logger.exception("transient retry progress failed")
+                        delay = 2**transient_attempt
+                        remaining = deadline - loop.time()
+                        if remaining <= delay:
+                            trace.record("lifecycle", "timeout")
+                            return "[error] 助手响应超时"
+                        await asyncio.sleep(delay)
+                        current_trace_id = f"{phase_trace_id}-retry-{retry_number}"
+                        transient_attempt = retry_number
+                        continue
+                    if self._is_storage_exhaustion_error(cleaned):
+                        return "[error] 助手存储空间不足，请联系管理员清理运行缓存"
+                    return "[error] 助手执行失败"
+                return cleaned[: self.cfg.agent.max_output_chars] or "[no output]"
+            except asyncio.TimeoutError:
+                trace.record("lifecycle", "timeout")
+                await self._kill_process_group(proc)
+                return "[error] 助手响应超时"
+            except asyncio.CancelledError:
+                trace.record("lifecycle", "cancelled")
+                await self._kill_process_group(proc)
+                raise
+            except FileNotFoundError:
+                trace.record("lifecycle", "error", summary="process-not-found")
+                return "[error] 助手暂时不可用"
+            except Exception as e:  # noqa: BLE001
+                trace.record("lifecycle", "error", summary=type(e).__name__)
+                if self.cfg.agent.log_subprocess_output:
+                    logger.exception("agent run error")
+                else:
+                    logger.warning("agent run error: error_class=%s", type(e).__name__)
+                return f"[error] 助手执行失败：{type(e).__name__}"
+            finally:
+                trace.record(
+                    "lifecycle",
+                    "exit",
+                    returncode=proc.returncode if proc is not None else None,
+                )
+                trace.close()
 
     async def _communicate_streaming(
         self,
         proc: asyncio.subprocess.Process,
         progress: ProgressCallback,
         trace: AgentTrace | None = None,
+        activity_seen: list[bool] | None = None,
     ) -> tuple[str, str]:
         assert proc.stdout is not None
         stderr_task = asyncio.create_task(
@@ -832,6 +950,8 @@ class CursorAdapter:
             pending_assistant_message = None
 
         async for line in self._stream_lines(proc.stdout):
+            if activity_seen is not None and line.strip():
+                activity_seen[0] = True
             if trace:
                 trace.record_stdout_line(line)
             kind, text = self._stream_event_from_line(line)
@@ -1039,7 +1159,7 @@ class CursorAdapter:
         return "".join(parts)
 
     async def _kill_process_group(self, proc: asyncio.subprocess.Process | None) -> None:
-        if proc is None:
+        if proc is None or proc.returncode is not None:
             return
         try:
             os.killpg(proc.pid, signal.SIGKILL)
