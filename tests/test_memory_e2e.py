@@ -46,6 +46,13 @@ from test_memory_review import FakeAgent
 
 _E2E_ENV = "QQ_AGENT_BRIDGE_AGENT_E2E"
 _APP_E2E_ENV = "QQ_AGENT_BRIDGE_APP_E2E"
+_REAL_APP_MEMORY_SOURCES: tuple[
+    tuple[str, str, bool, str | None], ...
+] = (
+    ("owner", "我喜欢用简洁的方式回答问题", False, None),
+    ("other-user", "我是后端开发，主要用 Go 和 Rust", False, None),
+    ("owner", "我们团队每周五下午开站会", True, "ask"),
+)
 
 
 def _require_e2e() -> None:
@@ -610,6 +617,22 @@ def test_real_curator_output_to_retrieval_with_trust_labels(tmp_path: Path) -> N
         store.close()
 
 
+def test_real_app_memory_fixture_keeps_owner_ordinary_group_chat() -> None:
+    assert any(
+        sender == "owner" and not direct and command_class is None
+        for sender, _text, direct, command_class in _REAL_APP_MEMORY_SOURCES
+    )
+    assert any(
+        sender == "owner" and direct and command_class == "ask"
+        for sender, _text, direct, command_class in _REAL_APP_MEMORY_SOURCES
+    )
+    assert all(
+        (direct and command_class is not None)
+        or (not direct and command_class is None)
+        for _sender, _text, direct, command_class in _REAL_APP_MEMORY_SOURCES
+    )
+
+
 def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
     """Full pipeline through App._handle with real LLM curator and agent.
 
@@ -690,16 +713,9 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
         app.agent.run = _fake_run  # type: ignore[method-assign]
         app.policy = Policy(cfg, app._agent_runner)  # noqa: SLF001 # type: ignore[arg-type]
 
-        # ── Step 1: Send unmentioned group messages for collection ──
-        # Unmentioned messages go through _collect_long_term_event
-        # WITHOUT triggering the agent, so this is fast.
-        # Pre-seed sources directly to guarantee content for the curator.
-        sources_texts = [
-            ("owner", "我喜欢用简洁的方式回答问题", True),
-            ("other-user", "我是后端开发，主要用 Go 和 Rust", False),
-            ("owner", "我们团队每周五下午开站会", True),
-        ]
-        for sender, text, direct in sources_texts:
+        # Pre-seed production-equivalent group sources directly to guarantee
+        # content for the real curator without triggering the main agent.
+        for sender, text, direct, command_class in _REAL_APP_MEMORY_SOURCES:
             source = MemorySource(
                 id=None,  # type: ignore[arg-type] # auto-assigned by store.collect
                 scope=scope,
@@ -708,7 +724,7 @@ def test_e2e_memory_full_pipeline_real_app(tmp_path: Path) -> None:
                 text=text,
                 message_timestamp=int(time.time()),
                 direct_interaction=direct,
-                command_class="ask" if direct else None,
+                command_class=command_class,
             )
             store.collect(source)
 
