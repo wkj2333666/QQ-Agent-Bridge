@@ -222,7 +222,12 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert "|merge|" not in call.prompt
         assert "Never propose hard deletion" in call.prompt
         assert "every cited source" in call.prompt
-        assert "Preserve distinct durable facts as separate" in call.prompt
+        assert "Inspect every source in the batch" in call.prompt
+        assert "omit irrelevant source IDs" in call.prompt
+        assert "Repeated non-affirmative questions or tasks" in call.prompt
+        assert "recurring_topic" in call.prompt
+        assert "mark_candidate" in call.prompt
+        assert "Never convert question-derived topics into preferences or active memories" in call.prompt
 
     asyncio.run(go())
 
@@ -283,6 +288,87 @@ def test_curator_logs_only_metadata(
     assert "not json" not in rendered
     assert "scope=g" not in rendered
     assert "malformed_output" in rendered
+
+
+def test_curator_logs_sorted_rejection_reason_counts_without_content(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rejected proposals expose only deterministic reason-count metadata."""
+    sensitive_source_text = "SENSITIVE-SOURCE-TEXT: 星露谷怎么玩？"
+    sensitive_sender_id = "SENSITIVE-SENDER-ID"
+    proposed_content = "SENSITIVE-PROPOSED-CONTENT"
+    agent = FakeAgent(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "add",
+                        "source_ids": [1],
+                        "subject_kind": "user",
+                        "subject_id": sensitive_sender_id,
+                        "category": "preference",
+                        "content": proposed_content,
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "inferred",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                    {
+                        "operation": "add",
+                        "source_ids": [1],
+                        "subject_kind": "user",
+                        "subject_id": sensitive_sender_id,
+                        "category": "preference",
+                        "content": "星露谷",
+                        "confidence": 0.91,
+                        "status": "active",
+                        "sensitivity": "normal",
+                        "source_kind": "inferred",
+                        "explicit_memory": False,
+                        "decay_exempt": False,
+                        "expires_at": None,
+                    },
+                ]
+            }
+        )
+    )
+
+    async def go() -> None:
+        curator = MemoryCurator(
+            agent,
+            MemoryValidator(cfg, store=store),
+            cfg.long_term_memory.review,
+            workspace=tmp_path,
+        )
+        source_row = MemorySource(
+            scope=GROUP,
+            message_id="sensitive-message-id",
+            sender_id=sensitive_sender_id,
+            text=sensitive_source_text,
+            message_timestamp=100,
+            direct_interaction=True,
+            id=1,
+        )
+        with caplog.at_level(logging.INFO, logger="qq_agent_bridge.memory_review"):
+            outcome = await curator.review(GROUP, (source_row,), ())
+        assert [rejected.reason for rejected in outcome.rejected] == [
+            "source_content_mismatch",
+            "source_evidence_disallowed",
+        ]
+
+    asyncio.run(go())
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "rejection_reasons=source_content_mismatch=1,source_evidence_disallowed=1" in rendered
+    assert sensitive_source_text not in rendered
+    assert sensitive_sender_id not in rendered
+    assert proposed_content not in rendered
+    assert "review-data.json" not in rendered
 
 
 def test_curator_adapter_error_is_not_malformed_output(

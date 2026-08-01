@@ -451,6 +451,68 @@ def test_real_curator_review_and_commit(tmp_path: Path) -> None:
         store.close()
 
 
+def test_real_recurring_topic_candidate(tmp_path: Path) -> None:
+    """Repeated QQ questions become a candidate, never an active memory."""
+    _require_e2e()
+    cfg = _make_e2e_cfg(tmp_path)
+    _assert_e2e_databases_are_isolated(cfg, tmp_path)
+    scope = MemoryScope("group", "e2e-recurring-topic-group")
+    store = LongTermMemoryStore(tmp_path / "mem-recurring-topic-e2e.sqlite3")
+    store.initialize()
+    store.set_scope_enabled(scope, True)
+    try:
+        questions = (
+            "星露谷春天该种什么作物？",
+            "星露谷矿洞怎么更快下到深层？",
+            "星露谷钓鱼总是失败，有什么技巧？",
+            "星露谷冬天应该优先做哪些事情？",
+        )
+        sources = tuple(
+            MemorySource(
+                scope=scope,
+                message_id=f"e2e-recurring-topic-{index}",
+                sender_id="e2e-recurring-user",
+                text=question,
+                message_timestamp=int(time.time()) + index,
+                direct_interaction=True,
+                command_class="ask",
+            )
+            for index, question in enumerate(questions, start=1)
+        )
+        source_ids = tuple(store.collect(source) for source in sources)
+        assert all(source_id is not None for source_id in source_ids)
+        pending_sources = store.pending_sources(scope, limit=10)
+        assert len(pending_sources) == 4
+
+        curator = _build_real_curator(cfg, store, tmp_path)
+        outcome = asyncio.run(curator.review(scope, pending_sources, ()))
+
+        assert outcome.error is None, f"real curator failed: {outcome.error}"
+        committed = store.commit_review(
+            scope,
+            tuple(source_id for source_id in source_ids if source_id is not None),
+            outcome.accepted,
+            trigger_class="explicit",
+            proposed_count=outcome.proposed_count,
+            rejected_count=len(outcome.rejected),
+        )
+        assert any(
+            item.category == "recurring_topic" and item.status == "candidate"
+            for item in committed
+        ), (
+            "expected a recurring-topic candidate from repeated questions; "
+            f"accepted={outcome.accepted}, rejected={outcome.rejected}"
+        )
+        items = store.list_items(scope, limit=100)
+        assert any(
+            item.category == "recurring_topic" and item.status == "candidate"
+            for item in items
+        )
+        assert not any(item.status == "active" for item in items)
+    finally:
+        store.close()
+
+
 def test_real_curator_output_to_retrieval_with_trust_labels(tmp_path: Path) -> None:
     """Real LLM curator → commit → retrieve() → trust labels in formatted output."""
     _require_e2e()
