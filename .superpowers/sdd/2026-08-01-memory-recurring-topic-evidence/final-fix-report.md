@@ -5,7 +5,9 @@
 Implemented the validator, coordinator, and dead-code fixes. Commit `430350c`
 uses the message `fix: preserve rejected memory evidence`; this report also
 includes commit `5e6cfdd` and the final fail-closed provenance follow-up, which
-supersedes that commit's local lexical classifier.
+supersedes that commit's local lexical classifier. The latest review follow-up
+also restores the ordinary-chat question guard and tightens recurring-topic
+provenance.
 
 ## P1 A: question and task evidence
 
@@ -19,19 +21,24 @@ boundary, before general affirmative support can create or downgrade a memory.
   bounded first-person assertion grammar.
 - The positive grammar admits anchored forms such as `我喜欢...`, `我知道...`,
   `我的...是...`, and the narrow suffix forms `...是我写的...` and
-  `...是我常用的...`. It rejects terminal question punctuation/particles,
-  `我怎么...`, and `我想知道...`, including when the model mislabels them.
+  `...是我常用的...`. Before applying that grammar, a bounded fail-closed
+  guard rejects any occurrence of `不`, `没`, `未`, `是否`, `能否`, `可否`,
+  `吗`, `么`, `呢`, `吧`, `嘛`, `?`, or `？`. This blocks negation,
+  uncertainty, A-not-A forms, quoted punctuation, and suffix disguises even
+  when the model labels them `self_statement`.
 - The lexical question/request marker list and 120-character clause scanner were
-  removed. Quoted question-like text remains harmless inside an otherwise
-  proven direct assertion.
-- Ordinary non-command sources retain the existing affirmative evidence
-  behavior. Tests that are specifically about routed questions now model them
-  with `command_class="ask"`; ordinary affirmative comma/quoted-literal
-  compatibility tests remain ordinary chat.
+  removed. Clean direct ask assertions remain covered by positive controls.
+- Ordinary non-command sources now have a bounded whole-message guard for
+  terminal question punctuation/particles, A-not-A forms, and high-confidence
+  request prefixes. The exact old `command_class=None` fixture
+  `星露谷怎么玩？` is again rejected as a one-source preference candidate;
+  ordinary quoted-question content remains affirmative when the whole message
+  itself is an assertion.
 - Repeated non-affirmative evidence remains restricted to `recurring_topic`, at
   least two distinct exact-support citations, and normalized
   `mark_candidate`/`candidate` output under the existing provenance and safety
-  checks.
+  checks. Any cited `plan` or `task` source now disqualifies this path; repeated
+  `ask` and ordinary punctuated questions remain eligible.
 
 Red evidence:
 
@@ -50,11 +57,15 @@ Red evidence:
   `星露谷好玩吗`, `帮忙做一份...`, first-person question forms, and a
   question-particle form activated or bypassed recurring-topic normalization,
   while both allowed suffix assertions were rejected.
+- Final review follow-up: `21 failed, 13 passed`; forbidden tokens and suffix
+  disguises activated ask proposals, mixed `plan`/`task` citations became
+  recurring candidates, and ordinary terminal/particle/A-not-A/request evidence
+  bypassed the one-source restriction or missed recurring normalization.
 
 Green evidence:
 
-- Final focused provenance set: `17 passed`.
-- Full validator/store modules: `553 passed`.
+- Final focused review set: `34 passed`.
+- Full validator/store modules: `576 passed`.
 
 ## P1 B: accepted-only source consumption
 
@@ -96,8 +107,8 @@ proof, overflow UID, path location, ownership, and permissions, not mount status
 
 ## Verification
 
-- Combined bounded memory suite: `777 passed, 5 skipped`.
-- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `553 passed`.
+- Combined bounded memory suite: `800 passed, 5 skipped`.
+- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `576 passed`.
 - `tests/test_memory_review.py tests/test_memory_e2e.py`: `46 passed, 5 skipped`.
 - `tests/test_cursor_adapter.py`: `89 passed`.
 - `tests/test_memory_commands.py`: `178 passed`.

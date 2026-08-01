@@ -891,6 +891,10 @@ class MemoryValidator:
             or proposal.sensitivity != "normal"
             or len(cited_sources) < 2
             or len({source.id for source in cited_sources}) != len(cited_sources)
+            or any(
+                source.command_class in {"plan", "task"}
+                for source in cited_sources
+            )
             or not _repeated_topic_sources_match_subject(proposal, cited_sources)
             or not all(
                 _content_supported_by_source(proposal.content, source.text)
@@ -1446,16 +1450,39 @@ def _source_affirmatively_supports_proposal(
             and _content_is_direct_assertion(content, source.text)
             and _is_direct_first_person_self_assertion(content)
         )
+    if source.command_class is None and _ordinary_source_is_nonaffirmative(
+        source.text
+    ):
+        return False
     return _content_affirmatively_supported_by_source(content, source.text)
 
 
 def _is_direct_first_person_self_assertion(content: str) -> bool:
     normalized = unicodedata.normalize("NFKC", _normalize_text(content)).casefold()
     compact = re.sub(r"\s+", "", normalized).strip()
-    if not compact or len(compact) > 160 or compact.endswith(("?", "？")):
+    if not compact or len(compact) > 160:
+        return False
+    if any(
+        token in compact
+        for token in (
+            "不",
+            "没",
+            "未",
+            "是否",
+            "能否",
+            "可否",
+            "吗",
+            "么",
+            "呢",
+            "吧",
+            "嘛",
+            "?",
+            "？",
+        )
+    ):
         return False
     statement = compact.rstrip(".。!！")
-    if not statement or statement.endswith(("吗", "么", "呢")):
+    if not statement:
         return False
     return bool(
         re.fullmatch(
@@ -1464,6 +1491,24 @@ def _is_direct_first_person_self_assertion(content: str) -> bool:
         )
         or re.fullmatch(r"(?:我的|我们的).{1,80}是.{1,80}", statement)
         or re.fullmatch(r".{1,120}是我(?:写|常用)的.{0,32}", statement)
+    )
+
+
+def _ordinary_source_is_nonaffirmative(source_text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", _normalize_text(source_text)).casefold()
+    head = re.sub(r"\s+", "", normalized[:240]).strip()
+    tail = re.sub(r"\s+", "", normalized[-32:]).strip()
+    if not head:
+        return False
+    if tail.endswith(("?", "？")):
+        return True
+    statement_tail = tail.rstrip(".。!！")
+    if statement_tail.endswith(("吗", "么", "呢", "吧", "嘛")):
+        return True
+    if head.startswith(("请问", "帮忙", "帮我", "给我", "麻烦", "我想知道")):
+        return True
+    return "有没有" in head or bool(
+        re.search(r"([\u3400-\u9fff]{1,4})不\1", head)
     )
 
 
