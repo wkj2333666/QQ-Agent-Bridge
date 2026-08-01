@@ -726,8 +726,8 @@ class MemoryValidator:
                 )
                 owner_supports_content = actor is not None and any(
                     source.sender_id == actor.id
-                    and _content_affirmatively_supported_by_source(
-                        evidence_content, source.text
+                    and _source_affirmatively_supports_content(
+                        evidence_content, source
                     )
                     and (
                         not _curator_proposal_can_activate(proposal)
@@ -752,8 +752,8 @@ class MemoryValidator:
                 if len(matching_sources) != len(cited_sources):
                     return None, "source_content_mismatch"
                 if not any(
-                    _content_affirmatively_supported_by_source(
-                        evidence_content, source.text
+                    _source_affirmatively_supports_content(
+                        evidence_content, source
                     )
                     for source in matching_sources
                 ):
@@ -897,8 +897,8 @@ class MemoryValidator:
                 for source in cited_sources
             )
             or any(
-                _content_affirmatively_supported_by_source(
-                    proposal.content, source.text
+                _source_affirmatively_supports_content(
+                    proposal.content, source
                 )
                 for source in cited_sources
             )
@@ -1240,8 +1240,8 @@ class MemoryValidator:
                 and proposal.content is not None
                 and not any(
                     source.sender_id == actor.id
-                    and _content_affirmatively_supported_by_source(
-                        proposal.content, source.text
+                    and _source_affirmatively_supports_content(
+                        proposal.content, source
                     )
                     for source in sources
                 )
@@ -1430,6 +1430,59 @@ def _content_affirmatively_supported_by_source(content: str, source_text: str) -
         if not _evidence_occurrence_disallowed(normalized_source, start, end):
             return True
         offset = compact_source.find(proposed, offset + 1)
+    return False
+
+
+def _source_affirmatively_supports_content(
+    content: str,
+    source: MemorySource,
+) -> bool:
+    if _source_is_question_or_task_evidence(content, source):
+        return False
+    return _content_affirmatively_supported_by_source(content, source.text)
+
+
+def _source_is_question_or_task_evidence(
+    content: str, source: MemorySource
+) -> bool:
+    if source.command_class in {"plan", "task"}:
+        return True
+    proposed = _evidence_normal_form(content)
+    normalized_source, compact_source, positions = _evidence_source_map(source.text)
+    if not proposed:
+        return False
+    question_occurrence = False
+    offset = compact_source.find(proposed)
+    while offset >= 0:
+        start = positions[offset]
+        end = positions[offset + len(proposed) - 1] + 1
+        if not _evidence_occurrence_disallowed(normalized_source, start, end):
+            if not _evidence_occurrence_is_question(normalized_source, start, end):
+                return False
+            question_occurrence = True
+        offset = compact_source.find(proposed, offset + 1)
+    return question_occurrence
+
+
+def _evidence_occurrence_is_question(source: str, start: int, end: int) -> bool:
+    unquoted = list(source)
+    for pattern in (
+        r'"[^"\n]*"',
+        r"'[^'\n]*'",
+        r"“[^”\n]*”",
+        r"‘[^’\n]*’",
+        r"「[^」\n]*」",
+        r"『[^』\n]*』",
+        r"《[^》\n]*》",
+        r"`[^`\n]*`",
+    ):
+        for match in re.finditer(pattern, source):
+            unquoted[match.start() : match.end()] = " " * len(match.group())
+    visible = "".join(unquoted)
+    window_end = min(len(visible), end + 120)
+    for index in range(end, window_end):
+        if visible[index] in ".。!！?？;；\n":
+            return visible[index] in "?？"
     return False
 
 

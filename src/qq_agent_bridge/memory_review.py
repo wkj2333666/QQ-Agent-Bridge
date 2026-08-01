@@ -36,12 +36,6 @@ MAX_CURATOR_OUTPUT_CHARS = 32_000
 MAX_CURATOR_PROMPT_CHARS = 96_000
 MAX_CURATOR_SOURCES = 64
 MAX_CURATOR_EXISTING = 100
-_RETRYABLE_EVIDENCE_REJECTION_REASONS = frozenset(
-    {
-        "source_content_mismatch",
-        "source_evidence_disallowed",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -619,21 +613,14 @@ class MemoryReviewCoordinator:
                         self._commit_started = True
                         try:
                             # A curator may intentionally handle only part of a
-                            # large batch.  Consume only sources cited by an
-                            # accepted or rejected proposal; uncited sources
-                            # must remain available for a later review.
+                            # large batch.  Only accepted proposals consume
+                            # evidence; rejected and uncited sources remain
+                            # available for a later review.
                             cited_source_ids = {
                                 source_id
                                 for proposal in outcome.accepted
                                 for source_id in proposal.source_ids
                             }
-                            cited_source_ids.update(
-                                source_id
-                                for rejected in outcome.rejected
-                                if rejected.reason
-                                not in _RETRYABLE_EVIDENCE_REJECTION_REASONS
-                                for source_id in rejected.proposal.source_ids
-                            )
                             reviewed_source_ids = tuple(
                                 source.id
                                 for source in sources

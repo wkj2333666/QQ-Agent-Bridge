@@ -810,12 +810,6 @@ def test_hardened_runtime_rejects_mapped_owner_on_mutable_prefix(
     monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
     monkeypatch.setattr(
         adapter,
-        "_runtime_is_read_only_mount",
-        lambda _path: False,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        adapter,
         "_runtime_has_single_user_uid_map",
         lambda: False,
         raising=False,
@@ -840,12 +834,6 @@ def test_hardened_runtime_accepts_unmapped_system_prefix_in_single_user_namespac
         return _trusted_runtime_stat(path, owner=owner)
 
     monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
-    monkeypatch.setattr(
-        adapter,
-        "_runtime_is_read_only_mount",
-        lambda _path: False,
-        raising=False,
-    )
     monkeypatch.setattr(
         adapter,
         "_runtime_has_single_user_uid_map",
@@ -880,8 +868,6 @@ def test_hardened_runtime_rejects_arbitrary_foreign_owner_on_read_only_mapped_pr
         return _trusted_runtime_stat(path, owner=owner)
 
     monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
-    monkeypatch.setattr(adapter, "_runtime_is_read_only_mount", lambda _path: True)
-
     with pytest.raises(ValueError, match="not trusted"):
         adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
 
@@ -901,7 +887,6 @@ def test_hardened_runtime_rejects_overflow_owner_without_uid_map_proof_on_read_o
         return _trusted_runtime_stat(path, owner=owner)
 
     monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
-    monkeypatch.setattr(adapter, "_runtime_is_read_only_mount", lambda _path: True)
     monkeypatch.setattr(adapter, "_runtime_has_single_user_uid_map", lambda: False)
     monkeypatch.setattr(adapter, "_runtime_overflow_uid", lambda: 65534)
 

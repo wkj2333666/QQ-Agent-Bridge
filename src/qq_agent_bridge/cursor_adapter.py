@@ -382,9 +382,6 @@ class CursorAdapter:
             prefixes.add(current)
         return prefixes
 
-    def _runtime_is_read_only_mount(self, path: Path) -> bool:
-        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
-
     def _runtime_is_unmapped_system_owner(self, owner: int) -> bool:
         return (
             self._runtime_has_single_user_uid_map()

@@ -63,7 +63,12 @@ class FakeAgent:
             self.active -= 1
 
 
-def valid_add_result(source_id: int | list[int], content: str = "喜欢简洁回答") -> str:
+def valid_add_result(
+    source_id: int | list[int],
+    content: str = "喜欢简洁回答",
+    *,
+    subject_id: str = "u1",
+) -> str:
     source_ids = [source_id] if isinstance(source_id, int) else source_id
     return json.dumps(
         {
@@ -72,7 +77,7 @@ def valid_add_result(source_id: int | list[int], content: str = "喜欢简洁回
                     "operation": "add",
                     "source_ids": source_ids,
                     "subject_kind": "user",
-                    "subject_id": "u1",
+                    "subject_id": subject_id,
                     "category": "preference",
                     "content": content,
                     "confidence": 0.91,
@@ -106,6 +111,7 @@ class FirstSourceProposalAgent(FakeAgent):
             self.result = valid_add_result(
                 [int(source["source_id"]) for source in sources],
                 str(first_source["text"]),
+                subject_id=str(first_source["sender_id"]),
             )
         return await super().run(prompt, workspace, mode, **kwargs)
 
@@ -145,12 +151,13 @@ def collect_source(
     text: str = "我喜欢简洁回答",
     created_at: int = 100,
     attempt_count: int = 0,
+    sender_id: str = "u1",
 ) -> int:
     source_id = store.collect(
         MemorySource(
             scope=GROUP,
             message_id=message_id,
-            sender_id="u1",
+            sender_id=sender_id,
             text=text,
             message_timestamp=created_at,
             direct_interaction=True,
@@ -571,13 +578,15 @@ def test_periodic_minimum_and_explicit_review_bypass_threshold(
     async def go() -> None:
         cfg.long_term_memory.review.message_threshold = 40
         cfg.long_term_memory.review.minimum_messages = 2
-        collect_source(store, message_id="m1")
+        collect_source(store, message_id="m1", sender_id=OWNER.id)
         agent = FirstSourceProposalAgent()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
 
         assert await coordinator.run_periodic(now=1_000) == ()
         explicit = await coordinator.review_now(GROUP, actor=OWNER)
         assert explicit.error is None
+        assert len(explicit.accepted) == 1
+        assert explicit.accepted[0].subject_id == OWNER.id
         assert store.status(GROUP).pending_count == 0
 
         collect_source(store, message_id="m2")
@@ -596,7 +605,7 @@ def test_reviews_are_serialized_one_at_a_time(
     tmp_path: Path,
 ) -> None:
     async def go() -> None:
-        collect_source(store, message_id="m1")
+        collect_source(store, message_id="m1", sender_id=OWNER.id)
         agent = FirstSourceProposalAgent()
         agent.release = asyncio.Event()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
@@ -610,6 +619,7 @@ def test_reviews_are_serialized_one_at_a_time(
         first_outcome, second_outcome = await asyncio.gather(first, second)
         assert agent.max_active == 1
         assert first_outcome.error is None
+        assert len(first_outcome.accepted) == 1
         assert second_outcome.error == "no_sources"
 
     asyncio.run(go())
@@ -621,7 +631,7 @@ def test_interactive_background_cancel_does_not_cancel_explicit_review(
     tmp_path: Path,
 ) -> None:
     async def go() -> None:
-        collect_source(store, message_id="m1")
+        collect_source(store, message_id="m1", sender_id=OWNER.id)
         agent = FirstSourceProposalAgent()
         agent.release = asyncio.Event()
         coordinator = make_coordinator(store, agent, cfg, tmp_path)
@@ -634,6 +644,7 @@ def test_interactive_background_cancel_does_not_cancel_explicit_review(
         outcome = await explicit
 
         assert outcome.error is None
+        assert len(outcome.accepted) == 1
         assert store.status(GROUP).pending_count == 0
 
     asyncio.run(go())
@@ -766,7 +777,9 @@ def test_explicit_review_bypasses_source_retry_deadline(
     tmp_path: Path,
 ) -> None:
     async def go() -> None:
-        source_id = collect_source(store, message_id="deferred")
+        source_id = collect_source(
+            store, message_id="deferred", sender_id=OWNER.id
+        )
         store._conn.execute(  # noqa: SLF001 - arrange a deferred production state
             "UPDATE review_buffer SET attempt_count = 1, next_attempt_at = ? WHERE id = ?",
             (2_000, source_id),
@@ -778,6 +791,7 @@ def test_explicit_review_bypasses_source_retry_deadline(
 
         assert outcome.error is None
         assert len(agent.calls) == 1
+        assert len(outcome.accepted) == 1
         assert store.status(GROUP).pending_count == 0
 
     asyncio.run(go())
@@ -885,6 +899,122 @@ def test_mismatched_multi_source_proposal_keeps_all_sources_for_retry(
         assert outcome.accepted == ()
         assert outcome.rejected[0].reason == "source_content_mismatch"
         assert store.status(GROUP).pending_count == 2
+
+    asyncio.run(go())
+
+
+def test_fully_rejected_third_party_claim_keeps_source_pending(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(
+            store,
+            message_id="third-party",
+            text="victim manages payroll",
+        )
+        agent = FakeAgent(
+            json.dumps(
+                {
+                    "operations": [
+                        {
+                            "operation": "add",
+                            "source_ids": [source_id],
+                            "subject_kind": "user",
+                            "subject_id": "victim",
+                            "category": "identity",
+                            "content": "victim manages payroll",
+                            "confidence": 0.9,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "self_statement",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        }
+                    ]
+                }
+            )
+        )
+        coordinator = make_coordinator(store, agent, cfg, tmp_path, now=1_000)
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error is None
+        assert outcome.accepted == ()
+        assert outcome.rejected[0].reason == "third_party_personal_claim"
+        pending = store.pending_sources(GROUP, limit=10, now=1_000)
+        assert [source.id for source in pending] == [source_id]
+        assert pending[0].attempt_count == 0
+
+    asyncio.run(go())
+
+
+def test_mixed_review_consumes_only_accepted_proposal_citations(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        accepted_source_id = collect_source(
+            store,
+            message_id="accepted",
+            text="我喜欢简洁回答",
+        )
+        rejected_source_id = collect_source(
+            store,
+            message_id="rejected",
+            text="victim manages payroll",
+        )
+        agent = FakeAgent(
+            json.dumps(
+                {
+                    "operations": [
+                        {
+                            "operation": "add",
+                            "source_ids": [accepted_source_id],
+                            "subject_kind": "user",
+                            "subject_id": "u1",
+                            "category": "preference",
+                            "content": "喜欢简洁回答",
+                            "confidence": 0.9,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "self_statement",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        },
+                        {
+                            "operation": "add",
+                            "source_ids": [rejected_source_id],
+                            "subject_kind": "user",
+                            "subject_id": "victim",
+                            "category": "identity",
+                            "content": "victim manages payroll",
+                            "confidence": 0.9,
+                            "status": "active",
+                            "sensitivity": "normal",
+                            "source_kind": "self_statement",
+                            "explicit_memory": False,
+                            "decay_exempt": False,
+                            "expires_at": None,
+                        },
+                    ]
+                }
+            )
+        )
+        coordinator = make_coordinator(store, agent, cfg, tmp_path, now=1_000)
+
+        outcome = await coordinator.review_now(GROUP, actor=None)
+
+        assert outcome.error is None
+        assert [item.content for item in outcome.committed] == ["喜欢简洁回答"]
+        assert outcome.rejected[0].reason == "third_party_personal_claim"
+        pending = store.pending_sources(GROUP, limit=10, now=1_000)
+        assert [source.id for source in pending] == [rejected_source_id]
+        assert pending[0].attempt_count == 0
 
     asyncio.run(go())
 
@@ -1138,7 +1268,37 @@ def test_explicit_owner_review_does_not_blanket_confirm_curator_claims(
         assert outcome.accepted == ()
         assert outcome.rejected[0].reason == "owner_confirmation_required"
         assert store.list_items(GROUP, limit=10) == ()
-        assert store.status(GROUP).pending_count == 0
+        assert store.status(GROUP).pending_count == 1
+        assert [source.id for source in store.pending_sources(GROUP, limit=10)] == [
+            source_id
+        ]
+
+    asyncio.run(go())
+
+
+def test_owner_explicit_review_does_not_authorize_another_users_self_statement(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        source_id = collect_source(store, message_id="member-self-statement")
+        coordinator = make_coordinator(
+            store,
+            FakeAgent(valid_add_result(source_id)),
+            cfg,
+            tmp_path,
+        )
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error is None
+        assert outcome.accepted == ()
+        assert outcome.rejected[0].reason == "actor_not_authorized"
+        assert store.list_items(GROUP, limit=10) == ()
+        assert [source.id for source in store.pending_sources(GROUP, limit=10)] == [
+            source_id
+        ]
 
     asyncio.run(go())
 
@@ -1492,7 +1652,7 @@ def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
 ) -> None:
     """Curator blocks forever -> coordinator returns timeout, retains sources, stays usable."""
     async def go() -> None:
-        collect_source(store, message_id="m1")
+        collect_source(store, message_id="m1", sender_id=OWNER.id)
         # Agent that sleeps forever (release event never set)
         slow_agent = FakeAgent()
         slow_agent.release = asyncio.Event()
@@ -1508,12 +1668,13 @@ def test_coordinator_timeout_retains_sources_and_keeps_coordinator_operational(
 
         # Coordinator must remain operational after a timeout.  Explicit review
         # is allowed to include the deferred original alongside fresh input.
-        collect_source(store, message_id="m2")
+        collect_source(store, message_id="m2", sender_id=OWNER.id)
         healthy_agent = FirstSourceProposalAgent()
         coordinator.curator.agent = healthy_agent
         coordinator.curator.cfg = cfg.long_term_memory.review
         second = await coordinator.review_now(GROUP, actor=OWNER)
         assert second.error is None, f"coordinator should be usable after timeout, got {second.error}"
+        assert len(second.accepted) == 1
         assert store.status(GROUP).pending_count == 0
 
     asyncio.run(go())

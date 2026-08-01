@@ -827,6 +827,209 @@ def test_evidence_binding_accepts_direct_assertion_with_trivial_punctuation(
     assert result.accepted[0].status == "active"
 
 
+@pytest.mark.parametrize(
+    ("source_text", "command_class"),
+    [
+        ("星露谷怎么玩？", None),
+        ("给我做一份星露谷攻略", "task"),
+    ],
+    ids=["question", "task-command"],
+)
+def test_question_or_task_evidence_cannot_create_one_source_candidate(
+    cfg: BridgeConfig,
+    source_text: str,
+    command_class: str | None,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=source_text,
+        message_timestamp=100,
+        command_class=command_class,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.6,
+        status="candidate",
+        source_kind="inferred",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+def test_one_question_cannot_bypass_repeated_topic_source_count(
+    cfg: BridgeConfig,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷怎么玩？",
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        status="candidate",
+        source_kind="inferred",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+def test_task_provenance_overrides_model_self_statement_label(
+    cfg: BridgeConfig,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷",
+        message_timestamp=100,
+        command_class="task",
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.9,
+        status="active",
+        source_kind="self_statement",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+def test_repeated_questions_use_only_recurring_topic_candidate_gate(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text="星露谷怎么玩？",
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="星露谷有什么玩法？",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        status="active",
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+
+
+@pytest.mark.parametrize("command_class", [None, "ask"], ids=["ordinary", "ask-mode"])
+def test_affirmative_statement_with_quoted_question_mark_remains_active(
+    cfg: BridgeConfig,
+    command_class: str | None,
+) -> None:
+    content = "我喜欢“星露谷怎么玩？”这个标题"
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=content,
+        message_timestamp=100,
+        command_class=command_class,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content=content,
+        confidence=0.9,
+        status="active",
+        source_kind="self_statement",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "add"
+    assert result.accepted[0].status == "active"
+
+
+def test_affirmative_occurrence_after_question_still_supports_candidate(
+    cfg: BridgeConfig,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷怎么玩？我喜欢星露谷。",
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.6,
+        status="candidate",
+        source_kind="self_statement",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+
+
 def test_repeated_topic_evidence_becomes_candidate_without_affirmative_statement(
     cfg: BridgeConfig,
 ) -> None:
