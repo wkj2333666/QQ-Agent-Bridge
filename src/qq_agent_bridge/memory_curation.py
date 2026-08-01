@@ -1457,14 +1457,25 @@ def _source_is_question_or_task_evidence(
         start = positions[offset]
         end = positions[offset + len(proposed) - 1] + 1
         if not _evidence_occurrence_disallowed(normalized_source, start, end):
-            if not _evidence_occurrence_is_question(normalized_source, start, end):
+            if not _evidence_occurrence_is_question_or_request(
+                normalized_source,
+                start,
+                end,
+                detect_unpunctuated=source.command_class == "ask",
+            ):
                 return False
             question_occurrence = True
         offset = compact_source.find(proposed, offset + 1)
     return question_occurrence
 
 
-def _evidence_occurrence_is_question(source: str, start: int, end: int) -> bool:
+def _evidence_occurrence_is_question_or_request(
+    source: str,
+    start: int,
+    end: int,
+    *,
+    detect_unpunctuated: bool,
+) -> bool:
     unquoted = list(source)
     for pattern in (
         r'"[^"\n]*"',
@@ -1479,11 +1490,46 @@ def _evidence_occurrence_is_question(source: str, start: int, end: int) -> bool:
         for match in re.finditer(pattern, source):
             unquoted[match.start() : match.end()] = " " * len(match.group())
     visible = "".join(unquoted)
+
+    boundaries = ",，、;；:：.。!！?？\n"
+    window_start = max(0, start - 120)
     window_end = min(len(visible), end + 120)
+    clause_start = max(
+        (visible.rfind(boundary, window_start, start) for boundary in boundaries),
+        default=-1,
+    ) + 1
+    clause_end = window_end
+    terminal = ""
     for index in range(end, window_end):
-        if visible[index] in ".。!！?？;；\n":
-            return visible[index] in "?？"
-    return False
+        if visible[index] in boundaries:
+            clause_end = index
+            terminal = visible[index]
+            break
+    if terminal and terminal in "?？":
+        return True
+    if not detect_unpunctuated:
+        return False
+
+    clause = re.sub(r"\s+", "", visible[clause_start:clause_end])
+    suffix = re.sub(r"\s+", "", visible[end:clause_end])
+    question_at_start = re.match(
+        r"^(?:请问|问一下|想问(?:一下)?|我想(?:问|知道|了解)|"
+        r"怎么|如何|为什么|为何|是否|能否|可否|有没有|"
+        r"哪里|哪(?:个|些|种)?|谁|什么|多少|何时)",
+        clause,
+    )
+    request_at_start = re.match(
+        r"^(?:请|麻烦|劳驾|帮我|给我|替我|为我)"
+        r"(?:帮忙)?(?:做|写|查|找|看|安装|生成|整理|制作|创建|"
+        r"设计|分析|解释|告诉|推荐|列|改|修|处理|准备)",
+        clause,
+    )
+    question_after_content = re.match(
+        r"^(?:怎么|如何|为什么|为何|是否|能否|可否|有没有|"
+        r"有(?:什么|哪些)|吗|么|呢)",
+        suffix,
+    )
+    return bool(question_at_start or request_at_start or question_after_content)
 
 
 def _curator_proposal_can_activate(proposal: MemoryProposal) -> bool:

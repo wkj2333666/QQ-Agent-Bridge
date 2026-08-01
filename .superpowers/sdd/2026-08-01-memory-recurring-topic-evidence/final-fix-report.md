@@ -2,8 +2,9 @@
 
 ## Status
 
-Implemented the final validator, coordinator, and dead-code fixes. The follow-up
-commit uses the message `fix: preserve rejected memory evidence`.
+Implemented the validator, coordinator, and dead-code fixes. Commit `430350c`
+uses the message `fix: preserve rejected memory evidence`; this report also
+includes the subsequent local-clause classifier follow-up.
 
 ## P1 A: question and task evidence
 
@@ -11,11 +12,14 @@ The validator now classifies question/task evidence at the source-aware evidence
 boundary, before general affirmative support can create or downgrade a memory.
 
 - `plan` and `task` command provenance is always non-affirmative.
-- `ask` remains an interaction mode; its text is checked for question syntax.
-- A bounded 120-character sentence scan checks the exact normalized content
-  occurrence and ignores matched quoted/literal spans.
-- A source is question-only only when every admissible exact occurrence is in a
-  question. A later affirmative occurrence still uses the normal evidence path.
+- `ask` remains an interaction mode; its local text clause is checked for
+  question and request syntax, including bounded unpunctuated Chinese markers.
+- A bounded 120-character local-clause scan checks each exact normalized content
+  occurrence. Commas and sentence punctuation terminate the clause, and matched
+  quoted/literal spans are masked before boundaries or markers are inspected.
+- A source is non-affirmative `ask` evidence only when every admissible exact
+  occurrence is in a question/request clause. A later affirmative occurrence
+  still uses the normal evidence path.
 - Repeated non-affirmative evidence remains restricted to `recurring_topic`, at
   least two distinct exact-support citations, and normalized
   `mark_candidate`/`candidate` output under the existing provenance and safety
@@ -31,11 +35,14 @@ Red evidence:
   mislabeled as a self-statement and activated.
 - Quoted-literal `ask` regression: `1 failed, 1 passed`; `ask` mode incorrectly
   suppressed a direct affirmative statement containing a quoted question mark.
+- Local-clause follow-up: `4 failed, 2 passed`; two unpunctuated `ask` probes
+  were activated, repeated unpunctuated questions missed the recurring-topic
+  gate, and a question in a later comma clause hid earlier affirmative support.
 
 Green evidence:
 
-- Final focused adversarial validator set: `21 passed`.
-- Full validator/store modules: `536 passed`.
+- Final focused adversarial validator set: `27 passed`.
+- Full validator/store modules: `543 passed`.
 
 ## P1 B: accepted-only source consumption
 
@@ -77,7 +84,7 @@ proof, overflow UID, path location, ownership, and permissions, not mount status
 
 ## Verification
 
-- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `536 passed`.
+- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `543 passed`.
 - `tests/test_memory_review.py tests/test_memory_e2e.py`: `46 passed, 5 skipped`.
 - `tests/test_cursor_adapter.py`: `89 passed`.
 - `tests/test_memory_commands.py`: `178 passed`.
