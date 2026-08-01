@@ -827,6 +827,317 @@ def test_evidence_binding_accepts_direct_assertion_with_trivial_punctuation(
     assert result.accepted[0].status == "active"
 
 
+def test_repeated_topic_evidence_becomes_candidate_without_affirmative_statement(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text='The phrase "星露谷" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="If 星露谷 gets an update, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        status="active",
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert len(result.accepted) == 1
+    accepted = result.accepted[0]
+    assert accepted.operation == "mark_candidate"
+    assert accepted.status == "candidate"
+    assert accepted.category == "recurring_topic"
+
+
+def test_repeated_topic_candidate_requires_two_distinct_citations(
+    cfg: BridgeConfig,
+) -> None:
+    source_row = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text='The phrase "星露谷" is only an example.',
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source_row,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_rejects_duplicate_source_ids(
+    cfg: BridgeConfig,
+) -> None:
+    source_row = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text='The phrase "星露谷" is only an example.',
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 41),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source_row,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_requires_topic_in_every_citation(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text='The phrase "星露谷" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="If Minecraft gets an update, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_keeps_subject_provenance_authoritative(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u2",
+            text='The phrase "星露谷" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u2",
+            text="If 星露谷 gets an update, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_requires_recurring_topic_category(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text='The phrase "星露谷" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="If 星露谷 gets an update, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_keeps_sensitivity_checks_authoritative(
+    cfg: BridgeConfig,
+) -> None:
+    content = "星露谷 medical diagnosis"
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text=f'The phrase "{content}" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text=f"If {content} changes, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content=content,
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_repeated_topic_candidate_does_not_allow_stateful_operations(
+    cfg: BridgeConfig,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text='The phrase "星露谷" is only an example.',
+            message_timestamp=100,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="If 星露谷 gets an update, tell me.",
+            message_timestamp=101,
+        ),
+    )
+    proposal = MemoryProposal(
+        operation="revise",
+        item_id="missing",
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.accepted == ()
+
+
+def test_direct_affirmative_recurring_topic_remains_active(cfg: BridgeConfig) -> None:
+    source_row = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷",
+        message_timestamp=100,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        source_kind="self_statement",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source_row,), (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "add"
+    assert result.accepted[0].status == "active"
+
+
 @pytest.mark.parametrize(
     ("content", "source_text"),
     [

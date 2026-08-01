@@ -738,25 +738,31 @@ class MemoryValidator:
                 if not explicit_item_confirmation and not owner_supports_content:
                     return None, "owner_confirmation_required"
         elif cited_sources is not None and evidence_content is not None:
-            matching_sources = tuple(
-                source
-                for source in cited_sources
-                if _content_supported_by_source(evidence_content, source.text)
+            repeated_topic_candidate = self._repeated_topic_candidate(
+                proposal, cited_sources
             )
-            if len(matching_sources) != len(cited_sources):
-                return None, "source_content_mismatch"
-            if not any(
-                _content_affirmatively_supported_by_source(
-                    evidence_content, source.text
+            if repeated_topic_candidate is not None:
+                proposal = repeated_topic_candidate
+            else:
+                matching_sources = tuple(
+                    source
+                    for source in cited_sources
+                    if _content_supported_by_source(evidence_content, source.text)
                 )
-                for source in matching_sources
-            ):
-                return None, "source_evidence_disallowed"
-            if _curator_proposal_can_activate(proposal) and not any(
-                _content_is_direct_assertion(evidence_content, source.text)
-                for source in matching_sources
-            ):
-                return None, "source_evidence_disallowed"
+                if len(matching_sources) != len(cited_sources):
+                    return None, "source_content_mismatch"
+                if not any(
+                    _content_affirmatively_supported_by_source(
+                        evidence_content, source.text
+                    )
+                    for source in matching_sources
+                ):
+                    return None, "source_evidence_disallowed"
+                if _curator_proposal_can_activate(proposal) and not any(
+                    _content_is_direct_assertion(evidence_content, source.text)
+                    for source in matching_sources
+                ):
+                    return None, "source_evidence_disallowed"
         reason = self._validate_subject(scope, evidence_sources, proposal, actor)
         if reason is not None:
             return None, reason
@@ -873,6 +879,24 @@ class MemoryValidator:
                 return (), "invalid_source_evidence"
             cited.append(source)
         return tuple(cited), None
+
+    @staticmethod
+    def _repeated_topic_candidate(
+        proposal: MemoryProposal, cited_sources: tuple[MemorySource, ...]
+    ) -> MemoryProposal | None:
+        if (
+            proposal.operation not in {"add", "mark_candidate"}
+            or proposal.category != "recurring_topic"
+            or proposal.content is None
+            or len(cited_sources) < 2
+            or len({source.id for source in cited_sources}) != len(cited_sources)
+            or not all(
+                _content_supported_by_source(proposal.content, source.text)
+                for source in cited_sources
+            )
+        ):
+            return None
+        return replace(proposal, operation="mark_candidate", status="candidate")
 
     @staticmethod
     def _validate_operation_shape(
