@@ -359,7 +359,10 @@ class CursorAdapter:
                 and metadata.st_uid not in {0, os.getuid()}
                 and (
                     component not in uid_mapped_prefixes
-                    or not self._runtime_is_read_only_mount(component)
+                    or not (
+                        self._runtime_is_read_only_mount(component)
+                        or self._runtime_is_unmapped_system_owner(metadata.st_uid)
+                    )
                 )
             ):
                 raise ValueError("hardened cursor runtime is not trusted")
@@ -384,6 +387,35 @@ class CursorAdapter:
 
     def _runtime_is_read_only_mount(self, path: Path) -> bool:
         return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+
+    def _runtime_is_unmapped_system_owner(self, owner: int) -> bool:
+        return (
+            self._runtime_has_single_user_uid_map()
+            and owner == self._runtime_overflow_uid()
+        )
+
+    def _runtime_has_single_user_uid_map(self) -> bool:
+        try:
+            rows = [
+                tuple(int(value) for value in line.split())
+                for line in Path("/proc/self/uid_map").read_text(
+                    encoding="ascii"
+                ).splitlines()
+                if line.strip()
+            ]
+        except (OSError, UnicodeError, ValueError):
+            return False
+        return len(rows) == 1 and rows[0][0] == os.getuid() and rows[0][2] == 1
+
+    def _runtime_overflow_uid(self) -> int:
+        try:
+            return int(
+                Path("/proc/sys/kernel/overflowuid")
+                .read_text(encoding="ascii")
+                .strip()
+            )
+        except (OSError, UnicodeError, ValueError):
+            return -1
 
     def _runtime_lstat(self, path: Path) -> os.stat_result:
         return path.lstat()
