@@ -4,22 +4,30 @@
 
 Implemented the validator, coordinator, and dead-code fixes. Commit `430350c`
 uses the message `fix: preserve rejected memory evidence`; this report also
-includes the subsequent local-clause classifier follow-up.
+includes commit `5e6cfdd` and the final fail-closed provenance follow-up, which
+supersedes that commit's local lexical classifier.
 
 ## P1 A: question and task evidence
 
-The validator now classifies question/task evidence at the source-aware evidence
+The validator now classifies command evidence at the source-aware evidence
 boundary, before general affirmative support can create or downgrade a memory.
 
 - `plan` and `task` command provenance is always non-affirmative.
-- `ask` remains an interaction mode; its local text clause is checked for
-  question and request syntax, including bounded unpunctuated Chinese markers.
-- A bounded 120-character local-clause scan checks each exact normalized content
-  occurrence. Commas and sentence punctuation terminate the clause, and matched
-  quoted/literal spans are masked before boundaries or markers are inspected.
-- A source is non-affirmative `ask` evidence only when every admissible exact
-  occurrence is in a question/request clause. A later affirmative occurrence
-  still uses the normal evidence path.
+- `ask` provenance is non-affirmative by default. It can count as affirmative
+  only when the proposal is labeled `self_statement`, the proposed content is a
+  direct assertion from the cited source, and that content matches a small,
+  bounded first-person assertion grammar.
+- The positive grammar admits anchored forms such as `我喜欢...`, `我知道...`,
+  `我的...是...`, and the narrow suffix forms `...是我写的...` and
+  `...是我常用的...`. It rejects terminal question punctuation/particles,
+  `我怎么...`, and `我想知道...`, including when the model mislabels them.
+- The lexical question/request marker list and 120-character clause scanner were
+  removed. Quoted question-like text remains harmless inside an otherwise
+  proven direct assertion.
+- Ordinary non-command sources retain the existing affirmative evidence
+  behavior. Tests that are specifically about routed questions now model them
+  with `command_class="ask"`; ordinary affirmative comma/quoted-literal
+  compatibility tests remain ordinary chat.
 - Repeated non-affirmative evidence remains restricted to `recurring_topic`, at
   least two distinct exact-support citations, and normalized
   `mark_candidate`/`candidate` output under the existing provenance and safety
@@ -38,11 +46,15 @@ Red evidence:
 - Local-clause follow-up: `4 failed, 2 passed`; two unpunctuated `ask` probes
   were activated, repeated unpunctuated questions missed the recurring-topic
   gate, and a question in a later comma clause hid earlier affirmative support.
+- Final provenance follow-up: `8 failed, 9 passed`; `QQ机器人在哪安装`,
+  `星露谷好玩吗`, `帮忙做一份...`, first-person question forms, and a
+  question-particle form activated or bypassed recurring-topic normalization,
+  while both allowed suffix assertions were rejected.
 
 Green evidence:
 
-- Final focused adversarial validator set: `27 passed`.
-- Full validator/store modules: `543 passed`.
+- Final focused provenance set: `17 passed`.
+- Full validator/store modules: `553 passed`.
 
 ## P1 B: accepted-only source consumption
 
@@ -84,10 +96,13 @@ proof, overflow UID, path location, ownership, and permissions, not mount status
 
 ## Verification
 
-- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `543 passed`.
+- Combined bounded memory suite: `777 passed, 5 skipped`.
+- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `553 passed`.
 - `tests/test_memory_review.py tests/test_memory_e2e.py`: `46 passed, 5 skipped`.
 - `tests/test_cursor_adapter.py`: `89 passed`.
 - `tests/test_memory_commands.py`: `178 passed`.
+- Python compile checks and `git diff --check` passed. Ruff was not installed in
+  the available project virtual environment, so no Ruff result is claimed.
 
 The repository-wide suite was intentionally not used as the completion gate;
 the controller will run it. A started broad run was stopped at the user's

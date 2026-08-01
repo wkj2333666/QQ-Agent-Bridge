@@ -830,7 +830,7 @@ def test_evidence_binding_accepts_direct_assertion_with_trivial_punctuation(
 @pytest.mark.parametrize(
     ("source_text", "command_class"),
     [
-        ("星露谷怎么玩？", None),
+        ("星露谷怎么玩？", "ask"),
         ("给我做一份星露谷攻略", "task"),
     ],
     ids=["question", "task-command"],
@@ -877,6 +877,7 @@ def test_one_question_cannot_bypass_repeated_topic_source_count(
         sender_id="u1",
         text="星露谷怎么玩？",
         message_timestamp=100,
+        command_class="ask",
     )
     proposal = MemoryProposal.add(
         subject_kind="user",
@@ -927,16 +928,32 @@ def test_task_provenance_overrides_model_self_statement_label(
 
 
 @pytest.mark.parametrize(
-    "source_text",
+    ("source_text", "source_kind"),
     [
-        "怎么安装QQ机器人",
-        "给我做一份星露谷攻略",
+        ("怎么安装QQ机器人", "inferred"),
+        ("QQ机器人在哪安装", "self_statement"),
+        ("星露谷好玩吗", "self_statement"),
+        ("帮忙做一份星露谷攻略", "self_statement"),
+        ("给我做一份星露谷攻略", "inferred"),
+        ("我怎么安装QQ机器人", "self_statement"),
+        ("我想知道QQ机器人在哪安装", "self_statement"),
+        ("我会安装QQ机器人吗", "self_statement"),
     ],
-    ids=["unpunctuated-question", "unpunctuated-request"],
+    ids=[
+        "how-question",
+        "where-question-mislabeled",
+        "question-particle-mislabeled",
+        "help-request-mislabeled",
+        "make-request",
+        "first-person-question-mislabeled",
+        "want-to-know-mislabeled",
+        "positive-prefix-question-mislabeled",
+    ],
 )
-def test_unpunctuated_ask_evidence_cannot_create_active_preference(
+def test_ask_evidence_without_direct_self_assertion_cannot_create_preference(
     cfg: BridgeConfig,
     source_text: str,
+    source_kind: str,
 ) -> None:
     evidence = MemorySource(
         id=41,
@@ -954,7 +971,7 @@ def test_unpunctuated_ask_evidence_cannot_create_active_preference(
         content=source_text,
         confidence=0.9,
         status="active",
-        source_kind="inferred",
+        source_kind=source_kind,
         source_ids=(41,),
         evidence_required=True,
     )
@@ -974,7 +991,7 @@ def test_repeated_unpunctuated_ask_questions_use_recurring_topic_gate(
             scope=GROUP,
             message_id="m41",
             sender_id="u1",
-            text="星露谷怎么玩",
+            text="星露谷哪里好玩",
             message_timestamp=100,
             command_class="ask",
         ),
@@ -983,7 +1000,7 @@ def test_repeated_unpunctuated_ask_questions_use_recurring_topic_gate(
             scope=GROUP,
             message_id="m42",
             sender_id="u1",
-            text="星露谷有什么技巧",
+            text="星露谷哪里最好玩",
             message_timestamp=101,
             command_class="ask",
         ),
@@ -1007,7 +1024,7 @@ def test_repeated_unpunctuated_ask_questions_use_recurring_topic_gate(
     assert result.accepted[0].status == "candidate"
 
 
-def test_question_in_later_comma_clause_does_not_hide_affirmative_support(
+def test_question_in_later_comma_clause_does_not_hide_ordinary_affirmative_support(
     cfg: BridgeConfig,
 ) -> None:
     evidence = MemorySource(
@@ -1017,7 +1034,7 @@ def test_question_in_later_comma_clause_does_not_hide_affirmative_support(
         sender_id="u1",
         text="星露谷很好玩，你玩过吗？",
         message_timestamp=100,
-        command_class="ask",
+        command_class=None,
     )
     proposal = MemoryProposal.add(
         subject_kind="user",
@@ -1081,7 +1098,58 @@ def test_ask_mode_direct_assertions_with_markers_remain_active(
     assert result.accepted[0].status == "active"
 
 
-def test_ask_marker_inside_literal_does_not_hide_candidate_support(
+@pytest.mark.parametrize(
+    "content",
+    [
+        "怎么安装QQ机器人是我写的教程",
+        "什么值得买是我常用的网站",
+    ],
+    ids=["written-by-me", "commonly-used-by-me"],
+)
+@pytest.mark.parametrize(
+    ("source_kind", "accepted"),
+    [("self_statement", True), ("inferred", False)],
+    ids=["self-statement", "model-inferred"],
+)
+def test_ask_suffix_assertions_require_self_statement_provenance(
+    cfg: BridgeConfig,
+    content: str,
+    source_kind: str,
+    accepted: bool,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=content,
+        message_timestamp=100,
+        command_class="ask",
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content=content,
+        confidence=0.9,
+        status="active",
+        source_kind=source_kind,
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    if accepted:
+        assert result.rejected == ()
+        assert result.accepted[0].operation == "add"
+        assert result.accepted[0].status == "active"
+    else:
+        assert result.accepted == ()
+        assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+def test_ask_marker_inside_literal_does_not_hide_ordinary_candidate_support(
     cfg: BridgeConfig,
 ) -> None:
     content = "“怎么安装QQ机器人”是我收藏的标题"
@@ -1092,7 +1160,7 @@ def test_ask_marker_inside_literal_does_not_hide_candidate_support(
         sender_id="u1",
         text=content,
         message_timestamp=100,
-        command_class="ask",
+        command_class=None,
     )
     proposal = MemoryProposal.add(
         subject_kind="user",
@@ -1124,6 +1192,7 @@ def test_repeated_questions_use_only_recurring_topic_candidate_gate(
             sender_id="u1",
             text="星露谷怎么玩？",
             message_timestamp=100,
+            command_class="ask",
         ),
         MemorySource(
             id=42,
@@ -1132,6 +1201,7 @@ def test_repeated_questions_use_only_recurring_topic_candidate_gate(
             sender_id="u1",
             text="星露谷有什么玩法？",
             message_timestamp=101,
+            command_class="ask",
         ),
     )
     proposal = MemoryProposal.add(

@@ -204,7 +204,7 @@ def test_e2e_memory_full_pipeline_ci(tmp_path: Path) -> None:
                             "subject_kind": "user",
                             "subject_id": "owner",
                             "category": "preference",
-                            "content": "喜欢简洁回答",
+                            "content": "我喜欢简洁回答",
                             "confidence": 0.91,
                             "status": "active",
                             "sensitivity": "normal",

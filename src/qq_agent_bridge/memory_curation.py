@@ -726,8 +726,8 @@ class MemoryValidator:
                 )
                 owner_supports_content = actor is not None and any(
                     source.sender_id == actor.id
-                    and _source_affirmatively_supports_content(
-                        evidence_content, source
+                    and _source_affirmatively_supports_proposal(
+                        evidence_content, source, proposal
                     )
                     and (
                         not _curator_proposal_can_activate(proposal)
@@ -752,8 +752,8 @@ class MemoryValidator:
                 if len(matching_sources) != len(cited_sources):
                     return None, "source_content_mismatch"
                 if not any(
-                    _source_affirmatively_supports_content(
-                        evidence_content, source
+                    _source_affirmatively_supports_proposal(
+                        evidence_content, source, proposal
                     )
                     for source in matching_sources
                 ):
@@ -897,8 +897,8 @@ class MemoryValidator:
                 for source in cited_sources
             )
             or any(
-                _source_affirmatively_supports_content(
-                    proposal.content, source
+                _source_affirmatively_supports_proposal(
+                    proposal.content, source, proposal
                 )
                 for source in cited_sources
             )
@@ -1240,8 +1240,8 @@ class MemoryValidator:
                 and proposal.content is not None
                 and not any(
                     source.sender_id == actor.id
-                    and _source_affirmatively_supports_content(
-                        proposal.content, source
+                    and _source_affirmatively_supports_proposal(
+                        proposal.content, source, proposal
                     )
                     for source in sources
                 )
@@ -1433,103 +1433,38 @@ def _content_affirmatively_supported_by_source(content: str, source_text: str) -
     return False
 
 
-def _source_affirmatively_supports_content(
+def _source_affirmatively_supports_proposal(
     content: str,
     source: MemorySource,
+    proposal: MemoryProposal,
 ) -> bool:
-    if _source_is_question_or_task_evidence(content, source):
+    if source.command_class in {"plan", "task"}:
         return False
+    if source.command_class == "ask":
+        return bool(
+            proposal.source_kind == "self_statement"
+            and _content_is_direct_assertion(content, source.text)
+            and _is_direct_first_person_self_assertion(content)
+        )
     return _content_affirmatively_supported_by_source(content, source.text)
 
 
-def _source_is_question_or_task_evidence(
-    content: str, source: MemorySource
-) -> bool:
-    if source.command_class in {"plan", "task"}:
-        return True
-    proposed = _evidence_normal_form(content)
-    normalized_source, compact_source, positions = _evidence_source_map(source.text)
-    if not proposed:
+def _is_direct_first_person_self_assertion(content: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", _normalize_text(content)).casefold()
+    compact = re.sub(r"\s+", "", normalized).strip()
+    if not compact or len(compact) > 160 or compact.endswith(("?", "？")):
         return False
-    question_occurrence = False
-    offset = compact_source.find(proposed)
-    while offset >= 0:
-        start = positions[offset]
-        end = positions[offset + len(proposed) - 1] + 1
-        if not _evidence_occurrence_disallowed(normalized_source, start, end):
-            if not _evidence_occurrence_is_question_or_request(
-                normalized_source,
-                start,
-                end,
-                detect_unpunctuated=source.command_class == "ask",
-            ):
-                return False
-            question_occurrence = True
-        offset = compact_source.find(proposed, offset + 1)
-    return question_occurrence
-
-
-def _evidence_occurrence_is_question_or_request(
-    source: str,
-    start: int,
-    end: int,
-    *,
-    detect_unpunctuated: bool,
-) -> bool:
-    unquoted = list(source)
-    for pattern in (
-        r'"[^"\n]*"',
-        r"'[^'\n]*'",
-        r"“[^”\n]*”",
-        r"‘[^’\n]*’",
-        r"「[^」\n]*」",
-        r"『[^』\n]*』",
-        r"《[^》\n]*》",
-        r"`[^`\n]*`",
-    ):
-        for match in re.finditer(pattern, source):
-            unquoted[match.start() : match.end()] = " " * len(match.group())
-    visible = "".join(unquoted)
-
-    boundaries = ",，、;；:：.。!！?？\n"
-    window_start = max(0, start - 120)
-    window_end = min(len(visible), end + 120)
-    clause_start = max(
-        (visible.rfind(boundary, window_start, start) for boundary in boundaries),
-        default=-1,
-    ) + 1
-    clause_end = window_end
-    terminal = ""
-    for index in range(end, window_end):
-        if visible[index] in boundaries:
-            clause_end = index
-            terminal = visible[index]
-            break
-    if terminal and terminal in "?？":
-        return True
-    if not detect_unpunctuated:
+    statement = compact.rstrip(".。!！")
+    if not statement or statement.endswith(("吗", "么", "呢")):
         return False
-
-    clause = re.sub(r"\s+", "", visible[clause_start:clause_end])
-    suffix = re.sub(r"\s+", "", visible[end:clause_end])
-    question_at_start = re.match(
-        r"^(?:请问|问一下|想问(?:一下)?|我想(?:问|知道|了解)|"
-        r"怎么|如何|为什么|为何|是否|能否|可否|有没有|"
-        r"哪里|哪(?:个|些|种)?|谁|什么|多少|何时)",
-        clause,
+    return bool(
+        re.fullmatch(
+            r"(?:我|我们)(?:是|叫|喜欢|爱|用|常用|知道|会|负责).{1,140}",
+            statement,
+        )
+        or re.fullmatch(r"(?:我的|我们的).{1,80}是.{1,80}", statement)
+        or re.fullmatch(r".{1,120}是我(?:写|常用)的.{0,32}", statement)
     )
-    request_at_start = re.match(
-        r"^(?:请|麻烦|劳驾|帮我|给我|替我|为我)"
-        r"(?:帮忙)?(?:做|写|查|找|看|安装|生成|整理|制作|创建|"
-        r"设计|分析|解释|告诉|推荐|列|改|修|处理|准备)",
-        clause,
-    )
-    question_after_content = re.match(
-        r"^(?:怎么|如何|为什么|为何|是否|能否|可否|有没有|"
-        r"有(?:什么|哪些)|吗|么|呢)",
-        suffix,
-    )
-    return bool(question_at_start or request_at_start or question_after_content)
 
 
 def _curator_proposal_can_activate(proposal: MemoryProposal) -> bool:
