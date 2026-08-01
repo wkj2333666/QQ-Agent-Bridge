@@ -194,7 +194,7 @@ def test_long_term_memory_scopes_are_disabled_by_default() -> None:
     assert cfg.long_term_memory.review.raw_ttl_seconds == 604_800
     assert cfg.long_term_memory.review.max_concurrent == 1
     assert cfg.long_term_memory.review.model == "auto"
-    assert cfg.long_term_memory.review.timeout_seconds == 90
+    assert cfg.long_term_memory.review.timeout_seconds == 300
     assert cfg.long_term_memory.review.max_attempts == 3
     assert cfg.long_term_memory.retrieval.max_items == 12
     assert cfg.long_term_memory.retrieval.max_chars == 1_500
@@ -254,7 +254,7 @@ long_term_memory:
     assert memory.review.raw_ttl_seconds == 60
     assert memory.review.max_concurrent == 1
     assert memory.review.model == "composer"
-    assert memory.review.timeout_seconds == 90
+    assert memory.review.timeout_seconds == 300
     assert memory.review.max_attempts == 1
     assert memory.retrieval.max_items == 100
     assert memory.retrieval.max_chars == 1

@@ -89,7 +89,7 @@ class MemoryReviewConfig:
     raw_ttl_seconds: int = 604_800
     max_concurrent: int = 1
     model: str = "auto"
-    timeout_seconds: int = 90
+    timeout_seconds: int = 300
     max_attempts: int = 3
 
 
@@ -489,7 +489,7 @@ def _load_long_term_memory(raw: Any) -> LongTermMemoryConfig:
             ),
             model=_nonempty_string(review_values.get("model"), "auto"),
             timeout_seconds=_bounded_int(
-                review_values.get("timeout_seconds"), 90, 1, 3_600
+                review_values.get("timeout_seconds"), 300, 1, 3_600
             ),
             max_attempts=_bounded_int(
                 review_values.get("max_attempts"), 3, 1, 20

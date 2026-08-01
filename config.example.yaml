@@ -79,7 +79,7 @@ long_term_memory:
     raw_ttl_seconds: 604800
     max_concurrent: 1
     model: "auto"
-    timeout_seconds: 90
+    timeout_seconds: 300
     max_attempts: 3
   retrieval:
     max_items: 12
