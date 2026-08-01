@@ -865,6 +865,63 @@ def test_hardened_runtime_accepts_unmapped_system_prefix_in_single_user_namespac
     )
 
 
+def test_hardened_runtime_rejects_arbitrary_foreign_owner_on_read_only_mapped_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "mapped/runtime")
+    adapter = _hardened_adapter(binary, tmp_path)
+    mapped_prefix = runtime.parent
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(adapter, "_uid_mapped_system_prefixes", lambda _path: {mapped_prefix})
+
+    def fake_lstat(path: Path) -> SimpleNamespace:
+        owner = 424242 if path == mapped_prefix else os.getuid()
+        return _trusted_runtime_stat(path, owner=owner)
+
+    monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
+    monkeypatch.setattr(adapter, "_runtime_is_read_only_mount", lambda _path: True)
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_hardened_runtime_rejects_overflow_owner_without_uid_map_proof_on_read_only_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "mapped/runtime")
+    adapter = _hardened_adapter(binary, tmp_path)
+    mapped_prefix = runtime.parent
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+    monkeypatch.setattr(adapter, "_uid_mapped_system_prefixes", lambda _path: {mapped_prefix})
+
+    def fake_lstat(path: Path) -> SimpleNamespace:
+        owner = 65534 if path == mapped_prefix else os.getuid()
+        return _trusted_runtime_stat(path, owner=owner)
+
+    monkeypatch.setattr(adapter, "_runtime_lstat", fake_lstat)
+    monkeypatch.setattr(adapter, "_runtime_is_read_only_mount", lambda _path: True)
+    monkeypatch.setattr(adapter, "_runtime_has_single_user_uid_map", lambda: False)
+    monkeypatch.setattr(adapter, "_runtime_overflow_uid", lambda: 65534)
+
+    with pytest.raises(ValueError, match="not trusted"):
+        adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_runtime_uid_map_rejects_malformed_mapping_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CursorAdapter(BridgeConfig(workspaces={"/workspace": True}))
+    monkeypatch.setattr(
+        type(Path("/")),
+        "read_text",
+        lambda _path, **_kwargs: f"{os.getuid()} 1000 1 7\n",
+    )
+
+    assert not adapter._runtime_has_single_user_uid_map()  # noqa: SLF001
+
+
 def test_hardened_runtime_rejects_symlinked_required_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -359,10 +359,7 @@ class CursorAdapter:
                 and metadata.st_uid not in {0, os.getuid()}
                 and (
                     component not in uid_mapped_prefixes
-                    or not (
-                        self._runtime_is_read_only_mount(component)
-                        or self._runtime_is_unmapped_system_owner(metadata.st_uid)
-                    )
+                    or not self._runtime_is_unmapped_system_owner(metadata.st_uid)
                 )
             ):
                 raise ValueError("hardened cursor runtime is not trusted")
@@ -405,7 +402,12 @@ class CursorAdapter:
             ]
         except (OSError, UnicodeError, ValueError):
             return False
-        return len(rows) == 1 and rows[0][0] == os.getuid() and rows[0][2] == 1
+        return (
+            len(rows) == 1
+            and len(rows[0]) == 3
+            and rows[0][0] == os.getuid()
+            and rows[0][2] == 1
+        )
 
     def _runtime_overflow_uid(self) -> int:
         try:
