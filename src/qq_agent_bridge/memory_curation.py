@@ -888,10 +888,18 @@ class MemoryValidator:
             proposal.operation not in {"add", "mark_candidate"}
             or proposal.category != "recurring_topic"
             or proposal.content is None
+            or proposal.sensitivity != "normal"
             or len(cited_sources) < 2
             or len({source.id for source in cited_sources}) != len(cited_sources)
+            or not _repeated_topic_sources_match_subject(proposal, cited_sources)
             or not all(
                 _content_supported_by_source(proposal.content, source.text)
+                for source in cited_sources
+            )
+            or any(
+                _content_affirmatively_supported_by_source(
+                    proposal.content, source.text
+                )
                 for source in cited_sources
             )
         ):
@@ -1394,6 +1402,20 @@ def _content_supported_by_source(content: str, source_text: str) -> bool:
     proposed = _evidence_normal_form(content)
     source = _evidence_normal_form(source_text)
     return bool(proposed and proposed in source)
+
+
+def _repeated_topic_sources_match_subject(
+    proposal: MemoryProposal, sources: tuple[MemorySource, ...]
+) -> bool:
+    subject_id = str(proposal.subject_id or "")
+    if proposal.subject_kind == "user":
+        return bool(subject_id) and all(source.sender_id == subject_id for source in sources)
+    if proposal.subject_kind == "group":
+        return bool(subject_id) and all(
+            source.scope.kind == "group" and source.scope.id == subject_id
+            for source in sources
+        )
+    return False
 
 
 def _content_affirmatively_supported_by_source(content: str, source_text: str) -> bool:
