@@ -1500,10 +1500,10 @@ def _ordinary_source_is_nonaffirmative(source_text: str) -> bool:
     tail = re.sub(r"\s+", "", normalized[-32:]).strip()
     if not head:
         return False
-    if tail.endswith(("?", "？")):
-        return True
-    statement_tail = tail.rstrip(".。!！")
-    if statement_tail.endswith(("吗", "么", "呢", "吧", "嘛")):
+    exposed_tail = tail.rstrip(".。!！")
+    if exposed_tail.endswith(
+        ("?", "？", "吗", "么", "呢", "吧", "嘛")
+    ):
         return True
     if head.startswith(("请问", "帮忙", "帮我", "给我", "麻烦", "我想知道")):
         return True

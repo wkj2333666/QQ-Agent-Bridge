@@ -33,7 +33,10 @@ boundary, before general affirmative support can create or downgrade a memory.
   request prefixes. The exact old `command_class=None` fixture
   `星露谷怎么玩？` is again rejected as a one-source preference candidate;
   ordinary quoted-question content remains affirmative when the whole message
-  itself is an assertion.
+  itself is an assertion. Terminal normalization strips only bounded trailing
+  `.。!！` punctuation before checking the exposed tail, so compound sequences
+  such as `？！`, `?!`, `!?`, repeated mixes, and particles followed by
+  punctuation remain non-affirmative without losing the question mark.
 - Repeated non-affirmative evidence remains restricted to `recurring_topic`, at
   least two distinct exact-support citations, and normalized
   `mark_candidate`/`candidate` output under the existing provenance and safety
@@ -61,11 +64,16 @@ Red evidence:
   disguises activated ask proposals, mixed `plan`/`task` citations became
   recurring candidates, and ordinary terminal/particle/A-not-A/request evidence
   bypassed the one-source restriction or missed recurring normalization.
+- Compound-terminal follow-up: `5 failed, 7 passed`; question sequences ending
+  in exclamation punctuation bypassed the ordinary guard, while direct `!?`,
+  particle-plus-punctuation cases, and the exclamation-only control already
+  behaved correctly.
 
 Green evidence:
 
 - Final focused review set: `34 passed`.
-- Full validator/store modules: `576 passed`.
+- Final focused compound-terminal set: `12 passed`.
+- Full validator/store modules: `588 passed`.
 
 ## P1 B: accepted-only source consumption
 
@@ -107,8 +115,8 @@ proof, overflow UID, path location, ownership, and permissions, not mount status
 
 ## Verification
 
-- Combined bounded memory suite: `800 passed, 5 skipped`.
-- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `576 passed`.
+- Combined bounded memory and cursor suite: `901 passed, 5 skipped`.
+- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `588 passed`.
 - `tests/test_memory_review.py tests/test_memory_e2e.py`: `46 passed, 5 skipped`.
 - `tests/test_cursor_adapter.py`: `89 passed`.
 - `tests/test_memory_commands.py`: `178 passed`.

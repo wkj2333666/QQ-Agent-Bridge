@@ -907,6 +907,97 @@ def test_ordinary_question_or_request_cannot_create_wrong_category_candidate(
     assert result.rejected[0].reason == "source_evidence_disallowed"
 
 
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "星露谷怎么玩？！",
+        "星露谷怎么玩？!",
+        "星露谷怎么玩?!",
+        "星露谷怎么玩!?",
+        "星露谷怎么玩？！?!！！",
+        "星露谷怎么玩!?!！",
+        "星露谷好玩吗！",
+        "星露谷好玩么!",
+        "星露谷好玩呢。",
+        "星露谷好玩吧！！",
+        "星露谷好玩嘛...",
+    ],
+    ids=[
+        "cjk-question-cjk-exclamation",
+        "cjk-question-ascii-exclamation",
+        "ascii-question-exclamation",
+        "ascii-exclamation-question",
+        "repeated-cjk-ascii-mix",
+        "repeated-exclamation-question-mix",
+        "ma-then-exclamation",
+        "me-then-exclamation",
+        "ne-then-period",
+        "ba-then-repeated-exclamation",
+        "ma-emphatic-then-periods",
+    ],
+)
+def test_ordinary_compound_terminal_questions_are_non_affirmative(
+    cfg: BridgeConfig,
+    source_text: str,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text=source_text,
+        message_timestamp=100,
+        command_class=None,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.6,
+        status="candidate",
+        source_kind="inferred",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+def test_ordinary_exclamation_only_statement_remains_affirmative(
+    cfg: BridgeConfig,
+) -> None:
+    evidence = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷很好玩！！",
+        message_timestamp=100,
+        command_class=None,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
+        content="星露谷",
+        confidence=0.6,
+        status="candidate",
+        source_kind="self_statement",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (evidence,), (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+
+
 def test_one_question_cannot_bypass_repeated_topic_source_count(
     cfg: BridgeConfig,
 ) -> None:
