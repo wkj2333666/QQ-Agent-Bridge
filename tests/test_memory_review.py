@@ -222,6 +222,9 @@ def test_curator_uses_bounded_json_only_ask_contract(
         assert "|merge|" not in call.prompt
         assert "Never propose hard deletion" in call.prompt
         assert "every cited source" in call.prompt
+        assert "SOURCE COVERAGE" not in call.prompt
+        assert "Every source that you review must appear" not in call.prompt
+        assert "Source coverage is more important" not in call.prompt
         assert "Inspect every source in the batch" in call.prompt
         assert "omit irrelevant source IDs" in call.prompt
         assert "Repeated non-affirmative questions or tasks" in call.prompt
@@ -299,6 +302,8 @@ def test_curator_logs_sorted_rejection_reason_counts_without_content(
     """Rejected proposals expose only deterministic reason-count metadata."""
     sensitive_source_text = "SENSITIVE-SOURCE-TEXT: 星露谷怎么玩？"
     sensitive_sender_id = "SENSITIVE-SENDER-ID"
+    sensitive_message_id = "SENSITIVE-MESSAGE-ID"
+    proposal_source_id = 741852963
     proposed_content = "SENSITIVE-PROPOSED-CONTENT"
     agent = FakeAgent(
         json.dumps(
@@ -306,7 +311,7 @@ def test_curator_logs_sorted_rejection_reason_counts_without_content(
                 "operations": [
                     {
                         "operation": "add",
-                        "source_ids": [1],
+                        "source_ids": [proposal_source_id],
                         "subject_kind": "user",
                         "subject_id": sensitive_sender_id,
                         "category": "preference",
@@ -321,7 +326,7 @@ def test_curator_logs_sorted_rejection_reason_counts_without_content(
                     },
                     {
                         "operation": "add",
-                        "source_ids": [1],
+                        "source_ids": [proposal_source_id],
                         "subject_kind": "user",
                         "subject_id": sensitive_sender_id,
                         "category": "preference",
@@ -348,12 +353,12 @@ def test_curator_logs_sorted_rejection_reason_counts_without_content(
         )
         source_row = MemorySource(
             scope=GROUP,
-            message_id="sensitive-message-id",
+            message_id=sensitive_message_id,
             sender_id=sensitive_sender_id,
             text=sensitive_source_text,
             message_timestamp=100,
             direct_interaction=True,
-            id=1,
+            id=proposal_source_id,
         )
         with caplog.at_level(logging.INFO, logger="qq_agent_bridge.memory_review"):
             outcome = await curator.review(GROUP, (source_row,), ())
@@ -367,6 +372,8 @@ def test_curator_logs_sorted_rejection_reason_counts_without_content(
     assert "rejection_reasons=source_content_mismatch=1,source_evidence_disallowed=1" in rendered
     assert sensitive_source_text not in rendered
     assert sensitive_sender_id not in rendered
+    assert sensitive_message_id not in rendered
+    assert str(proposal_source_id) not in rendered
     assert proposed_content not in rendered
     assert "review-data.json" not in rendered
 

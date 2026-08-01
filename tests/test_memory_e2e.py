@@ -488,16 +488,47 @@ def test_real_recurring_topic_candidate(tmp_path: Path) -> None:
         outcome = asyncio.run(curator.review(scope, pending_sources, ()))
 
         assert outcome.error is None, f"real curator failed: {outcome.error}"
+        collected_source_ids = {
+            source_id for source_id in source_ids if source_id is not None
+        }
+        recurring_candidates = tuple(
+            proposal
+            for proposal in outcome.accepted
+            if proposal.category == "recurring_topic"
+            and proposal.operation == "mark_candidate"
+            and proposal.status == "candidate"
+        )
+        assert any(
+            proposal.content == "星露谷"
+            and len(set(proposal.source_ids)) >= 2
+            and set(proposal.source_ids) <= collected_source_ids
+            for proposal in recurring_candidates
+        ), (
+            "expected a normalized recurring-topic candidate with at least two "
+            f"collected citations; accepted={outcome.accepted}"
+        )
+        accepted_source_ids = {
+            source_id
+            for proposal in outcome.accepted
+            for source_id in proposal.source_ids
+        }
+        reviewed_source_ids = tuple(
+            source.id
+            for source in pending_sources
+            if source.id is not None and source.id in accepted_source_ids
+        )
         committed = store.commit_review(
             scope,
-            tuple(source_id for source_id in source_ids if source_id is not None),
+            reviewed_source_ids,
             outcome.accepted,
             trigger_class="explicit",
             proposed_count=outcome.proposed_count,
             rejected_count=len(outcome.rejected),
         )
         assert any(
-            item.category == "recurring_topic" and item.status == "candidate"
+            item.category == "recurring_topic"
+            and item.status == "candidate"
+            and item.content == "星露谷"
             for item in committed
         ), (
             "expected a recurring-topic candidate from repeated questions; "
@@ -505,7 +536,9 @@ def test_real_recurring_topic_candidate(tmp_path: Path) -> None:
         )
         items = store.list_items(scope, limit=100)
         assert any(
-            item.category == "recurring_topic" and item.status == "candidate"
+            item.category == "recurring_topic"
+            and item.status == "candidate"
+            and item.content == "星露谷"
             for item in items
         )
         assert not any(item.status == "active" for item in items)
