@@ -6,15 +6,17 @@ Implemented the validator, coordinator, and dead-code fixes. Commit `430350c`
 uses the message `fix: preserve rejected memory evidence`; this report also
 includes commit `5e6cfdd` and the final fail-closed provenance follow-up, which
 supersedes that commit's local lexical classifier. The latest review follow-up
-also restores the ordinary-chat question guard and tightens recurring-topic
-provenance.
+also restores the ordinary-chat question guard. A subsequent production check
+identified and corrected an over-constraint in recurring-topic provenance.
 
 ## P1 A: question and task evidence
 
 The validator now classifies command evidence at the source-aware evidence
 boundary, before general affirmative support can create or downgrade a memory.
 
-- `plan` and `task` command provenance is always non-affirmative.
+- `plan` and `task` command provenance is always non-affirmative, so it cannot
+  create active or wrong-category memory. That same non-affirmative evidence
+  may still use the narrow repeated-topic candidate exception.
 - `ask` provenance is non-affirmative by default. It can count as affirmative
   only when the proposal is labeled `self_statement`, the proposed content is a
   direct assertion from the cited source, and that content matches a small,
@@ -40,8 +42,9 @@ boundary, before general affirmative support can create or downgrade a memory.
 - Repeated non-affirmative evidence remains restricted to `recurring_topic`, at
   least two distinct exact-support citations, and normalized
   `mark_candidate`/`candidate` output under the existing provenance and safety
-  checks. Any cited `plan` or `task` source now disqualifies this path; repeated
-  `ask` and ordinary punctuated questions remain eligible.
+  checks. Repeated `ask`, `plan`, `task`, and ordinary non-affirmative sources
+  are eligible when every existing source-count, exact-support, same-subject,
+  sensitivity, and normalization constraint passes.
 
 Red evidence:
 
@@ -61,19 +64,28 @@ Red evidence:
   question-particle form activated or bypassed recurring-topic normalization,
   while both allowed suffix assertions were rejected.
 - Final review follow-up: `21 failed, 13 passed`; forbidden tokens and suffix
-  disguises activated ask proposals, mixed `plan`/`task` citations became
-  recurring candidates, and ordinary terminal/particle/A-not-A/request evidence
-  bypassed the one-source restriction or missed recurring normalization.
+  disguises activated ask proposals, and ordinary
+  terminal/particle/A-not-A/request evidence bypassed the one-source restriction
+  or missed recurring normalization. That follow-up also introduced the later
+  corrected `plan`/`task` candidate exclusion.
 - Compound-terminal follow-up: `5 failed, 7 passed`; question sequences ending
   in exclamation punctuation bypassed the ordinary guard, while direct `!?`,
   particle-plus-punctuation cases, and the exclamation-only control already
   behaved correctly.
+- Production verification showed the over-constraint directly: the hardened
+  curator produced six recurring-topic candidates, and the validator rejected
+  five because their cited evidence used task provenance. No source content or
+  identifiers are included here.
+- Recurring command-evidence correction: `2 failed, 4 passed`; repeated `plan`
+  and `task` topics were rejected while one-source and wrong-category controls
+  already remained closed.
 
 Green evidence:
 
 - Final focused review set: `34 passed`.
 - Final focused compound-terminal set: `12 passed`.
-- Full validator/store modules: `588 passed`.
+- Final focused recurring command-evidence set: `6 passed`.
+- Full validator/store modules: `592 passed`.
 
 ## P1 B: accepted-only source consumption
 
@@ -90,7 +102,7 @@ Red evidence:
 Green evidence:
 
 - Full review module: `45 passed`.
-- Review plus memory E2E modules: `46 passed, 5 skipped`.
+- Review plus memory E2E modules: `47 passed, 5 skipped`.
 - Mechanical failure, cancellation, and retry/backoff tests remain in the review
   suite and passed.
 
@@ -115,9 +127,9 @@ proof, overflow UID, path location, ownership, and permissions, not mount status
 
 ## Verification
 
-- Combined bounded memory and cursor suite: `901 passed, 5 skipped`.
-- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `588 passed`.
-- `tests/test_memory_review.py tests/test_memory_e2e.py`: `46 passed, 5 skipped`.
+- Combined bounded memory and cursor suite: `906 passed, 5 skipped`.
+- `tests/test_memory_curation.py tests/test_long_term_memory.py`: `592 passed`.
+- `tests/test_memory_review.py tests/test_memory_e2e.py`: `47 passed, 5 skipped`.
 - `tests/test_cursor_adapter.py`: `89 passed`.
 - `tests/test_memory_commands.py`: `178 passed`.
 - Python compile checks and `git diff --check` passed. Ruff was not installed in

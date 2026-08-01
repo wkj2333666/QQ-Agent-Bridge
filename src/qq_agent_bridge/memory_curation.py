@@ -891,10 +891,6 @@ class MemoryValidator:
             or proposal.sensitivity != "normal"
             or len(cited_sources) < 2
             or len({source.id for source in cited_sources}) != len(cited_sources)
-            or any(
-                source.command_class in {"plan", "task"}
-                for source in cited_sources
-            )
             or not _repeated_topic_sources_match_subject(proposal, cited_sources)
             or not all(
                 _content_supported_by_source(proposal.content, source.text)

@@ -1230,7 +1230,7 @@ def test_repeated_unpunctuated_ask_questions_use_recurring_topic_gate(
 
 
 @pytest.mark.parametrize("command_class", ["plan", "task"])
-def test_repeated_topic_candidate_rejects_plan_or_task_citation(
+def test_repeated_plan_or_task_topics_use_recurring_candidate_gate(
     cfg: BridgeConfig,
     command_class: str,
 ) -> None:
@@ -1240,9 +1240,9 @@ def test_repeated_topic_candidate_rejects_plan_or_task_citation(
             scope=GROUP,
             message_id="m41",
             sender_id="u1",
-            text="星露谷哪里好玩",
+            text="星露谷攻略",
             message_timestamp=100,
-            command_class="ask",
+            command_class=command_class,
         ),
         MemorySource(
             id=42,
@@ -1258,6 +1258,82 @@ def test_repeated_topic_candidate_rejects_plan_or_task_citation(
         subject_kind="user",
         subject_id="u1",
         category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        status="active",
+        source_kind="inferred",
+        source_ids=(41, 42),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, sources, (proposal,), actor=None)
+
+    assert result.rejected == ()
+    assert result.accepted[0].operation == "mark_candidate"
+    assert result.accepted[0].status == "candidate"
+
+
+@pytest.mark.parametrize("command_class", ["plan", "task"])
+def test_one_plan_or_task_topic_cannot_bypass_recurring_source_count(
+    cfg: BridgeConfig,
+    command_class: str,
+) -> None:
+    source = MemorySource(
+        id=41,
+        scope=GROUP,
+        message_id="m41",
+        sender_id="u1",
+        text="星露谷攻略",
+        message_timestamp=100,
+        command_class=command_class,
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="recurring_topic",
+        content="星露谷",
+        confidence=0.9,
+        status="active",
+        source_kind="inferred",
+        source_ids=(41,),
+        evidence_required=True,
+    )
+
+    result = MemoryValidator(cfg).validate(GROUP, (source,), (proposal,), actor=None)
+
+    assert result.accepted == ()
+    assert result.rejected[0].reason == "source_evidence_disallowed"
+
+
+@pytest.mark.parametrize("command_class", ["plan", "task"])
+def test_repeated_plan_or_task_topics_cannot_create_wrong_category(
+    cfg: BridgeConfig,
+    command_class: str,
+) -> None:
+    sources = (
+        MemorySource(
+            id=41,
+            scope=GROUP,
+            message_id="m41",
+            sender_id="u1",
+            text="星露谷攻略",
+            message_timestamp=100,
+            command_class=command_class,
+        ),
+        MemorySource(
+            id=42,
+            scope=GROUP,
+            message_id="m42",
+            sender_id="u1",
+            text="星露谷攻略",
+            message_timestamp=101,
+            command_class=command_class,
+        ),
+    )
+    proposal = MemoryProposal.add(
+        subject_kind="user",
+        subject_id="u1",
+        category="preference",
         content="星露谷",
         confidence=0.9,
         status="active",
