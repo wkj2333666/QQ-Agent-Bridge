@@ -378,10 +378,10 @@ def test_natural_language_send_drops_connector_before_message_body() -> None:
               "ambiguous": false,
               "kind": "rrule",
               "action": "send",
-              "payload": "@2000000003 并说示例用户我爱你",
-              "send_text": "示例用户我爱你",
+              "payload": "@2000000003 并说示例用户你好",
+              "send_text": "示例用户你好",
               "time_phrase": "每过1分钟",
-              "payload_phrase": "@2000000003 并说示例用户我爱你",
+              "payload_phrase": "@2000000003 并说示例用户你好",
               "dtstart_local": "2026-07-13T20:01",
               "rrule": "FREQ=MINUTELY",
               "clarification": ""
@@ -390,30 +390,30 @@ def test_natural_language_send_drops_connector_before_message_body() -> None:
         cfg = BridgeConfig()
         cfg.scheduler = scheduler_cfg()
         parser = NaturalLanguageScheduleParser(cfg, agent)
-        original = "每过1分钟就 @2000000003 并说示例用户我爱你"
+        original = "每过1分钟就 @2000000003 并说示例用户你好"
 
         outcome = await parser.parse(original, now=NOW, mentions=("2000000003",))
 
         assert outcome.spec is not None
         assert outcome.spec.action == "send"
         assert outcome.spec.mentions == ("2000000003",)
-        assert outcome.spec.payload == "示例用户我爱你"
+        assert outcome.spec.payload == "示例用户你好"
         assert "连接词" in agent.calls[0][0]
         assert '"send_text"' in agent.calls[0][0]
-        assert 'send_text="示例用户我爱你"' in agent.calls[0][0]
+        assert 'send_text="示例用户你好"' in agent.calls[0][0]
 
     asyncio.run(go())
 
 
 def test_explicit_send_preserves_message_that_starts_with_connector_words() -> None:
     spec = parse_explicit_schedule(
-        "every 1m forever -- send 并说示例用户我爱你",
+        "every 1m forever -- send 并说示例用户你好",
         scheduler_cfg(),
         now=NOW,
     )
 
     assert spec is not None
-    assert spec.payload == "并说示例用户我爱你"
+    assert spec.payload == "并说示例用户你好"
 
 
 def test_natural_language_send_preserves_literal_connector_words_in_content() -> None:
@@ -454,9 +454,9 @@ def test_natural_language_send_without_semantic_send_text_is_rejected() -> None:
               "ambiguous": false,
               "kind": "rrule",
               "action": "send",
-              "payload": "并说示例用户我爱你",
+              "payload": "并说示例用户你好",
               "time_phrase": "每过1分钟",
-              "payload_phrase": "并说示例用户我爱你",
+              "payload_phrase": "并说示例用户你好",
               "dtstart_local": "2026-07-13T20:01",
               "rrule": "FREQ=MINUTELY",
               "clarification": ""
@@ -466,7 +466,7 @@ def test_natural_language_send_without_semantic_send_text_is_rejected() -> None:
         cfg.scheduler = scheduler_cfg()
         parser = NaturalLanguageScheduleParser(cfg, agent)
 
-        outcome = await parser.parse("每过1分钟就并说示例用户我爱你", now=NOW)
+        outcome = await parser.parse("每过1分钟就并说示例用户你好", now=NOW)
 
         assert outcome.spec is None
         assert "没能可靠理解" in outcome.clarification

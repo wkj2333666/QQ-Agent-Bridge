@@ -410,7 +410,7 @@ def test_real_agent_schedule_separates_mention_connector_from_send_text(
     parser = NaturalLanguageScheduleParser(cfg, ReadOnlyE2EAdapter())
     outcome = asyncio.run(
         parser.parse(
-            "每过1分钟就 @2000000003 并说示例用户我爱你",
+            "每过1分钟就 @2000000003 并说示例用户你好",
             now=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
             mentions=("2000000003",),
         )
@@ -419,7 +419,7 @@ def test_real_agent_schedule_separates_mention_connector_from_send_text(
     assert outcome.spec is not None, outcome.clarification
     assert outcome.spec.action == "send"
     assert outcome.spec.mentions == ("2000000003",)
-    assert outcome.spec.payload == "示例用户我爱你"
+    assert outcome.spec.payload == "示例用户你好"
 
 
 def test_real_agent_can_return_a_fixed_token(tmp_path: Path) -> None:

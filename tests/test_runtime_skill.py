@@ -243,7 +243,7 @@ def test_schedule_interpreter_skill_loads_only_scheduling_reference() -> None:
 
     assert '<skill name="qq-agent-runtime:scheduling">' in skill
     assert "send_text" in skill
-    assert "并说示例用户我爱你" in skill
+    assert "并说示例用户你好" in skill
     assert "并说这两个字很好玩" in skill
     assert "web-search.md" not in skill
 
