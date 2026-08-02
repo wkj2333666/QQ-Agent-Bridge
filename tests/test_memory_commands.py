@@ -11,6 +11,7 @@ import qq_agent_bridge.memory_commands as memory_commands_module
 from qq_agent_bridge.config import BridgeConfig
 from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
 from qq_agent_bridge.long_term_memory_models import (
+    AgentMemoryProposal,
     MemoryProposal,
     MemoryScope,
     MemorySource,
@@ -199,6 +200,26 @@ def test_page_index_is_bound_to_visible_list_snapshot(tmp_path: Path) -> None:
 
     assert "visible" in shown.text
     assert "先使用 /memory list" in attack.text
+
+
+def test_owner_can_list_and_forget_agent_work_memory(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    db.set_scope_enabled(GROUP, True)
+    item = db.commit_agent_memories(
+        GROUP,
+        job_id="work-job",
+        schedule_id=None,
+        subject=("group", GROUP.id),
+        proposals=(AgentMemoryProposal("add", "任务已完成第一阶段"),),
+    ).items[0]
+    service = MemoryCommandService(config(), db)
+
+    listed = run(service.handle(event("owner"), "list group"))
+    forgotten = run(service.handle(event("owner"), "forget 1"))
+
+    assert item.short_id in listed.text
+    assert "已忘记" in forgotten.text
+    assert db.get_item(GROUP, item.id) is None
 
 
 def test_clear_token_expires_and_cannot_be_replayed(tmp_path: Path) -> None:

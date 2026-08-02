@@ -17,6 +17,8 @@ import uuid
 from .config import LongTermMemoryConfig, MemoryRetrievalConfig
 from .long_term_memory_models import (
     ACTIVE_CONFIDENCE_THRESHOLD,
+    AgentMemoryCommitResult,
+    AgentMemoryProposal,
     ALLOWED_CATEGORIES,
     ALLOWED_OPERATIONS,
     ALLOWED_STATUSES,
@@ -34,6 +36,10 @@ from .long_term_memory_schema import SCHEMA_VERSION, migrate
 
 
 _SENSITIVITY_PRIORITY = {"normal": 0, "sensitive": 1, "secret": 2}
+
+
+class AgentMemoryCommitError(ValueError):
+    pass
 
 
 def _maximum_sensitivity(current: object, proposed: object | None) -> str:
@@ -381,6 +387,7 @@ class LongTermMemoryStore:
         subject_kind: str | None = None,
         subject_id: str | None = None,
         statuses: Iterable[str] | None = None,
+        exclude_source_kinds: Iterable[str] | None = None,
         include_expired: bool = False,
         now: int | None = None,
         limit: int = 100,
@@ -399,6 +406,15 @@ class LongTermMemoryStore:
                 return ()
             clauses.append(f"status IN ({','.join('?' for _ in normalized)})")
             params.extend(normalized)
+        if exclude_source_kinds is not None:
+            excluded = tuple(
+                dict.fromkeys(str(value) for value in exclude_source_kinds)
+            )
+            if excluded:
+                clauses.append(
+                    f"source_kind NOT IN ({','.join('?' for _ in excluded)})"
+                )
+                params.extend(excluded)
         if not include_expired:
             current = int(time.time()) if now is None else int(now)
             clauses.append("(expires_at IS NULL OR expires_at > ?)")
@@ -414,6 +430,274 @@ class LongTermMemoryStore:
             params,
         ).fetchall()
         return tuple(self._item(row) for row in rows)
+
+    def export_agent_memories(
+        self,
+        scope: MemoryScope,
+        *,
+        authorized_subjects: tuple[tuple[str, str], ...],
+        schedule_id: str | None,
+        limit: int,
+        max_chars: int,
+    ) -> tuple[MemoryItem, ...]:
+        del schedule_id
+        subjects = tuple(
+            dict.fromkeys(
+                (str(kind).strip(), str(subject_id).strip())
+                for kind, subject_id in authorized_subjects
+                if str(kind).strip() and str(subject_id).strip()
+            )
+        )
+        if not subjects or not self.is_scope_enabled(scope):
+            return ()
+        subject_clause = " OR ".join(
+            "(subject_kind = ? AND subject_id = ?)" for _ in subjects
+        )
+        params: list[object] = [scope.kind, scope.id, int(time.time())]
+        for kind, subject_id in subjects:
+            params.extend((kind, subject_id))
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM memory_items
+            WHERE scope_kind = ? AND scope_id = ?
+              AND status = 'active'
+              AND (expires_at IS NULL OR expires_at > ?)
+              AND ({subject_clause})
+            ORDER BY CASE WHEN source_kind = 'agent_work' THEN 0 ELSE 1 END,
+                     effective_score DESC, updated_at DESC, id
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        result: list[MemoryItem] = []
+        used = 0
+        char_limit = max(1, int(max_chars))
+        for row in rows:
+            item = self._item(row)
+            size = len(item.content)
+            if used + size > char_limit:
+                continue
+            result.append(item)
+            used += size
+        return tuple(result)
+
+    def commit_agent_memories(
+        self,
+        scope: MemoryScope,
+        *,
+        job_id: str,
+        schedule_id: str | None,
+        subject: tuple[str, str],
+        proposals: tuple[AgentMemoryProposal, ...],
+    ) -> AgentMemoryCommitResult:
+        normalized_job_id = str(job_id).strip()
+        if not normalized_job_id:
+            raise AgentMemoryCommitError("job id is required")
+        normalized_schedule_id = str(schedule_id).strip() if schedule_id else None
+        expected_subject = (
+            ("group", scope.id) if scope.kind == "group" else ("user", scope.id)
+        )
+        normalized_subject = (str(subject[0]).strip(), str(subject[1]).strip())
+        if normalized_subject != expected_subject:
+            raise AgentMemoryCommitError("agent work subject is not authorized")
+        normalized = self._normalize_agent_proposals(proposals)
+        canonical = [
+            {
+                "operation": proposal.operation,
+                "content": proposal.content,
+                "item_id": proposal.item_id,
+                "expected_version": proposal.expected_version,
+            }
+            for proposal in normalized
+        ]
+        digest = hashlib.sha256(
+            json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        committed_ids: list[str] = []
+        now = int(time.time())
+        with self._transaction() as conn:
+            if not self._is_scope_enabled_conn(conn, scope):
+                raise AgentMemoryCommitError("memory scope is disabled")
+            existing = conn.execute(
+                "SELECT * FROM agent_memory_commits WHERE job_id = ?",
+                (normalized_job_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["scope_kind"]) != scope.kind
+                    or str(existing["scope_id"]) != scope.id
+                    or existing["schedule_id"] != normalized_schedule_id
+                    or int(existing["proposal_count"]) != len(normalized)
+                    or str(existing["proposal_digest"]) != digest
+                ):
+                    raise AgentMemoryCommitError("agent memory replay mismatch")
+                rows = conn.execute(
+                    """
+                    SELECT item_id FROM agent_memory_commit_items
+                    WHERE job_id = ? ORDER BY rowid
+                    """,
+                    (normalized_job_id,),
+                ).fetchall()
+                committed_ids.extend(str(row["item_id"]) for row in rows)
+                replayed = True
+            else:
+                replayed = False
+                for proposal in normalized:
+                    if proposal.operation == "add":
+                        duplicate = self._find_duplicate_or_raise_collision(
+                            conn,
+                            scope,
+                            subject_kind=normalized_subject[0],
+                            subject_id=normalized_subject[1],
+                            category="project",
+                            content=proposal.content,
+                            sensitivity="normal",
+                        )
+                        if duplicate is not None and str(duplicate["source_kind"]) != "agent_work":
+                            raise AgentMemoryCommitError(
+                                "agent work conflicts with ordinary memory"
+                            )
+                        item_id = self._insert_item(
+                            conn,
+                            scope,
+                            MemoryProposal.add(
+                                subject_kind=normalized_subject[0],
+                                subject_id=normalized_subject[1],
+                                category="project",
+                                content=proposal.content,
+                                confidence=0.75,
+                                status="active",
+                                sensitivity="normal",
+                                source_kind="agent_work",
+                                actor_class="agent_work",
+                            ),
+                            now,
+                        )
+                    else:
+                        assert proposal.item_id is not None
+                        assert proposal.expected_version is not None
+                        row = self._get_item_row(conn, scope, proposal.item_id)
+                        if row is None or str(row["source_kind"]) != "agent_work":
+                            raise AgentMemoryCommitError(
+                                "revision target is not an agent work note"
+                            )
+                        if (
+                            str(row["subject_kind"]),
+                            str(row["subject_id"]),
+                        ) != normalized_subject:
+                            raise AgentMemoryCommitError(
+                                "revision target subject is not authorized"
+                            )
+                        before = str(row["content"])
+                        cursor = conn.execute(
+                            """
+                            UPDATE memory_items
+                            SET content = ?, updated_at = ?, last_supported_at = ?,
+                                effective_score = MAX(effective_score, 0.75),
+                                base_confidence = MAX(base_confidence, 0.75),
+                                version = version + 1
+                            WHERE id = ? AND scope_kind = ? AND scope_id = ?
+                              AND source_kind = 'agent_work' AND version = ?
+                            """,
+                            (
+                                proposal.content,
+                                now,
+                                now,
+                                str(row["id"]),
+                                scope.kind,
+                                scope.id,
+                                proposal.expected_version,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise AgentMemoryCommitError("agent work note is stale")
+                        item_id = str(row["id"])
+                        self._record_revision(
+                            conn,
+                            item_id=item_id,
+                            operation="revise",
+                            actor_class="agent_work",
+                            before_summary=before,
+                            after_summary=proposal.content,
+                            now=now,
+                        )
+                        self._sync_fts(conn, item_id)
+                    committed_ids.append(item_id)
+                conn.execute(
+                    """
+                    INSERT INTO agent_memory_commits(
+                        job_id, scope_kind, scope_id, schedule_id,
+                        proposal_count, proposal_digest, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_job_id,
+                        scope.kind,
+                        scope.id,
+                        normalized_schedule_id,
+                        len(normalized),
+                        digest,
+                        now,
+                    ),
+                )
+                for proposal, item_id in zip(normalized, committed_ids, strict=True):
+                    row = self._get_item_row(conn, scope, item_id)
+                    assert row is not None
+                    conn.execute(
+                        """
+                        INSERT INTO agent_memory_commit_items(
+                            job_id, item_id, operation, committed_version
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (normalized_job_id, item_id, proposal.operation, int(row["version"])),
+                    )
+        items = tuple(
+            item
+            for item_id in committed_ids
+            if (item := self.get_item(scope, item_id)) is not None
+        )
+        return AgentMemoryCommitResult(items=items, replayed=replayed)
+
+    def _normalize_agent_proposals(
+        self,
+        proposals: tuple[AgentMemoryProposal, ...],
+    ) -> tuple[AgentMemoryProposal, ...]:
+        if not proposals:
+            return ()
+        if len(proposals) > 32:
+            raise AgentMemoryCommitError("too many agent memory proposals")
+        normalized: list[AgentMemoryProposal] = []
+        identities: set[tuple[object, ...]] = set()
+        for proposal in proposals:
+            operation = str(proposal.operation).strip().lower()
+            if operation not in {"add", "revise"}:
+                raise AgentMemoryCommitError("unsupported agent memory operation")
+            try:
+                content = self._content(proposal.content)
+            except ValueError as exc:
+                raise AgentMemoryCommitError(str(exc)) from exc
+            if operation == "add":
+                if proposal.item_id is not None or proposal.expected_version is not None:
+                    raise AgentMemoryCommitError("add proposal has revision fields")
+                value = AgentMemoryProposal("add", content)
+                identity: tuple[object, ...] = ("add", content.casefold())
+            elif operation == "revise":
+                item_id = str(proposal.item_id or "").strip()
+                if not item_id or proposal.expected_version is None:
+                    raise AgentMemoryCommitError("revise proposal is incomplete")
+                version = int(proposal.expected_version)
+                if version < 1:
+                    raise AgentMemoryCommitError("revision version is invalid")
+                value = AgentMemoryProposal("revise", content, item_id, version)
+                identity = ("revise", item_id)
+            if identity in identities:
+                raise AgentMemoryCommitError("duplicate agent memory proposal")
+            identities.add(identity)
+            normalized.append(value)
+        return tuple(normalized)
 
     def get_item(self, scope: MemoryScope, item_id: str) -> MemoryItem | None:
         row = self._conn.execute(
@@ -435,6 +719,7 @@ class LongTermMemoryStore:
         query: str = "",
         minimum_score: float = 0.0,
         sensitivity: str | None = None,
+        exclude_source_kinds: Iterable[str] = (),
         now: int | None = None,
         limit: int = 12,
     ) -> tuple[MemoryItem, ...]:
@@ -479,6 +764,12 @@ class LongTermMemoryStore:
         if sensitivity is not None:
             clauses.append("m.sensitivity = ?")
             params.append(str(sensitivity))
+        excluded_sources = tuple(
+            dict.fromkeys(str(value).strip() for value in exclude_source_kinds if str(value).strip())
+        )
+        if excluded_sources:
+            clauses.append(f"m.source_kind NOT IN ({','.join('?' for _ in excluded_sources)})")
+            params.extend(excluded_sources)
 
         match = self._fts_query(query)
         requested_limit = max(1, int(limit))
@@ -1559,6 +1850,25 @@ _MEMORY_PROMPT_RULES = (
 )
 
 
+def authorized_memory_subjects(
+    scope: MemoryScope,
+    current_sender: str,
+    real_mentions: Sequence[str],
+    quoted_sender: str | None,
+) -> tuple[tuple[str, str], ...]:
+    sender = str(current_sender).strip()
+    if scope.kind == "private":
+        if sender != scope.id:
+            raise ValueError("private memory scope sender mismatch")
+        return (("user", sender),)
+    user_ids = [sender, *(str(item).strip() for item in real_mentions)]
+    if quoted_sender:
+        user_ids.append(str(quoted_sender).strip())
+    subjects: list[tuple[str, str]] = [("group", scope.id)]
+    subjects.extend(("user", user_id) for user_id in user_ids if user_id)
+    return tuple(dict.fromkeys(subjects))
+
+
 class LongTermMemoryRetriever:
     """Retrieve and format bounded, authorized memory as untrusted context."""
 
@@ -1587,7 +1897,7 @@ class LongTermMemoryRetriever:
             return ""
         if scope.kind == "private" and str(current_sender) != scope.id:
             return ""
-        subjects = self._authorized_subjects(
+        subjects = authorized_memory_subjects(
             scope,
             str(current_sender),
             tuple(str(item) for item in real_mentions),
@@ -1599,6 +1909,7 @@ class LongTermMemoryRetriever:
             query=query,
             minimum_score=self.cfg.minimum_score,
             sensitivity="normal",
+            exclude_source_kinds=("agent_work",),
             limit=self.cfg.max_items,
         )
         if not items:
@@ -1651,11 +1962,9 @@ class LongTermMemoryRetriever:
         real_mentions: Sequence[str],
         quoted_sender: str | None,
     ) -> tuple[tuple[str, str], ...]:
-        if scope.kind == "private":
-            return (("user", current_sender),)
-        user_ids = [current_sender, *real_mentions]
-        if quoted_sender:
-            user_ids.append(quoted_sender)
-        subjects: list[tuple[str, str]] = [("group", scope.id)]
-        subjects.extend(("user", user_id) for user_id in user_ids if user_id)
-        return tuple(dict.fromkeys(subjects))
+        return authorized_memory_subjects(
+            scope,
+            current_sender,
+            real_mentions,
+            quoted_sender,
+        )

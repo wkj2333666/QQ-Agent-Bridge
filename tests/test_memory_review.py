@@ -12,7 +12,12 @@ import pytest
 
 from qq_agent_bridge.config import BridgeConfig
 from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore
-from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope, MemorySource
+from qq_agent_bridge.long_term_memory_models import (
+    AgentMemoryProposal,
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+)
 from qq_agent_bridge.memory_curation import MemoryActor, MemoryValidator
 from qq_agent_bridge.memory_review import (
     MAX_CURATOR_OUTPUT_CHARS,
@@ -595,6 +600,71 @@ def test_periodic_minimum_and_explicit_review_bypass_threshold(
         assert len(periodic) == 1
         assert periodic[0].error is None
         assert len(agent.calls) == 2
+
+    asyncio.run(go())
+
+
+def test_review_input_excludes_agent_work_memories(
+    cfg: BridgeConfig,
+    store: LongTermMemoryStore,
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        collect_source(store, message_id="pending", sender_id=OWNER.id)
+        store.commit_review(
+            GROUP,
+            (),
+            (
+                MemoryProposal.add(
+                    subject_kind="group",
+                    subject_id=GROUP.id,
+                    category="project",
+                    content="ordinary existing memory",
+                    confidence=0.9,
+                    status="active",
+                    source_kind="owner_confirmed",
+                    actor_class="owner",
+                ),
+            ),
+        )
+        store.commit_agent_memories(
+            GROUP,
+            job_id="agent-job",
+            schedule_id=None,
+            subject=("group", GROUP.id),
+            proposals=(
+                AgentMemoryProposal("add", "internal agent progress must stay out"),
+            ),
+        )
+
+        class RecordingAgent(FirstSourceProposalAgent):
+            existing: list[dict[str, Any]]
+
+            async def run(
+                self,
+                prompt: str,
+                workspace: str | None = None,
+                mode: str = "ask",
+                **kwargs: Any,
+            ) -> str:
+                assert workspace is not None
+                payload = json.loads(
+                    (Path(workspace) / "curator-input" / "review-data.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.existing = payload["existing_memories"]
+                return await super().run(prompt, workspace, mode, **kwargs)
+
+        agent = RecordingAgent()
+        coordinator = make_coordinator(store, agent, cfg, tmp_path)
+
+        outcome = await coordinator.review_now(GROUP, actor=OWNER)
+
+        assert outcome.error is None
+        assert {item["content"] for item in agent.existing} == {
+            "ordinary existing memory"
+        }
 
     asyncio.run(go())
 

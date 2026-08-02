@@ -318,6 +318,11 @@ class MemoryCommandService:
         if isinstance(item_or_error, MemoryCommandResult):
             return item_or_error
         item = item_or_error
+        if item.source_kind == "agent_work":
+            if not self.store.hard_delete(self._scope(ev), item.id):
+                return MemoryCommandResult("没有找到这条长期记忆。")
+            self._list_snapshots.pop(self._snapshot_key(ev), None)
+            return MemoryCommandResult("已忘记。")
         source_kind = self._source_kind_for_action(ev, item)
         proposal = MemoryProposal(
             operation="forget",
@@ -504,6 +509,9 @@ class MemoryCommandService:
         if name == "show":
             return MemoryCommandResult("\n".join(f"[{i.short_id}] {i.content}" for i in resolved))
         if name == "forget":
+            work_items = tuple(
+                item for item in resolved if item.source_kind == "agent_work"
+            )
             proposals = tuple(
                 MemoryProposal(
                     operation="forget",
@@ -512,11 +520,16 @@ class MemoryCommandService:
                     actor_class="user",
                 )
                 for item in resolved
+                if item.source_kind != "agent_work"
             )
-            committed = self._validate_and_commit(ev, proposals)
-            return committed if isinstance(committed, MemoryCommandResult) else MemoryCommandResult(
-                f"已忘记 {len(resolved)} 条记忆。"
-            )
+            if proposals:
+                committed = self._validate_and_commit(ev, proposals)
+                if isinstance(committed, MemoryCommandResult):
+                    return committed
+            for item in work_items:
+                self.store.hard_delete(self._scope(ev), item.id)
+            self._list_snapshots.pop(self._snapshot_key(ev), None)
+            return MemoryCommandResult(f"已忘记 {len(resolved)} 条记忆。")
         if name == "correct":
             content = intent["content"]
             assert isinstance(content, str)

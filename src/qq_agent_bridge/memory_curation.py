@@ -1018,6 +1018,7 @@ class MemoryValidator:
             subject_kind=proposal.subject_kind,
             subject_id=proposal.subject_id,
             statuses=("active", "candidate", "dormant"),
+            exclude_source_kinds=("agent_work",),
             include_expired=True,
         ):
             staged_item = staged_items.get(item.id, item)

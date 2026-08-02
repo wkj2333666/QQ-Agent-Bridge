@@ -126,6 +126,20 @@ class MemoryItem:
 
 
 @dataclass(frozen=True)
+class AgentMemoryProposal:
+    operation: Literal["add", "revise"]
+    content: str
+    item_id: str | None = None
+    expected_version: int | None = None
+
+
+@dataclass(frozen=True)
+class AgentMemoryCommitResult:
+    items: tuple[MemoryItem, ...]
+    replayed: bool = False
+
+
+@dataclass(frozen=True)
 class MemoryProposal:
     operation: str
     item_id: str | None = None
@@ -219,6 +233,8 @@ class MemoryStoreStatus:
 
 __all__ = [
     "ACTIVE_CONFIDENCE_THRESHOLD",
+    "AgentMemoryCommitResult",
+    "AgentMemoryProposal",
     "MemoryItem",
     "MemoryIdentityKey",
     "MemoryProposal",

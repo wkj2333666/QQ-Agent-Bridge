@@ -579,6 +579,7 @@ class MemoryReviewCoordinator:
                             return CuratorOutcome(error="no_sources")
                         existing = self.store.list_items(
                             scope,
+                            exclude_source_kinds=("agent_work",),
                             include_expired=True,
                             limit=MAX_CURATOR_EXISTING,
                         )
