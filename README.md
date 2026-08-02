@@ -188,6 +188,15 @@ long_term_memory:
     interval_seconds: 86400
     grace_seconds: 2592000
     dormant_threshold: 0.40
+  agent_access:
+    enabled: true
+    commands: [task]
+    scheduled_task_enabled: true
+    max_snapshot_items: 200
+    max_snapshot_chars: 50000
+    max_search_results: 20
+    max_proposals_per_job: 8
+    max_note_chars: 2000
 ```
 
 Use `/memory enable` or `/memory disable` for the current scope. In a group only an
@@ -197,6 +206,18 @@ manage their own private scope. Useful commands include `/memory status`,
 and the confirmation-protected `/memory clear`. `/memory help` contains the complete
 syntax. `/reset` clears recent conversation context only and does not erase long-term
 memory.
+
+When the exact scope is enabled, `/task` and scheduled `task` runs can search a
+bounded, authorization-filtered snapshot and propose free-form work notes for future
+continuity. This requires `agent.use_bwrap: true`; non-bwrap runtimes receive no
+autonomous memory tools. The Agent never sees the production database, its WAL/SHM,
+or another scope. Snapshot records are untrusted data rather than instructions.
+Proposals support only add/revise and are committed atomically only after at least one
+required text or verified resource reaches QQ with no delivery failure. Failed,
+cancelled, timed-out, silent, stale, or partially delivered jobs do not advance work
+memory. This improves continuity but cannot guarantee that an Agent records every
+useful detail. Users can inspect and remove work notes through the existing `/memory`
+commands.
 
 Eligible user text is buffered for at most `604800` seconds (seven days) while waiting
 for review. Reviews run after the configured message/idle threshold or periodic check.

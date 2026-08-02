@@ -173,6 +173,24 @@ def test_runtime_skill_can_point_to_workspace_local_reference_bundle(tmp_path: P
     assert "propose-revise" in copied_helper.read_text(encoding="utf-8")
 
 
+def test_runtime_skill_bundle_refresh_is_idempotent_with_read_only_scripts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    first = prepare_runtime_skill_bundle(workspace, "downloads/qq-agent-bridge")
+    second = prepare_runtime_skill_bundle(workspace, "downloads/qq-agent-bridge")
+
+    assert second == first
+    copied_helper = (
+        workspace
+        / "downloads/qq-agent-bridge/runtime-skills/qq-agent-runtime/scripts/memory_tool.py"
+    )
+    assert copied_helper.is_file()
+    assert copied_helper.stat().st_mode & 0o777 == 0o500
+
+
 def test_runtime_skill_indexes_scoped_memory_reference() -> None:
     skill = build_runtime_skill("task")
     reference = ROOT / "skills/qq-agent-runtime/references/memory-tools.md"

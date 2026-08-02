@@ -87,6 +87,22 @@ def test_memory_tool_search_recent_and_read_are_bounded(tmp_path: Path) -> None:
         code, missing, err = _run(session.manifest_path, "read", "--id", "missing")
         assert code != 0 and err == ""
         assert missing == {"ok": False, "error": "not-found"}
+
+        activity = session.proposal_dir / ".activity.jsonl"
+        records = [
+            json.loads(line)
+            for line in activity.read_text(encoding="utf-8").splitlines()
+        ]
+        assert records == [
+            {
+                "token": session.token,
+                "job_id": session.job_id,
+                "operation": "search",
+                "result_count": 1,
+            }
+        ]
+        assert "第一阶段" not in activity.read_text(encoding="utf-8")
+        assert activity.stat().st_mode & 0o777 == 0o600
     finally:
         manager.cleanup(session)
         store.close()
@@ -117,7 +133,11 @@ def test_memory_tool_creates_exclusive_private_proposals(tmp_path: Path) -> None
         assert code == 0 and err == ""
         assert revised == {"ok": True, "count": 1}
 
-        files = sorted(session.proposal_dir.iterdir())
+        files = sorted(
+            path
+            for path in session.proposal_dir.iterdir()
+            if path.name != ".activity.jsonl"
+        )
         assert len(files) == 2
         assert all(path.stat().st_mode & 0o777 == 0o600 for path in files)
         payloads = [json.loads(path.read_text(encoding="utf-8")) for path in files]
@@ -138,7 +158,13 @@ def test_memory_tool_creates_exclusive_private_proposals(tmp_path: Path) -> None
         )
         assert code != 0 and err == ""
         assert unknown == {"ok": False, "error": "not-found"}
-        assert len(tuple(session.proposal_dir.iterdir())) == 2
+        assert len(
+            tuple(
+                path
+                for path in session.proposal_dir.iterdir()
+                if path.name != ".activity.jsonl"
+            )
+        ) == 2
     finally:
         manager.cleanup(session)
         store.close()

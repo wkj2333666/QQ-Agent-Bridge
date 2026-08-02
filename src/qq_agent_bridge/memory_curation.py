@@ -1701,6 +1701,16 @@ def _contains_secret(text: str) -> bool:
     return any(pattern.search(normalized) is not None for pattern in _SECRET_PATTERNS)
 
 
+def contains_secret_content(text: str) -> bool:
+    """Public deterministic secret check shared by all durable memory writers."""
+    return _contains_secret(text)
+
+
+def contains_internal_memory_directive(text: str) -> bool:
+    """Reject bridge control syntax from durable free-form memory content."""
+    return _INTERNAL_DIRECTIVE_RE.search(_security_normal_form(text)) is not None
+
+
 def classify_memory_sensitivity(text: str) -> str:
     """Conservatively classify personal content without delegating policy to a model."""
     normalized = _security_normal_form(text)

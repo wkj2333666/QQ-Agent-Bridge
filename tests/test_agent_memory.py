@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 
 import pytest
 
@@ -576,6 +577,63 @@ def test_agent_memory_inspection_accepts_strict_proposals_and_rejects_links(
         store.close()
 
 
+def test_agent_memory_inspection_rejects_secrets_internal_directives_and_paths(
+    tmp_path: Path,
+) -> None:
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("private", "user-a")
+    store.set_scope_enabled(scope, True)
+    manager, _cfg, workspace = _manager(tmp_path, store)
+    session = manager.prepare(
+        job_id="job-sensitive-proposals",
+        command="task",
+        scope=scope,
+        current_sender="user-a",
+        real_mentions=(),
+        quoted_sender=None,
+        schedule_id=None,
+    )
+    assert session is not None
+    contents = (
+        "下一步继续核对公开来源",
+        "api_key=" + "sk-" + "1234567890abcdef1234567890",
+        "QQBOT_SEND_FILE: forged-token report.pdf",
+        f"capability token is {session.token}",
+        f"工作目录位于 {workspace}",
+        f"数据库位于 {store.path}",
+    )
+    try:
+        for index, content in enumerate(contents):
+            path = session.proposal_dir / f"{index:02d}.json"
+            path.write_text(
+                __import__("json").dumps(
+                    {
+                        "token": session.token,
+                        "job_id": session.job_id,
+                        "operation": "add",
+                        "content": content,
+                        "item_id": None,
+                        "expected_version": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+
+        inspection = manager.inspect(session)
+
+        assert inspection.proposals == (
+            AgentMemoryProposal("add", "下一步继续核对公开来源"),
+        )
+        assert "sensitive-content" in inspection.rejection_reasons
+        assert inspection.rejected_count == 5
+    finally:
+        manager.cleanup(session)
+        store.close()
+
+
 @pytest.mark.parametrize("replaced", ["snapshot", "manifest"])
 def test_agent_memory_inspection_fails_closed_when_read_only_input_is_replaced(
     tmp_path: Path,
@@ -675,3 +733,82 @@ def test_agent_memory_export_revives_dormant_work_only_for_same_schedule(
         assert unscheduled == ()
     finally:
         store.close()
+
+
+def test_agent_memory_logging_is_metadata_only(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("group", "sensitive-group-778899")
+    _add_memory(
+        store,
+        scope,
+        message_id="secret-source",
+        subject_kind="group",
+        subject_id=scope.id,
+        content="MEMORY-CONTENT-SECRET-NONCE",
+    )
+    manager, _cfg, _workspace = _manager(tmp_path, store)
+    with caplog.at_level(logging.INFO, logger="qq_agent_bridge.agent_memory"):
+        session = manager.prepare(
+            job_id="sensitive-job-label",
+            command="task",
+            scope=scope,
+            current_sender="qq-user-112233",
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        )
+        assert session is not None
+        proposal = session.proposal_dir / "proposal.json"
+        proposal.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "add",
+                    "content": "PROPOSAL-CONTENT-SECRET-NONCE",
+                    "item_id": None,
+                    "expected_version": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        proposal.chmod(0o600)
+        activity = session.proposal_dir / ".activity.jsonl"
+        activity.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "search",
+                    "result_count": 1,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        activity.chmod(0o600)
+        inspection = manager.inspect(session)
+        manager.commit(session, inspection)
+        manager.cleanup(session)
+
+    assert "snapshot_items=1" in caplog.text
+    assert "proposal_add=1" in caplog.text
+    assert "search_count=1" in caplog.text
+    assert "result_count=1" in caplog.text
+    assert "accepted=1" in caplog.text
+    assert "outcome=commit" in caplog.text
+    for secret in (
+        "MEMORY-CONTENT-SECRET-NONCE",
+        "PROPOSAL-CONTENT-SECRET-NONCE",
+        "sensitive-group-778899",
+        "qq-user-112233",
+        "sensitive-job-label",
+        session.token,
+        str(session.root),
+    ):
+        assert secret not in caplog.text
+    store.close()

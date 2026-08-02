@@ -21,12 +21,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.agent_runtime import build_agent_adapter  # type: ignore
+from qq_agent_bridge.agent_memory import AgentMemoryManager  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
+from qq_agent_bridge.long_term_memory import LongTermMemoryStore  # type: ignore
+from qq_agent_bridge.long_term_memory_models import (  # type: ignore
+    AgentMemoryProposal,
+    MemoryScope,
+)
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.onebot import _normalize_event  # type: ignore
 from qq_agent_bridge.policy import Policy  # type: ignore
 from qq_agent_bridge.prompting import build_agent_prompt  # type: ignore
 from qq_agent_bridge.schedule_parser import NaturalLanguageScheduleParser  # type: ignore
+from qq_agent_bridge.scheduler import Schedule, ScheduleRun  # type: ignore
 from qq_agent_bridge.types import ChatEvent  # type: ignore
 from test_schedule_app import FakeAgent
 
@@ -84,9 +91,13 @@ def _make_cfg(workspace: Path, mode: str = "ask") -> BridgeConfig:
     return cfg
 
 
-def _make_ev(text: str, chat_id: str = "e2e-user") -> ChatEvent:
+def _make_ev(
+    text: str,
+    chat_id: str = "e2e-user",
+    mid: str = "agent-e2e",
+) -> ChatEvent:
     return ChatEvent(
-        id="agent-e2e",
+        id=mid,
         platform="qq",
         chat_id=chat_id,
         sender_id="e2e-user",
@@ -478,6 +489,163 @@ def test_real_agent_task_can_read_workspace_file(tmp_path: Path) -> None:
     out = asyncio.run(_run_agent(prompt, cfg, "task", os.environ.get("QQ_AGENT_BRIDGE_E2E_TASK_MODEL", "auto")))
 
     assert token in out
+
+
+def test_real_agent_memory_continuity_through_app_delivery(tmp_path: Path) -> None:
+    _require_e2e()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg = _make_cfg(workspace, "task")
+    cfg.allowed_users = ["e2e-user"]
+    cfg.long_term_memory.enabled = True
+    cfg.long_term_memory.agent_access.enabled = True
+    cfg.long_term_memory.agent_access.commands = ("task",)
+    cfg.progress.enabled = False
+    cfg.agent.max_runtime_seconds = int(
+        os.environ.get("QQ_AGENT_BRIDGE_E2E_TIMEOUT", "300")
+    )
+    cfg.agent.task_model = os.environ.get(
+        "QQ_AGENT_BRIDGE_CAPABILITY_TASK_MODEL", "composer"
+    )
+    cfg.agent.share_network = True
+    cfg.scheduler.enabled = True
+    cfg.scheduler.database_path = str(tmp_path / "state" / "schedules.sqlite3")
+    cfg.long_term_memory.database_path = str(
+        tmp_path / "state" / "unused-app-memory.sqlite3"
+    )
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("private", "e2e-user")
+    store.set_scope_enabled(scope, True)
+    nonce = "AGENT-MEMORY-E2E-NONCE-7F31"
+    continuation = "AGENT-MEMORY-E2E-CONTINUATION-91B2"
+    scheduled_continuation = "AGENT-MEMORY-E2E-SCHEDULED-CONTINUATION-4C6D"
+    failed_continuation = "AGENT-MEMORY-E2E-UNDELIVERED-CONTINUATION-8A20"
+    store.commit_agent_memories(
+        scope,
+        job_id="seed-real-agent-memory",
+        schedule_id=None,
+        subject=("user", "e2e-user"),
+        proposals=(AgentMemoryProposal("add", nonce),),
+    )
+    adapter = _CaptureAdapter()
+    app = App(cfg, config_path=tmp_path / "config.yaml")
+    app.adapter = adapter  # type: ignore[assignment]
+    app.policy = Policy(cfg, app._agent_runner)
+
+    class InspectingManager(AgentMemoryManager):
+        def __init__(self) -> None:
+            super().__init__(store, cfg, workspace, cfg.resources.root)
+            self.cleaned_proposals: list[tuple[AgentMemoryProposal, ...]] = []
+
+        def cleanup(self, session: Any) -> None:
+            self.cleaned_proposals.append(self.inspect(session).proposals)
+            super().cleanup(session)
+
+    manager = InspectingManager()
+    app.agent_memory = manager
+
+    class FailingResultAdapter(_CaptureAdapter):
+        def __init__(self, fail_token: str) -> None:
+            super().__init__()
+            self.fail_token = fail_token
+            self.failed_attempts: list[str] = []
+
+        async def send(
+            self,
+            chat_id: str,
+            is_group: bool,
+            text: str,
+            echo: str | None = None,
+            reply_to: str | None = None,
+        ) -> None:
+            if self.fail_token in text:
+                self.failed_attempts.append(text)
+                raise RuntimeError("forced E2E delivery failure")
+            await super().send(chat_id, is_group, text, echo, reply_to)
+
+    async def go() -> None:
+        await app._handle(
+            _make_ev(
+                "/task 这是记忆工具端到端测试。必须实际使用作用域长期记忆 helper 搜索 "
+                f"关键词 AGENT-MEMORY-E2E；找到后回复工具返回的完整记录，并用 propose-add 提案保存 {continuation}。"
+                "不要只根据本消息复述，必须完成工具调用。"
+            )
+        )
+        await _wait_for(
+            lambda: any(nonce in item[2] for item in adapter.sent),
+            timeout=cfg.agent.max_runtime_seconds,
+        )
+        await _wait_for(
+            lambda: any(
+                item.content == continuation for item in store.list_items(scope)
+            ),
+            timeout=10,
+        )
+
+        schedule = Schedule(
+            id="agent-memory-e2e-schedule",
+            chat_id="e2e-user",
+            is_group=False,
+            creator_id="e2e-user",
+            source_message_id="agent-memory-e2e-source",
+            reply_to_message_id=None,
+            kind="rrule",
+            action="task",
+            payload=(
+                "这是同一作用域的后续定时任务。必须实际使用长期记忆 helper 搜索关键词 "
+                "AGENT-MEMORY-E2E-CONTINUATION；回复工具返回的完整记录，并用 propose-add "
+                f"保存 {scheduled_continuation}。不要从本消息猜测完整旧记录。"
+            ),
+            mentions=(),
+            timezone="Asia/Shanghai",
+            start_at=100,
+            next_run_at=100,
+            rrule="FREQ=DAILY",
+        )
+        scheduled = await app._execute_schedule(
+            schedule,
+            ScheduleRun(1, schedule.id, 100, 100),
+        )
+        assert scheduled.state == "succeeded", scheduled
+        assert any(continuation in item[2] for item in adapter.sent)
+        assert any(
+            item.content == scheduled_continuation for item in store.list_items(scope)
+        )
+
+        failing = FailingResultAdapter("AGENT-MEMORY-E2E-DELIVERY-FAIL-39D0")
+        app.adapter = failing  # type: ignore[assignment]
+        await app._handle(
+            _make_ev(
+                "/task 必须用 propose-add 保存 "
+                f"{failed_continuation}，然后最终只回复 AGENT-MEMORY-E2E-DELIVERY-FAIL-39D0。",
+                mid="agent-memory-e2e-delivery-failure",
+            )
+        )
+        await _wait_for(
+            lambda: bool(failing.failed_attempts),
+            timeout=cfg.agent.max_runtime_seconds,
+        )
+        await _wait_for(lambda: not app._agent_memory_sessions, timeout=10)
+        assert any(
+            proposal.content == failed_continuation
+            for proposal in manager.cleaned_proposals[-1]
+        )
+        assert all(
+            item.content != failed_continuation for item in store.list_items(scope)
+        )
+
+    try:
+        asyncio.run(go())
+        assert any(item.content == continuation for item in store.list_items(scope))
+        assert any(
+            item.content == scheduled_continuation for item in store.list_items(scope)
+        )
+        assert all(
+            item.content != failed_continuation for item in store.list_items(scope)
+        )
+    finally:
+        store.close()
 
 
 def test_real_agent_task_can_emit_send_file_directive(tmp_path: Path) -> None:

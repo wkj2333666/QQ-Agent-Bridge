@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 _SKILL_RELATIVE_REFERENCES = "skills/qq-agent-runtime/references"
@@ -127,10 +128,33 @@ def prepare_runtime_skill_bundle(workspace: str | Path, resource_root: str) -> s
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise ValueError("runtime skill script source must be a regular file")
         target = target_scripts / source.name
-        shutil.copyfile(source, target)
-        os.chmod(target, 0o500)
+        _replace_read_only_script(source, target)
 
     return (root / _BUNDLED_SKILL_RELATIVE_ROOT / "references").as_posix()
+
+
+def _replace_read_only_script(source: Path, target: Path) -> None:
+    """Atomically refresh a script even when the previous copy is read-only."""
+    fd, temporary_name = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with source.open("rb") as source_handle, os.fdopen(fd, "wb") as target_handle:
+            shutil.copyfileobj(source_handle, target_handle)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+            os.fchmod(target_handle.fileno(), 0o500)
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _load_skill_body() -> str:

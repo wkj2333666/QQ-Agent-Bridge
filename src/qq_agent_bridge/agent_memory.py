@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -19,6 +21,13 @@ from .long_term_memory_models import (
     AgentMemoryProposal,
     MemoryScope,
 )
+from .memory_curation import (
+    contains_internal_memory_directive,
+    contains_secret_content,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -38,6 +47,11 @@ _MANIFEST_KEYS = frozenset(
 _PROPOSAL_KEYS = frozenset(
     {"token", "job_id", "operation", "content", "item_id", "expected_version"}
 )
+_ACTIVITY_FILE = ".activity.jsonl"
+_ACTIVITY_KEYS = frozenset(
+    {"token", "job_id", "operation", "result_count"}
+)
+_MAX_ACTIVITY_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -61,6 +75,9 @@ class AgentMemorySession:
 class AgentMemoryInspection:
     proposals: tuple[AgentMemoryProposal, ...]
     rejection_reasons: tuple[str, ...] = ()
+    search_count: int = 0
+    result_count: int = 0
+    rejected_count: int = 0
 
 
 class AgentMemoryManager:
@@ -148,7 +165,7 @@ class AgentMemoryManager:
                 "max_note_chars": access.max_note_chars,
             }
             self._write_immutable_json(manifest_path, manifest)
-            return AgentMemorySession(
+            session = AgentMemorySession(
                 id=secrets.token_hex(16),
                 job_id=normalized_job_id,
                 scope=scope,
@@ -163,6 +180,13 @@ class AgentMemoryManager:
                 manifest_identity=self._identity(manifest_path),
                 proposal_identity=self._identity(proposal_dir),
             )
+            logger.info(
+                "agent memory prepare job=%s snapshot_items=%d snapshot_chars=%d outcome=ready",
+                _job_label(normalized_job_id),
+                len(items),
+                sum(len(item.content) for item in items),
+            )
+            return session
         except BaseException:
             shutil.rmtree(session_root, ignore_errors=True)
             raise
@@ -184,31 +208,61 @@ class AgentMemoryManager:
         if not self._identity_matches(session.manifest_path, session.manifest_identity, file=True):
             reasons.append("manifest-replaced")
         if reasons:
-            return AgentMemoryInspection((), tuple(reasons))
+            inspection = AgentMemoryInspection(
+                (), tuple(reasons), rejected_count=1
+            )
+            self._log_inspection(session, inspection, outcome="stale")
+            return inspection
         if not self._identity_matches(session.proposal_dir, session.proposal_identity, file=False):
-            return AgentMemoryInspection((), tuple((*reasons, "proposal-dir-replaced")))
+            inspection = AgentMemoryInspection(
+                (), ("proposal-dir-replaced",), rejected_count=1
+            )
+            self._log_inspection(session, inspection, outcome="stale")
+            return inspection
         proposals: list[AgentMemoryProposal] = []
+        rejected_count = 0
         access = self.cfg.long_term_memory.agent_access
-        for path in sorted(session.proposal_dir.iterdir(), key=lambda value: value.name):
-            if len(proposals) >= access.max_proposals_per_job:
-                reasons.append("too-many-proposals")
-                break
+        search_count, result_count, activity_reason = self._read_activity(session)
+        if activity_reason:
+            reasons.append(activity_reason)
+        proposal_paths: list[Path] = []
+        with os.scandir(session.proposal_dir) as entries:
+            for entry in entries:
+                if entry.name == _ACTIVITY_FILE:
+                    continue
+                proposal_paths.append(Path(entry.path))
+                if len(proposal_paths) > access.max_proposals_per_job:
+                    reasons.append("too-many-proposals")
+                    rejected_count += 1
+                    break
+        for path in sorted(
+            proposal_paths[: access.max_proposals_per_job],
+            key=lambda value: value.name,
+        ):
             try:
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
                     reasons.append("symlink")
+                    rejected_count += 1
                     continue
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                     reasons.append("not-private-regular-file")
+                    rejected_count += 1
                     continue
                 if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
                     reasons.append("unsafe-permissions")
+                    rejected_count += 1
                     continue
                 if metadata.st_size > access.max_note_chars + 2_048:
                     reasons.append("oversized")
+                    rejected_count += 1
                     continue
                 payload = json.loads(
-                    path.read_text(encoding="utf-8"),
+                    self._read_private_proposal(
+                        path,
+                        metadata,
+                        access.max_note_chars + 2_048,
+                    ),
                     object_pairs_hook=_unique_object,
                 )
                 if not isinstance(payload, dict) or set(payload) != _PROPOSAL_KEYS:
@@ -221,6 +275,20 @@ class AgentMemoryManager:
                     raise ValueError("invalid operation")
                 if len(content) > access.max_note_chars:
                     raise ValueError("note too long")
+                forbidden_values = (
+                    session.token,
+                    str(self.workspace),
+                    str(self.store.path.expanduser().resolve(strict=False)),
+                    str(session.root),
+                )
+                if (
+                    contains_secret_content(content)
+                    or contains_internal_memory_directive(content)
+                    or any(value and value in content for value in forbidden_values)
+                ):
+                    reasons.append("sensitive-content")
+                    rejected_count += 1
+                    continue
                 if operation == "add":
                     if payload["item_id"] is not None or payload["expected_version"] is not None:
                         raise ValueError("invalid add")
@@ -239,20 +307,107 @@ class AgentMemoryManager:
                     )
             except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
                 reasons.append("invalid-proposal")
-        return AgentMemoryInspection(tuple(proposals), tuple(dict.fromkeys(reasons)))
+                rejected_count += 1
+        inspection = AgentMemoryInspection(
+            tuple(proposals),
+            tuple(dict.fromkeys(reasons)),
+            search_count,
+            result_count,
+            rejected_count,
+        )
+        self._log_inspection(session, inspection, outcome="ready")
+        return inspection
+
+    @staticmethod
+    def _log_inspection(
+        session: AgentMemorySession,
+        inspection: AgentMemoryInspection,
+        *,
+        outcome: str,
+    ) -> None:
+        logger.info(
+            "agent memory inspect job=%s search_count=%d result_count=%d proposal_add=%d proposal_revise=%d accepted=%d rejected=%d outcome=%s",
+            _job_label(session.job_id),
+            inspection.search_count,
+            inspection.result_count,
+            sum(value.operation == "add" for value in inspection.proposals),
+            sum(value.operation == "revise" for value in inspection.proposals),
+            len(inspection.proposals),
+            inspection.rejected_count,
+            outcome,
+        )
+
+    def _read_activity(
+        self, session: AgentMemorySession
+    ) -> tuple[int, int, str | None]:
+        path = session.proposal_dir / _ACTIVITY_FILE
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return 0, 0, None
+        try:
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1
+                or metadata.st_mode & 0o077
+                or metadata.st_size > _MAX_ACTIVITY_BYTES
+            ):
+                raise ValueError("unsafe activity file")
+            raw = self._read_private_proposal(path, metadata, _MAX_ACTIVITY_BYTES)
+            search_count = 0
+            result_count = 0
+            for line in raw.splitlines()[:1024]:
+                payload = json.loads(line, object_pairs_hook=_unique_object)
+                if not isinstance(payload, dict) or set(payload) != _ACTIVITY_KEYS:
+                    raise ValueError("invalid activity record")
+                if (
+                    payload["token"] != session.token
+                    or payload["job_id"] != session.job_id
+                    or payload["operation"] != "search"
+                    or not isinstance(payload["result_count"], int)
+                    or isinstance(payload["result_count"], bool)
+                    or payload["result_count"] < 0
+                ):
+                    raise ValueError("invalid activity record")
+                search_count += 1
+                result_count += min(
+                    payload["result_count"],
+                    self.cfg.long_term_memory.agent_access.max_search_results,
+                )
+            return search_count, result_count, None
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            return 0, 0, "invalid-activity"
 
     def commit(
         self,
         session: AgentMemorySession,
         inspection: AgentMemoryInspection,
     ) -> AgentMemoryCommitResult:
-        return self.store.commit_agent_memories(
-            session.scope,
-            job_id=session.job_id,
-            schedule_id=session.schedule_id,
-            subject=session.subject,
-            proposals=inspection.proposals,
+        try:
+            result = self.store.commit_agent_memories(
+                session.scope,
+                job_id=session.job_id,
+                schedule_id=session.schedule_id,
+                subject=session.subject,
+                proposals=inspection.proposals,
+            )
+        except Exception:
+            logger.info(
+                "agent memory commit job=%s accepted=0 rejected=%d outcome=rollback",
+                _job_label(session.job_id),
+                len(inspection.proposals) + inspection.rejected_count,
+            )
+            raise
+        logger.info(
+            "agent memory commit job=%s accepted=%d rejected=%d outcome=commit replayed=%s",
+            _job_label(session.job_id),
+            len(result.items),
+            inspection.rejected_count,
+            str(result.replayed).lower(),
         )
+        return result
 
     def cleanup(self, session: AgentMemorySession) -> None:
         root = session.root.resolve(strict=False)
@@ -265,6 +420,10 @@ class AgentMemoryManager:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("unsafe session cleanup target")
         shutil.rmtree(session.root)
+        logger.info(
+            "agent memory cleanup job=%s outcome=complete",
+            _job_label(session.job_id),
+        )
 
     def _assert_database_outside_workspace(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -379,6 +538,42 @@ class AgentMemoryManager:
         finally:
             conn.close()
 
+    @staticmethod
+    def _read_private_proposal(
+        path: Path,
+        expected: os.stat_result,
+        maximum_bytes: int,
+    ) -> str:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or opened.st_dev != expected.st_dev
+                or opened.st_ino != expected.st_ino
+                or opened.st_mode & 0o077
+            ):
+                raise ValueError("proposal changed during inspection")
+            chunks: list[bytes] = []
+            remaining = maximum_bytes + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > maximum_bytes:
+                raise ValueError("proposal is oversized")
+            return payload.decode("utf-8")
+        finally:
+            os.close(fd)
+
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -389,4 +584,16 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-__all__ = ["AgentMemoryInspection", "AgentMemoryManager", "AgentMemorySession"]
+def agent_memory_job_label(job_id: str) -> str:
+    return hashlib.sha256(str(job_id).encode("utf-8")).hexdigest()[:12]
+
+
+_job_label = agent_memory_job_label
+
+
+__all__ = [
+    "AgentMemoryInspection",
+    "AgentMemoryManager",
+    "AgentMemorySession",
+    "agent_memory_job_label",
+]

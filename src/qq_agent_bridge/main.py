@@ -18,7 +18,11 @@ from zoneinfo import ZoneInfo
 
 from .artifact_delivery import resolve_artifacts
 from .attachment_cache import AttachmentCache
-from .agent_memory import AgentMemoryManager, AgentMemorySession
+from .agent_memory import (
+    AgentMemoryManager,
+    AgentMemorySession,
+    agent_memory_job_label,
+)
 from .agent_runtime import RuntimeMount, build_agent_adapter, run_agent
 from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .command_access_store import write_command_access_to_config
@@ -804,7 +808,10 @@ class App:
             try:
                 manager.cleanup(session)
             except (OSError, ValueError):
-                logger.warning("agent memory cleanup failed job=%s", job.id)
+                logger.warning(
+                    "agent memory cleanup failed job=%s",
+                    agent_memory_job_label(job.id),
+                )
         try:
             await self._cleanup_policy()
         except Exception:  # noqa: BLE001 - cleanup must not mask the original job outcome
@@ -2625,7 +2632,7 @@ class App:
         except (OSError, ValueError):
             logger.warning(
                 "agent memory session disabled job=%s reason=prepare-failed",
-                job.id,
+                agent_memory_job_label(job.id),
             )
             return None
         if session is None:
@@ -2686,7 +2693,7 @@ class App:
         except Exception as exc:  # noqa: BLE001 - memory cannot undo QQ delivery
             logger.warning(
                 "agent memory commit skipped job=%s error=%s",
-                job.id,
+                agent_memory_job_label(job.id),
                 type(exc).__name__,
             )
 

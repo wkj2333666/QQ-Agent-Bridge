@@ -16,6 +16,8 @@ MANIFEST_KEYS = {
     "version", "token", "job_id", "schedule_id", "snapshot", "proposal_dir",
     "max_results", "max_proposals", "max_note_chars",
 }
+ACTIVITY_FILE = ".activity.jsonl"
+MAX_ACTIVITY_BYTES = 64 * 1024
 
 
 class ToolError(ValueError):
@@ -106,7 +108,11 @@ def append_proposal(
     if not text or len(text) > int(manifest["max_note_chars"]):
         raise ToolError("invalid-content")
     try:
-        count = sum(1 for value in proposal_dir.iterdir() if value.is_file())
+        count = sum(
+            1
+            for value in proposal_dir.iterdir()
+            if value.is_file() and value.name != ACTIVITY_FILE
+        )
     except OSError as exc:
         raise ToolError("proposal-unavailable") from exc
     if count >= int(manifest["max_proposals"]):
@@ -131,6 +137,45 @@ def append_proposal(
             os.close(fd)
         return
     raise ToolError("proposal-unavailable")
+
+
+def record_search_activity(
+    manifest: dict[str, Any], proposal_dir: Path, result_count: int
+) -> None:
+    """Append bounded metadata without recording the search query or results."""
+    path = proposal_dir / ACTIVITY_FILE
+    try:
+        if path.exists() and path.stat().st_size >= MAX_ACTIVITY_BYTES:
+            return
+        payload = json.dumps(
+            {
+                "token": manifest["token"],
+                "job_id": manifest["job_id"],
+                "operation": "search",
+                "result_count": max(0, int(result_count)),
+            },
+            separators=(",", ":"),
+        ).encode() + b"\n"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(path, flags, 0o600)
+        try:
+            metadata = os.fstat(fd)
+            if metadata.st_nlink != 1 or metadata.st_uid != os.getuid():
+                return
+            if metadata.st_size + len(payload) > MAX_ACTIVITY_BYTES:
+                return
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Observability must never make a valid memory search fail.
+        return
 
 
 def parser() -> argparse.ArgumentParser:
@@ -161,6 +206,7 @@ def main() -> int:
             if args.command == "search":
                 results = search(conn, args.query, limit)
                 output = {"ok": True, "results": results, "count": len(results)}
+                record_search_activity(manifest, proposal_dir, len(results))
             elif args.command == "recent":
                 rows = conn.execute(
                     "SELECT * FROM memories ORDER BY updated_at DESC, id LIMIT ?", (limit,)

@@ -165,6 +165,15 @@ long_term_memory:
     interval_seconds: 86400
     grace_seconds: 2592000
     dormant_threshold: 0.40
+  agent_access:
+    enabled: true
+    commands: [task]
+    scheduled_task_enabled: true
+    max_snapshot_items: 200
+    max_snapshot_chars: 50000
+    max_search_results: 20
+    max_proposals_per_job: 8
+    max_note_chars: 2000
 ```
 
 当前作用域可用 `/memory enable` 和 `/memory disable` 开关。群聊中只有 owner 能
@@ -173,6 +182,15 @@ long_term_memory:
 `/memory show`、`/memory correct`、`/memory forget`，以及带二次确认的
 `/memory clear`；完整写法见 `/memory help`。`/reset` 只清除最近聊天上下文，不会
 删除长期记忆。
+
+当前精确作用域开启后，`/task` 与定时 `task` 可以检索一份经过授权过滤且有数量/字符
+上限的只读快照，并为后续连续任务提出自由文本工作记录。该能力要求
+`agent.use_bwrap: true`；非 bwrap runtime 不会获得自主记忆工具。Agent 永远看不到生产
+数据库及其 WAL/SHM，也看不到其他作用域；快照内容是不可信数据，不是指令。提案只允许
+add/revise，并且只有至少一条必需文本或已验证资源成功送达 QQ、且没有任何交付失败后，
+bridge 才会原子提交。失败、取消、超时、无输出、版本过期或部分发送失败的任务都不会推进
+工作记忆。它能改善长期连续性，但不保证 Agent 一定记录所有有用细节；用户仍可通过现有
+`/memory` 命令查看和删除这些工作记录。
 
 符合条件的用户文本在等待复盘期间最多保留 `604800` 秒（7 天）。达到消息数和
 冷却阈值，或到达周期检查时会后台复盘。每日衰减在 `2592000` 秒宽限期后开始，
