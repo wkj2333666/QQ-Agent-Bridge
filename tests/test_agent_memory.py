@@ -474,6 +474,16 @@ def test_agent_memory_session_is_scoped_immutable_and_path_safe(tmp_path: Path) 
             quoted_sender=None,
             schedule_id=None,
         ) is None
+        cfg.long_term_memory.agent_access.scheduled_task_enabled = False
+        assert manager.prepare(
+            job_id="scheduled-disabled",
+            command="task",
+            scope=scope,
+            current_sender="user-a",
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id="schedule-a",
+        ) is None
         with pytest.raises(ValueError, match="unsafe job id"):
             manager.prepare(
                 job_id="../escape",
@@ -616,4 +626,52 @@ def test_agent_memory_inspection_fails_closed_when_read_only_input_is_replaced(
         assert f"{replaced}-replaced" in inspected.rejection_reasons
     finally:
         manager.cleanup(session)
+        store.close()
+
+
+def test_agent_memory_export_revives_dormant_work_only_for_same_schedule(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scope = MemoryScope("group", "group-a")
+    store.set_scope_enabled(scope, True)
+    item = store.commit_agent_memories(
+        scope,
+        job_id="scheduled-job",
+        schedule_id="schedule-a",
+        subject=("group", "group-a"),
+        proposals=(AgentMemoryProposal("add", "同一定时任务的旧进度"),),
+    ).items[0]
+    assert store._connection is not None
+    store._connection.execute(
+        "UPDATE memory_items SET status = 'dormant' WHERE id = ?", (item.id,)
+    )
+    subjects = (("group", "group-a"),)
+    try:
+        same = store.export_agent_memories(
+            scope,
+            authorized_subjects=subjects,
+            schedule_id="schedule-a",
+            limit=20,
+            max_chars=10_000,
+        )
+        other = store.export_agent_memories(
+            scope,
+            authorized_subjects=subjects,
+            schedule_id="schedule-b",
+            limit=20,
+            max_chars=10_000,
+        )
+        unscheduled = store.export_agent_memories(
+            scope,
+            authorized_subjects=subjects,
+            schedule_id=None,
+            limit=20,
+            max_chars=10_000,
+        )
+
+        assert [value.id for value in same] == [item.id]
+        assert other == ()
+        assert unscheduled == ()
+    finally:
         store.close()

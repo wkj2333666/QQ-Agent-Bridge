@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,9 +14,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import qq_agent_bridge.main as main_module  # type: ignore
+from qq_agent_bridge.agent_memory import AgentMemoryManager  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
+from qq_agent_bridge.long_term_memory import LongTermMemoryStore  # type: ignore
+from qq_agent_bridge.long_term_memory_models import (  # type: ignore
+    MemoryProposal,
+    MemoryScope,
+)
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.policy import Policy  # type: ignore
+from qq_agent_bridge.scheduler import Schedule, ScheduleRun  # type: ignore
 from qq_agent_bridge.types import ChatEvent, ChatReply, ChatSegment  # type: ignore
 
 
@@ -172,6 +182,152 @@ def test_schedule_help_contains_natural_and_structured_examples(tmp_path: Path) 
         assert "/schedule daily 08:00" in reply
         assert "/schedule cancel -1" in reply
         assert "Asia/Shanghai" in reply
+
+    asyncio.run(go())
+
+
+def test_scheduled_task_agent_memory_continuity_uses_scoped_helper(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    async def go() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = make_cfg(tmp_path)
+        cfg.workspaces = {str(workspace): True}
+        cfg.agent.default_workspace = str(workspace)
+        cfg.agent.use_bwrap = True
+        cfg.long_term_memory.enabled = True
+        store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+        store.initialize()
+        scope = MemoryScope("group", "group")
+        store.set_scope_enabled(scope, True)
+        store.commit_review(
+            scope,
+            (),
+            (
+                MemoryProposal.add(
+                    subject_kind="user",
+                    subject_id="888888",
+                    category="preference",
+                    content="UNMENTIONED-PRIVATE-NONCE",
+                    confidence=0.9,
+                    status="active",
+                    source_kind="self_statement",
+                ),
+            ),
+        )
+        app = App(cfg, config_path=tmp_path / "config.yaml")
+        adapter = FakeAdapter()
+        app.adapter = adapter  # type: ignore[assignment]
+        app.policy = Policy(cfg, app._agent_runner)
+        app.agent_memory = AgentMemoryManager(store, cfg, workspace, cfg.resources.root)
+        helper = (
+            Path(__file__).parents[1]
+            / "skills/qq-agent-runtime/scripts/memory_tool.py"
+        )
+        calls = 0
+
+        async def fake_run_agent(
+            agent: object,
+            prompt: str,
+            workspace_arg: str,
+            mode: str,
+            **kwargs: Any,
+        ) -> str:
+            nonlocal calls
+            mounts = kwargs["runtime_mounts"]
+            manifest = next(
+                mount.source for mount in mounts if mount.source.endswith("manifest.json")
+            )
+            recent = subprocess.run(
+                [sys.executable, str(helper), "--manifest", manifest, "recent"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(recent.stdout)
+            serialized = json.dumps(payload, ensure_ascii=False)
+            assert "UNMENTIONED-PRIVATE-NONCE" not in serialized
+            if calls == 0:
+                assert payload["count"] == 0
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(helper),
+                        "--manifest",
+                        manifest,
+                        "propose-add",
+                        "--text",
+                        "已完成第一课；下一课讲时态",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                result = next(
+                    item
+                    for item in payload["results"]
+                    if item["source_kind"] == "agent_work"
+                )
+                assert result["content"] == "已完成第一课；下一课讲时态"
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(helper),
+                        "--manifest",
+                        manifest,
+                        "propose-revise",
+                        "--id",
+                        result["id"],
+                        "--version",
+                        str(result["version"]),
+                        "--text",
+                        "第二次运行已读取旧进度",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            calls += 1
+            assert "已完成第一课；下一课讲时态" not in prompt
+            return f"第{calls}次任务结果"
+
+        monkeypatch.setattr(main_module, "run_agent", fake_run_agent)  # type: ignore[attr-defined]
+        schedule = Schedule(
+            id="schedule-continuity",
+            chat_id="group",
+            is_group=True,
+            creator_id="owner",
+            source_message_id="source",
+            reply_to_message_id=None,
+            kind="rrule",
+            action="task",
+            payload="继续每日课程",
+            mentions=("999999",),
+            timezone="Asia/Shanghai",
+            start_at=100,
+            next_run_at=100,
+            rrule="FREQ=DAILY",
+        )
+
+        first = await app._execute_schedule(
+            schedule,
+            ScheduleRun(1, schedule.id, 100, 100),
+        )
+        second = await app._execute_schedule(
+            schedule,
+            ScheduleRun(2, schedule.id, 200, 200),
+        )
+
+        assert first.state == second.state == "succeeded"
+        assert calls == 2
+        work = [
+            item for item in store.list_items(scope) if item.source_kind == "agent_work"
+        ]
+        assert [item.content for item in work] == ["第二次运行已读取旧进度"]
+        store.close()
 
     asyncio.run(go())
 

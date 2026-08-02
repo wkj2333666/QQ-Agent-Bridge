@@ -440,7 +440,6 @@ class LongTermMemoryStore:
         limit: int,
         max_chars: int,
     ) -> tuple[MemoryItem, ...]:
-        del schedule_id
         subjects = tuple(
             dict.fromkeys(
                 (str(kind).strip(), str(subject_id).strip())
@@ -453,19 +452,56 @@ class LongTermMemoryStore:
         subject_clause = " OR ".join(
             "(subject_kind = ? AND subject_id = ?)" for _ in subjects
         )
-        params: list[object] = [scope.kind, scope.id, int(time.time())]
+        params: list[object] = [scope.kind, scope.id]
+        normalized_schedule = str(schedule_id).strip() if schedule_id else None
+        if normalized_schedule:
+            status_clause = """
+              (m.status = 'active' OR (
+                m.status = 'dormant' AND m.source_kind = 'agent_work'
+                AND EXISTS (
+                  SELECT 1
+                  FROM agent_memory_commit_items aci
+                  JOIN agent_memory_commits ac ON ac.job_id = aci.job_id
+                  WHERE aci.item_id = m.id
+                    AND ac.scope_kind = m.scope_kind
+                    AND ac.scope_id = m.scope_id
+                    AND ac.schedule_id = ?
+                )
+              ))
+            """
+            params.append(normalized_schedule)
+        else:
+            status_clause = "m.status = 'active'"
+        params.append(int(time.time()))
         for kind, subject_id in subjects:
             params.extend((kind, subject_id))
+        if normalized_schedule:
+            schedule_rank = """
+              CASE WHEN m.source_kind = 'agent_work' AND EXISTS (
+                SELECT 1
+                FROM agent_memory_commit_items aci
+                JOIN agent_memory_commits ac ON ac.job_id = aci.job_id
+                WHERE aci.item_id = m.id
+                  AND ac.scope_kind = m.scope_kind
+                  AND ac.scope_id = m.scope_id
+                  AND ac.schedule_id = ?
+              ) THEN 0 WHEN m.source_kind = 'agent_work' THEN 1 ELSE 2 END
+            """
+            params.append(normalized_schedule)
+        else:
+            schedule_rank = (
+                "CASE WHEN m.source_kind = 'agent_work' THEN 1 ELSE 2 END"
+            )
         params.append(max(1, int(limit)))
         rows = self._conn.execute(
             f"""
-            SELECT * FROM memory_items
-            WHERE scope_kind = ? AND scope_id = ?
-              AND status = 'active'
-              AND (expires_at IS NULL OR expires_at > ?)
+            SELECT m.* FROM memory_items m
+            WHERE m.scope_kind = ? AND m.scope_id = ?
+              AND {status_clause}
+              AND (m.expires_at IS NULL OR m.expires_at > ?)
               AND ({subject_clause})
-            ORDER BY CASE WHEN source_kind = 'agent_work' THEN 0 ELSE 1 END,
-                     effective_score DESC, updated_at DESC, id
+            ORDER BY {schedule_rank},
+                     m.effective_score DESC, m.updated_at DESC, m.id
             LIMIT ?
             """,
             params,

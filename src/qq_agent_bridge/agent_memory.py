@@ -99,6 +99,7 @@ class AgentMemoryManager:
             not self.cfg.long_term_memory.enabled
             or not access.enabled
             or str(command).strip().lower() not in access.commands
+            or (schedule_id is not None and not access.scheduled_task_enabled)
             or not self.store.is_scope_enabled(scope)
         ):
             return None
