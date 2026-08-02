@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_DDL = f"""
 CREATE TABLE IF NOT EXISTS memory_scopes (
@@ -114,6 +114,26 @@ CREATE TABLE IF NOT EXISTS review_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_review_runs_scope
     ON review_runs(scope_hash, finished_at);
+
+CREATE TABLE IF NOT EXISTS agent_memory_commits (
+    job_id TEXT PRIMARY KEY,
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('group', 'private')),
+    scope_id TEXT NOT NULL,
+    schedule_id TEXT,
+    proposal_count INTEGER NOT NULL,
+    proposal_digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_memory_commit_items (
+    job_id TEXT NOT NULL REFERENCES agent_memory_commits(job_id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
+    operation TEXT NOT NULL CHECK(operation IN ('add', 'revise')),
+    committed_version INTEGER NOT NULL,
+    PRIMARY KEY(job_id, item_id, operation)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_commit_schedule
+    ON agent_memory_commits(scope_kind, scope_id, schedule_id, created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     item_id UNINDEXED,

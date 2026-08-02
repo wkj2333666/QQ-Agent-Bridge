@@ -57,7 +57,7 @@ def test_public_module_reexports_domain_models() -> None:
 def test_schema_and_migration_helpers_are_in_focused_internal_module() -> None:
     schema_module = importlib.import_module("qq_agent_bridge.long_term_memory_schema")
 
-    assert schema_module.SCHEMA_VERSION == 2
+    assert schema_module.SCHEMA_VERSION == 3
     assert callable(schema_module.migrate)
 
 
@@ -109,12 +109,71 @@ def test_v1_migration_adds_candidate_target_and_survives_restart(tmp_path: Path)
         row[1] for row in first._connection.execute("PRAGMA table_info(memory_items)")
     }
     assert "candidate_target_id" in columns
-    assert first._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert first._connection.execute("PRAGMA user_version").fetchone()[0] == 3
     first.close()
 
     reopened = LongTermMemoryStore(path)
     reopened.initialize()
     assert reopened.get_item(GROUP_A, "legacy-item") == migrated
+    reopened.close()
+
+
+def test_v2_migration_adds_agent_memory_commit_audit_tables(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-v2.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE memory_items (
+                id TEXT PRIMARY KEY,
+                short_id TEXT NOT NULL UNIQUE,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                subject_kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                base_confidence REAL NOT NULL,
+                effective_score REAL NOT NULL,
+                status TEXT NOT NULL,
+                sensitivity TEXT NOT NULL,
+                candidate_target_id TEXT,
+                source_kind TEXT NOT NULL,
+                source_count INTEGER NOT NULL DEFAULT 1,
+                explicit_memory INTEGER NOT NULL DEFAULT 0,
+                decay_exempt INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_supported_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                dormant_at INTEGER,
+                version INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO memory_items VALUES (
+                'legacy-v2', 'legacy-v2-short', 'group', 'group-a', 'user',
+                'user-a', 'project', 'Legacy v2 note', 0.8, 0.8, 'active',
+                'normal', NULL, 'self_statement', 1, 0, 0, 1, 1, 1,
+                NULL, NULL, 1
+            );
+            PRAGMA user_version = 2;
+            """
+        )
+
+    migrated = LongTermMemoryStore(path)
+    migrated.initialize()
+    assert migrated._connection is not None
+    tables = {
+        row[0]
+        for row in migrated._connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert {"agent_memory_commits", "agent_memory_commit_items"} <= tables
+    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    migrated.close()
+
+    reopened = LongTermMemoryStore(path)
+    reopened.initialize()
+    assert reopened.get_item(GROUP_A, "legacy-v2") is not None
     reopened.close()
 
 
@@ -158,6 +217,8 @@ def test_initialize_creates_private_wal_database_and_schema(tmp_path: Path) -> N
         "memory_revisions",
         "review_runs",
         "memory_fts",
+        "agent_memory_commits",
+        "agent_memory_commit_items",
     } <= tables
     assert "scope_hash" in review_run_columns
     assert "scope_id" not in review_run_columns

@@ -109,6 +109,18 @@ class MemoryDecayConfig:
 
 
 @dataclass
+class AgentMemoryAccessConfig:
+    enabled: bool = True
+    commands: tuple[str, ...] = ("task",)
+    scheduled_task_enabled: bool = True
+    max_snapshot_items: int = 200
+    max_snapshot_chars: int = 50_000
+    max_search_results: int = 20
+    max_proposals_per_job: int = 8
+    max_note_chars: int = 2_000
+
+
+@dataclass
 class LongTermMemoryConfig:
     enabled: bool = True
     default_scope_enabled: bool = False
@@ -118,6 +130,7 @@ class LongTermMemoryConfig:
     review: MemoryReviewConfig = field(default_factory=MemoryReviewConfig)
     retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     decay: MemoryDecayConfig = field(default_factory=MemoryDecayConfig)
+    agent_access: AgentMemoryAccessConfig = field(default_factory=AgentMemoryAccessConfig)
 
 
 @dataclass
@@ -455,6 +468,8 @@ def _load_long_term_memory(raw: Any) -> LongTermMemoryConfig:
     retrieval_values = retrieval_values if isinstance(retrieval_values, dict) else {}
     decay_values = values.get("decay")
     decay_values = decay_values if isinstance(decay_values, dict) else {}
+    access_values = values.get("agent_access")
+    access_values = access_values if isinstance(access_values, dict) else {}
 
     database_path = values.get("database_path", defaults.database_path)
     if not isinstance(database_path, str) or not database_path.strip():
@@ -516,7 +531,37 @@ def _load_long_term_memory(raw: Any) -> LongTermMemoryConfig:
                 decay_values.get("dormant_threshold"), 0.40, 0.0, 1.0
             ),
         ),
+        agent_access=AgentMemoryAccessConfig(
+            enabled=_bool_or_default(access_values.get("enabled"), True),
+            commands=_agent_memory_commands(access_values.get("commands")),
+            scheduled_task_enabled=_bool_or_default(
+                access_values.get("scheduled_task_enabled"), True
+            ),
+            max_snapshot_items=_bounded_int(
+                access_values.get("max_snapshot_items"), 200, 1, 1_000
+            ),
+            max_snapshot_chars=_bounded_int(
+                access_values.get("max_snapshot_chars"), 50_000, 1_000, 1_000_000
+            ),
+            max_search_results=_bounded_int(
+                access_values.get("max_search_results"), 20, 1, 100
+            ),
+            max_proposals_per_job=_bounded_int(
+                access_values.get("max_proposals_per_job"), 8, 1, 32
+            ),
+            max_note_chars=_bounded_int(
+                access_values.get("max_note_chars"), 2_000, 1, 10_000
+            ),
+        ),
     )
+
+
+def _agent_memory_commands(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ("task",)
+    if not isinstance(value, (list, tuple)):
+        return ("task",)
+    return tuple(dict.fromkeys(str(item).strip().lower() for item in value if item == "task"))
 
 
 def _load_storage_area(

@@ -90,6 +90,15 @@ long_term_memory:
     interval_seconds: 86400
     grace_seconds: 2592000
     dormant_threshold: 0.40
+  agent_access:
+    enabled: true
+    commands: [task]
+    scheduled_task_enabled: true
+    max_snapshot_items: 200
+    max_snapshot_chars: 50000
+    max_search_results: 20
+    max_proposals_per_job: 8
+    max_note_chars: 2000
 
 resources:
   enabled: true

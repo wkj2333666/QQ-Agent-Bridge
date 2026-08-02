@@ -203,6 +203,44 @@ def test_long_term_memory_scopes_are_disabled_by_default() -> None:
     assert cfg.long_term_memory.decay.interval_seconds == 86_400
     assert cfg.long_term_memory.decay.grace_seconds == 2_592_000
     assert cfg.long_term_memory.decay.dormant_threshold == 0.40
+    assert cfg.long_term_memory.agent_access.enabled is True
+    assert cfg.long_term_memory.agent_access.commands == ("task",)
+    assert cfg.long_term_memory.agent_access.scheduled_task_enabled is True
+    assert cfg.long_term_memory.agent_access.max_snapshot_items == 200
+    assert cfg.long_term_memory.agent_access.max_snapshot_chars == 50_000
+    assert cfg.long_term_memory.agent_access.max_search_results == 20
+    assert cfg.long_term_memory.agent_access.max_proposals_per_job == 8
+    assert cfg.long_term_memory.agent_access.max_note_chars == 2_000
+
+
+def test_long_term_memory_agent_access_loads_safe_bounded_values(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+long_term_memory:
+  agent_access:
+    enabled: true
+    commands: [task, ask, task, unknown]
+    scheduled_task_enabled: false
+    max_snapshot_items: 999999
+    max_snapshot_chars: -1
+    max_search_results: 0
+    max_proposals_per_job: 999
+    max_note_chars: 999999
+""",
+        encoding="utf-8",
+    )
+
+    access = BridgeConfig.load(path).long_term_memory.agent_access
+
+    assert access.enabled is True
+    assert access.commands == ("task",)
+    assert access.scheduled_task_enabled is False
+    assert access.max_snapshot_items == 1_000
+    assert access.max_snapshot_chars == 1_000
+    assert access.max_search_results == 1
+    assert access.max_proposals_per_job == 32
+    assert access.max_note_chars == 10_000
 
 
 def test_long_term_memory_loads_bounded_values_and_string_scope_keys(
