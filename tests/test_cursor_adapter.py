@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CursorAdapter  # type: ignore
+from qq_agent_bridge.agent_runtime import RuntimeMount  # type: ignore
 
 
 def test_ask_command_is_read_only() -> None:
@@ -1047,6 +1048,101 @@ def test_ask_mounts_workspace_read_only_without_outgoing_write(tmp_path: Path) -
     assert _has_bind(cmd, "--ro-bind", str(workspace), str(workspace))
     assert not _has_bind(cmd, "--bind", str(workspace), str(workspace))
     assert not _has_bind(cmd, "--bind", str(outgoing), str(outgoing))
+
+
+def test_task_runtime_mounts_are_rendered_after_workspace_bind(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    session = workspace / "downloads/qq-agent-bridge/agent-memory/job-1"
+    proposals = session / "proposals"
+    proposals.mkdir(parents=True)
+    snapshot = session / "snapshot.sqlite3"
+    manifest = session / "manifest.json"
+    snapshot.write_bytes(b"sqlite")
+    manifest.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    manifest.chmod(0o400)
+    proposals.chmod(0o700)
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.use_bwrap = True
+    adapter = CursorAdapter(cfg)
+    mounts = (
+        RuntimeMount(str(snapshot), str(snapshot)),
+        RuntimeMount(str(manifest), str(manifest)),
+        RuntimeMount(str(proposals), str(proposals), writable=True),
+    )
+
+    cmd = adapter._build_cmd(
+        "hello", str(workspace), "task", model=None, runtime_mounts=mounts
+    )
+
+    workspace_index = _bind_index(
+        cmd, "--ro-bind", str(workspace), str(workspace)
+    )
+    assert workspace_index < _bind_index(
+        cmd, "--ro-bind", str(snapshot), str(snapshot)
+    )
+    assert workspace_index < _bind_index(
+        cmd, "--bind", str(proposals), str(proposals)
+    )
+
+
+@pytest.mark.parametrize("mode,use_bwrap", [("ask", True), ("task", False)])
+def test_runtime_mounts_require_bwrap_task_mode(
+    tmp_path: Path, mode: str, use_bwrap: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / "downloads/qq-agent-bridge/agent-memory/job/snapshot.sqlite3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"sqlite")
+    source.chmod(0o400)
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    cfg.agent.use_bwrap = use_bwrap
+    adapter = CursorAdapter(cfg)
+
+    with pytest.raises(ValueError, match="runtime mounts"):
+        adapter._build_cmd(
+            "hello",
+            str(workspace),
+            mode,
+            model=None,
+            runtime_mounts=(RuntimeMount(str(source), str(source)),),
+        )
+
+
+def test_runtime_mount_rejects_symlink_and_duplicate_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    session = workspace / "downloads/qq-agent-bridge/agent-memory/job"
+    session.mkdir(parents=True)
+    real = session / "real.sqlite3"
+    real.write_bytes(b"sqlite")
+    real.chmod(0o400)
+    linked = session / "snapshot.sqlite3"
+    linked.symlink_to(real)
+    manifest = session / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    manifest.chmod(0o400)
+    cfg = BridgeConfig(workspaces={str(workspace): True})
+    adapter = CursorAdapter(cfg)
+
+    with pytest.raises(ValueError, match="runtime mount"):
+        adapter._build_cmd(
+            "hello",
+            str(workspace),
+            "task",
+            model=None,
+            runtime_mounts=(RuntimeMount(str(linked), str(linked)),),
+        )
+    with pytest.raises(ValueError, match="runtime mount"):
+        adapter._build_cmd(
+            "hello",
+            str(workspace),
+            "task",
+            model=None,
+            runtime_mounts=(
+                RuntimeMount(str(real), str(real)),
+                RuntimeMount(str(manifest), str(real)),
+            ),
+        )
 
 
 def test_bwrap_mounts_home_before_cursor_runtime() -> None:

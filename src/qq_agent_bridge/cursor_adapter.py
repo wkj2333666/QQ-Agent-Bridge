@@ -122,9 +122,12 @@ class CursorAdapter:
         mode: str,
         model: str | None,
         stream: bool = False,
+        runtime_mounts: tuple[Any, ...] = (),
     ) -> list[str]:
         if self.cfg.agent.hardened_read_only and mode != "ask":
             raise ValueError("hardened read-only agent only supports ask mode")
+        if runtime_mounts and (mode != "task" or not self.cfg.agent.use_bwrap):
+            raise ValueError("runtime mounts require bwrap task mode")
         cursor_cmd: list[str] = [self.binary, "-p", "--workspace", workspace]
         # bwrap already provides a full container sandbox, so disable
         # cursor-agent's own sandbox (which requires AppArmor).
@@ -158,10 +161,19 @@ class CursorAdapter:
         ):
             inner_cmd = [self.env_runner, "run", "-n", self.cfg.agent.env_name, *cursor_cmd]
         if self.cfg.agent.use_bwrap:
-            return self._build_bwrap_cmd(inner_cmd, workspace, mode)
+            return self._build_bwrap_cmd(
+                inner_cmd, workspace, mode, runtime_mounts=runtime_mounts
+            )
         return inner_cmd
 
-    def _build_bwrap_cmd(self, inner_cmd: list[str], workspace: str, mode: str) -> list[str]:
+    def _build_bwrap_cmd(
+        self,
+        inner_cmd: list[str],
+        workspace: str,
+        mode: str,
+        *,
+        runtime_mounts: tuple[Any, ...] = (),
+    ) -> list[str]:
         home = Path.home()
         exposed_home = _HARDENED_HOME if self.cfg.agent.hardened_read_only else home
         workspace_path = Path(workspace).expanduser().resolve(strict=False)
@@ -230,6 +242,10 @@ class CursorAdapter:
         if mode == "task":
             for src, dst in self._task_rw_binds(workspace_path):
                 cmd.extend(["--bind", src, dst])
+        for flag, source, target in self._validated_runtime_mounts(
+            workspace_path, exposed_workspace, mode, runtime_mounts
+        ):
+            cmd.extend([flag, source, target])
         if not self.cfg.agent.hardened_read_only:
             for src, dst in self._cursor_ro_binds(home, exposed_home):
                 cmd.extend(["--ro-bind", src, dst])
@@ -260,6 +276,76 @@ class CursorAdapter:
             )
         cmd.extend(inner_cmd)
         return cmd
+
+    def _validated_runtime_mounts(
+        self,
+        workspace: Path,
+        exposed_workspace: Path,
+        mode: str,
+        mounts: tuple[Any, ...],
+    ) -> tuple[tuple[str, str, str], ...]:
+        if not mounts:
+            return ()
+        if mode != "task" or not self.cfg.agent.use_bwrap:
+            raise ValueError("runtime mounts require bwrap task mode")
+        memory_root = Path(
+            os.path.abspath(workspace / self.cfg.resources.root / "agent-memory")
+        )
+        targets: list[Path] = []
+        result: list[tuple[str, str, str]] = []
+        for mount in mounts:
+            source_value = getattr(mount, "source", None)
+            target_value = getattr(mount, "target", None)
+            writable = getattr(mount, "writable", None)
+            if (
+                not isinstance(source_value, str)
+                or not isinstance(target_value, str)
+                or not isinstance(writable, bool)
+            ):
+                raise ValueError("invalid runtime mount")
+            source = Path(os.path.abspath(source_value))
+            target = Path(target_value)
+            if not source.is_absolute() or not target.is_absolute():
+                raise ValueError("runtime mount paths must be absolute")
+            try:
+                relative = source.relative_to(workspace)
+                source.relative_to(memory_root)
+            except ValueError as exc:
+                raise ValueError("runtime mount source is outside job memory root") from exc
+            expected_target = exposed_workspace / relative
+            if target != expected_target:
+                raise ValueError("runtime mount target does not match workspace mapping")
+            current = workspace
+            for part in relative.parts:
+                current = current / part
+                metadata = current.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ValueError("runtime mount source contains symlink")
+            metadata = source.lstat()
+            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+                raise ValueError("runtime mount source is not safely owned")
+            if writable:
+                if not stat.S_ISDIR(metadata.st_mode) or source.name != "proposals":
+                    raise ValueError("runtime mount writable source must be proposal directory")
+                flag = "--bind"
+            else:
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or source.name not in {"snapshot.sqlite3", "manifest.json"}
+                ):
+                    raise ValueError("runtime mount read-only source is invalid")
+                flag = "--ro-bind"
+            if any(
+                target == existing
+                or target.is_relative_to(existing)
+                or existing.is_relative_to(target)
+                for existing in targets
+            ):
+                raise ValueError("runtime mount targets overlap")
+            targets.append(target)
+            result.append((flag, str(source), str(target)))
+        return tuple(result)
 
     def _system_ro_binds(self) -> list[tuple[str, str]]:
         candidates = [
@@ -746,6 +832,7 @@ class CursorAdapter:
         progress: ProgressCallback | None = None,
         trace_id: str | None = None,
         redact_extra: tuple[str, ...] | None = None,
+        runtime_mounts: tuple[Any, ...] = (),
     ) -> str:
         ws = workspace or self.cfg.agent.default_workspace
         if not self.cfg.is_workspace_allowed(ws):
@@ -799,6 +886,7 @@ class CursorAdapter:
                     mode,
                     current_model,
                     stream=progress is not None,
+                    runtime_mounts=runtime_mounts,
                 )
 
                 logger.info("agent invoke: executable=%s mode=%s", cmd[0], mode)
@@ -1217,6 +1305,7 @@ class CustomCommandAdapter(CursorAdapter):
         mode: str,
         model: str | None,
         stream: bool = False,
+        runtime_mounts: tuple[Any, ...] = (),
     ) -> list[str]:
         template = self.cfg.agent.command.get(mode)
         if not template:
@@ -1234,7 +1323,11 @@ class CustomCommandAdapter(CursorAdapter):
         if self.env_runner and self.cfg.agent.env_name:
             inner_cmd = [self.env_runner, "run", "-n", self.cfg.agent.env_name, *inner_cmd]
         if self.cfg.agent.use_bwrap:
-            return self._build_bwrap_cmd(inner_cmd, workspace, mode)
+            return self._build_bwrap_cmd(
+                inner_cmd, workspace, mode, runtime_mounts=runtime_mounts
+            )
+        if runtime_mounts:
+            raise ValueError("runtime mounts require bwrap task mode")
         return inner_cmd
 
     def _stream_text_from_line(self, line: str) -> str:

@@ -7,7 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from qq_agent_bridge.agent_runtime import DisabledAgentAdapter, build_agent_adapter  # type: ignore
+from qq_agent_bridge.agent_runtime import (  # type: ignore
+    DisabledAgentAdapter,
+    RuntimeMount,
+    build_agent_adapter,
+    run_agent,
+)
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CursorAdapter, CustomCommandAdapter  # type: ignore
 
@@ -81,3 +86,53 @@ def test_unsupported_agent_runtime_is_rejected() -> None:
         assert "unsupported agent runtime" in str(exc)
     else:
         raise AssertionError("expected unsupported runtime to raise")
+
+
+def test_run_agent_forwards_runtime_mounts_only_when_supported() -> None:
+    mount = RuntimeMount("/workspace/snapshot", "/workspace/snapshot")
+
+    class Modern:
+        received = ()
+
+        async def run(self, prompt, workspace, mode, model=None, runtime_mounts=()):
+            self.received = runtime_mounts
+            return "modern"
+
+    class Legacy:
+        async def run(self, prompt, workspace, mode, model=None):
+            return "legacy"
+
+    modern = Modern()
+    assert asyncio.run(
+        run_agent(
+            modern,
+            "prompt",
+            "/workspace",
+            "task",
+            runtime_mounts=(mount,),
+        )
+    ) == "modern"
+    assert modern.received == (mount,)
+    assert asyncio.run(
+        run_agent(
+            Legacy(),
+            "prompt",
+            "/workspace",
+            "task",
+            runtime_mounts=(mount,),
+        )
+    ) == "legacy"
+
+
+def test_disabled_adapter_accepts_runtime_mount_contract() -> None:
+    cfg = BridgeConfig()
+    adapter = DisabledAgentAdapter(cfg)
+    result = asyncio.run(
+        adapter.run(
+            "prompt",
+            "/workspace",
+            "task",
+            runtime_mounts=(RuntimeMount("/a", "/a"),),
+        )
+    )
+    assert result.startswith("[error]")

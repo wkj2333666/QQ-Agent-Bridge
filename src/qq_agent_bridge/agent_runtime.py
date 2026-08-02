@@ -2,13 +2,26 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import inspect
+from pathlib import Path
 from typing import Any
 
 from .config import BridgeConfig
 from .cursor_adapter import CursorAdapter, CustomCommandAdapter
 
 ProgressCallback = Callable[[str], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class RuntimeMount:
+    source: str
+    target: str
+    writable: bool = False
+
+    def __post_init__(self) -> None:
+        if not Path(self.source).is_absolute() or not Path(self.target).is_absolute():
+            raise ValueError("runtime mount paths must be absolute")
 
 
 class DisabledAgentAdapter:
@@ -24,6 +37,7 @@ class DisabledAgentAdapter:
         progress: ProgressCallback | None = None,
         trace_id: str | None = None,
         redact_extra: tuple[str, ...] | None = None,
+        runtime_mounts: tuple[RuntimeMount, ...] = (),
     ) -> str:
         return "[error] agent runtime 未配置，请在 config.yaml 里设置 agent.runtime"
 
@@ -49,6 +63,7 @@ async def run_agent(
     progress: ProgressCallback | None = None,
     trace_id: str | None = None,
     redact_extra: tuple[str, ...] | None = None,
+    runtime_mounts: tuple[RuntimeMount, ...] = (),
 ) -> str:
     """Call an Agent while keeping older test/custom adapters compatible."""
     kwargs: dict[str, Any] = {"model": model}
@@ -58,6 +73,8 @@ async def run_agent(
         kwargs["trace_id"] = trace_id
     if redact_extra is not None and _supports_keyword(agent.run, "redact_extra"):
         kwargs["redact_extra"] = redact_extra
+    if runtime_mounts and _supports_keyword(agent.run, "runtime_mounts"):
+        kwargs["runtime_mounts"] = runtime_mounts
     return await agent.run(prompt, workspace, mode, **kwargs)
 
 
