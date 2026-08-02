@@ -230,8 +230,8 @@ The schema migration adds:
 
 - `observed` to the allowed memory statuses;
 - `review_state = quarantined` behavior for source rows;
-- `input_count`, `consumed_count`, `deferred_count`, and `no_memory_count` to
-  review-run accounting; and
+- `input_count`, `consumed_count`, `deferred_count`, `observed_count`,
+  `ignored_count`, and `no_memory_count` to review-run accounting; and
 - optional rejection-reason summaries without source text or identifiers.
 
 Existing `source_count` remains for compatibility but is defined as input count
