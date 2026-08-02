@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from qq_agent_bridge.config import MemoryRetrievalConfig
+from qq_agent_bridge.config import BridgeConfig
+from qq_agent_bridge.agent_memory import AgentMemoryManager
 from qq_agent_bridge.long_term_memory import (
     AgentMemoryCommitError,
     AgentMemoryProposal,
@@ -399,4 +401,219 @@ def test_agent_memory_commit_has_no_forget_operation(tmp_path: Path) -> None:
 
         assert store.get_item(scope, item.id) is not None
     finally:
+        store.close()
+
+
+def _manager(
+    tmp_path: Path,
+    store: LongTermMemoryStore,
+) -> tuple[AgentMemoryManager, BridgeConfig, Path]:
+    cfg = BridgeConfig()
+    cfg.long_term_memory.enabled = True
+    cfg.long_term_memory.agent_access.enabled = True
+    cfg.long_term_memory.agent_access.commands = ("task",)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return (
+        AgentMemoryManager(store, cfg, workspace, "downloads/qq-agent-bridge"),
+        cfg,
+        workspace,
+    )
+
+
+def test_agent_memory_session_is_scoped_immutable_and_path_safe(tmp_path: Path) -> None:
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("group", "group-a")
+    _add_memory(
+        store,
+        scope,
+        message_id="visible",
+        subject_kind="group",
+        subject_id="group-a",
+        content="可见的历史进度",
+    )
+    manager, cfg, workspace = _manager(tmp_path, store)
+    try:
+        session = manager.prepare(
+            job_id="job-1",
+            command="task",
+            scope=scope,
+            current_sender="user-a",
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        )
+
+        assert session is not None
+        assert session.subject == ("group", "group-a")
+        assert session.snapshot_path.stat().st_mode & 0o777 == 0o400
+        assert session.manifest_path.stat().st_mode & 0o777 == 0o400
+        assert session.proposal_dir.stat().st_mode & 0o777 == 0o700
+        manifest = session.manifest_path.read_text(encoding="utf-8")
+        assert str(store.path) not in manifest
+        assert str(workspace) not in manifest
+
+        cfg.long_term_memory.agent_access.enabled = False
+        assert manager.prepare(
+            job_id="disabled",
+            command="task",
+            scope=scope,
+            current_sender="user-a",
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        ) is None
+        cfg.long_term_memory.agent_access.enabled = True
+        assert manager.prepare(
+            job_id="ask-job",
+            command="ask",
+            scope=scope,
+            current_sender="user-a",
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        ) is None
+        with pytest.raises(ValueError, match="unsafe job id"):
+            manager.prepare(
+                job_id="../escape",
+                command="task",
+                scope=scope,
+                current_sender="user-a",
+                real_mentions=(),
+                quoted_sender=None,
+                schedule_id=None,
+            )
+        manager.cleanup(session)
+        manager.cleanup(session)
+        assert not session.root.exists()
+    finally:
+        store.close()
+
+
+def test_agent_memory_session_refuses_production_database_inside_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = LongTermMemoryStore(workspace / "data" / "memory.sqlite3")
+    store.initialize()
+    store.set_scope_enabled(MemoryScope("private", "user-a"), True)
+    cfg = BridgeConfig()
+    manager = AgentMemoryManager(store, cfg, workspace, "downloads/qq-agent-bridge")
+    try:
+        with pytest.raises(ValueError, match="production memory database"):
+            manager.prepare(
+                job_id="job-unsafe-db",
+                command="task",
+                scope=MemoryScope("private", "user-a"),
+                current_sender="user-a",
+                real_mentions=(),
+                quoted_sender=None,
+                schedule_id=None,
+            )
+    finally:
+        store.close()
+
+
+def test_agent_memory_inspection_accepts_strict_proposals_and_rejects_links(
+    tmp_path: Path,
+) -> None:
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("group", "group-a")
+    store.set_scope_enabled(scope, True)
+    manager, _cfg, _workspace = _manager(tmp_path, store)
+    session = manager.prepare(
+        job_id="job-inspect",
+        command="task",
+        scope=scope,
+        current_sender="user-a",
+        real_mentions=(),
+        quoted_sender=None,
+        schedule_id=None,
+    )
+    assert session is not None
+    try:
+        proposal = session.proposal_dir / "0001.json"
+        proposal.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "add",
+                    "content": "下次继续核对来源",
+                    "item_id": None,
+                    "expected_version": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        proposal.chmod(0o600)
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}", encoding="utf-8")
+        (session.proposal_dir / "0002.json").symlink_to(outside)
+
+        inspected = manager.inspect(session)
+
+        assert inspected.proposals == (
+            AgentMemoryProposal("add", "下次继续核对来源"),
+        )
+        assert "symlink" in inspected.rejection_reasons
+    finally:
+        manager.cleanup(session)
+        store.close()
+
+
+@pytest.mark.parametrize("replaced", ["snapshot", "manifest"])
+def test_agent_memory_inspection_fails_closed_when_read_only_input_is_replaced(
+    tmp_path: Path,
+    replaced: str,
+) -> None:
+    store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+    store.initialize()
+    scope = MemoryScope("group", "group-a")
+    store.set_scope_enabled(scope, True)
+    manager, _cfg, _workspace = _manager(tmp_path, store)
+    session = manager.prepare(
+        job_id=f"job-replaced-{replaced}",
+        command="task",
+        scope=scope,
+        current_sender="user-a",
+        real_mentions=(),
+        quoted_sender=None,
+        schedule_id=None,
+    )
+    assert session is not None
+    try:
+        proposal = session.proposal_dir / "valid.json"
+        proposal.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "add",
+                    "content": "不应被提交",
+                    "item_id": None,
+                    "expected_version": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        proposal.chmod(0o600)
+        target = (
+            session.snapshot_path if replaced == "snapshot" else session.manifest_path
+        )
+        target.unlink()
+        target.write_text("replaced", encoding="utf-8")
+        target.chmod(0o400)
+
+        inspected = manager.inspect(session)
+
+        assert inspected.proposals == ()
+        assert f"{replaced}-replaced" in inspected.rejection_reasons
+    finally:
+        manager.cleanup(session)
         store.close()
