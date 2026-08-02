@@ -24,6 +24,12 @@ real config files or runtime state.
   local absolute paths, generated downloads, or runtime container state.
 - Use placeholder ids such as `1000000001` for users and `2000000001` for
   groups in tests and docs.
+- Write synthetic chat messages, names, attachment metadata, quoted content,
+  forwarded records, and profile prompts. Do not derive fixtures by lightly
+  anonymizing real conversations.
+- Use a privacy-safe commit author address, preferably your GitHub noreply
+  address, and keep personal identifiers out of commit messages.
+- Review the staged diff and all new fixtures for personal data before pushing.
 
 ## Code Style
 

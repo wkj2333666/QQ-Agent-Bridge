@@ -24,18 +24,31 @@ Use this checklist before making a repository public.
 The current working tree should not contain real QQ ids, real group ids, real
 tokens, local user paths, or chat names.
 
+Review synthetic-looking content as well: tests and examples must not be
+lightly anonymized copies of real conversations, quoted messages, forwarded
+records, attachment names, or profile prompts.
+
 Before publishing, run:
 
 ```bash
 git grep -n -I -E 'real-id-or-name|real-token|/home/your-user' -- .
 git log --all -- config.yaml runtime/napcat/data runtime/napcat/config .env
 git rev-list --all --objects | grep -E 'config\.yaml|auth\.json|token|cookie|qr|runtime/.*/data'
+git log --all --format='%an <%ae>%n%cn <%ce>%n%B'
 ```
+
+Inspect the final command for personal author/committer email addresses,
+identifiers, names, and chat content in commit messages. Published commits
+should use a privacy-safe address, preferably a GitHub noreply address.
 
 If this repository was developed privately before sanitization, old commits may
 still contain personal ids, group ids, names, or local paths even when the
 current tree is clean. Do not publish that history directly unless you are
 comfortable with those values being public.
+
+Deleting private data in a later commit does not remove it from Git history.
+Sanitize or replace the affected history before publishing, then coordinate any
+force-push with collaborators.
 
 Recommended public-release options:
 
