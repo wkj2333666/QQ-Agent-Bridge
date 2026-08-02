@@ -1,7 +1,9 @@
 """Runtime skill injected into QQ agent runtime prompts."""
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from pathlib import Path
 
 _SKILL_RELATIVE_REFERENCES = "skills/qq-agent-runtime/references"
@@ -117,6 +119,16 @@ def prepare_runtime_skill_bundle(workspace: str | Path, resource_root: str) -> s
     for source in sorted(source_refs.glob("*.md")):
         shutil.copy2(source, target_refs / source.name)
     shutil.copy2(source_root / "SKILL.md", bundle_root / "SKILL.md")
+    source_scripts = source_root / "scripts"
+    target_scripts = bundle_root / "scripts"
+    target_scripts.mkdir(parents=True, exist_ok=True)
+    for source in sorted(source_scripts.iterdir()):
+        metadata = source.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("runtime skill script source must be a regular file")
+        target = target_scripts / source.name
+        shutil.copyfile(source, target)
+        os.chmod(target, 0o500)
 
     return (root / _BUNDLED_SKILL_RELATIVE_ROOT / "references").as_posix()
 

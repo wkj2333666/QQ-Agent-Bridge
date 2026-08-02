@@ -254,6 +254,40 @@ def test_prompt_includes_resource_context_for_cursor() -> None:
     assert "请直接使用这些本地路径或链接处理用户请求" in prompt
 
 
+def test_task_prompt_includes_bounded_agent_memory_context_before_untrusted_history() -> None:
+    ev = make_ev()
+    context = (
+        "作用域记忆工具：python downloads/qq-agent-bridge/runtime-skills/"
+        "qq-agent-runtime/scripts/memory_tool.py --manifest "
+        "downloads/qq-agent-bridge/agent-memory/job-1/manifest.json"
+    )
+
+    prompt = build_agent_prompt(
+        "task",
+        "继续上次任务",
+        ev,
+        history="UNTRUSTED-HISTORY",
+        agent_memory_context=context,
+    )
+
+    assert context in prompt
+    assert prompt.index(context) < prompt.index("UNTRUSTED-HISTORY")
+    assert "long-term-memory.sqlite3" not in prompt
+    assert "/home/" not in prompt
+
+
+def test_non_task_prompt_ignores_agent_memory_context() -> None:
+    ev = make_ev()
+    for command in ("ask", "plan", "code"):
+        prompt = build_agent_prompt(
+            command,
+            "hello",
+            ev,
+            agent_memory_context="SHOULD-NOT-APPEAR",
+        )
+        assert "SHOULD-NOT-APPEAR" not in prompt
+
+
 def test_resource_context_requires_direct_media_evidence_for_content_claims() -> None:
     prompt = build_agent_prompt(
         "task",

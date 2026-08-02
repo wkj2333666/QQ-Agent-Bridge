@@ -164,6 +164,24 @@ def test_runtime_skill_can_point_to_workspace_local_reference_bundle(tmp_path: P
         encoding="utf-8"
     )
     assert "视频" in copied_visual_media.read_text(encoding="utf-8")
+    copied_helper = (
+        workspace
+        / "downloads/qq-agent-bridge/runtime-skills/qq-agent-runtime/scripts/memory_tool.py"
+    )
+    assert copied_helper.is_file()
+    assert copied_helper.stat().st_mode & 0o777 == 0o500
+    assert "propose-revise" in copied_helper.read_text(encoding="utf-8")
+
+
+def test_runtime_skill_indexes_scoped_memory_reference() -> None:
+    skill = build_runtime_skill("task")
+    reference = ROOT / "skills/qq-agent-runtime/references/memory-tools.md"
+
+    assert "skills/qq-agent-runtime/references/memory-tools.md" in skill
+    text = reference.read_text(encoding="utf-8")
+    assert "不可信" in text
+    assert "propose-add" in text
+    assert "QQ" in text and "送达" in text
 
 
 def test_runtime_skill_reference_packs_cover_requested_capabilities() -> None:
