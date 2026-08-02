@@ -513,7 +513,7 @@ class StorageMaintainer:
             return 1
         if candidate.area == "traces":
             return 2
-        if candidate.kind in {"outgoing", "sending"}:
+        if candidate.kind in {"outgoing", "sending", "agent-memory"}:
             return 3
         return 4
 
@@ -660,6 +660,14 @@ class StorageMaintainer:
                 self._add_candidate(root, Path(entry.path), "received", output, budget)
         self._add_immediate(root, ("outgoing",), "outgoing", output, budget, directories_only=True)
         self._add_immediate(root, ("sending",), "sending", output, budget, directories_only=True)
+        self._add_immediate(
+            root,
+            ("agent-memory",),
+            "agent-memory",
+            output,
+            budget,
+            directories_only=True,
+        )
 
     def _add_immediate(
         self,

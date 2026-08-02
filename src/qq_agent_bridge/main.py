@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 
 from .artifact_delivery import resolve_artifacts
 from .attachment_cache import AttachmentCache
-from .agent_runtime import build_agent_adapter, run_agent
+from .agent_memory import AgentMemoryManager, AgentMemorySession
+from .agent_runtime import RuntimeMount, build_agent_adapter, run_agent
 from .config import COMMAND_ACCESS_LEVELS, MENTION_MODE_OPTIONS, MENTION_MODES, BridgeConfig
 from .command_access_store import write_command_access_to_config
 from .command_help import build_command_help
@@ -134,6 +135,9 @@ class App:
         self.memory_review_coordinator: MemoryReviewCoordinator | None = None
         self.long_term_memory_database_path: Path | None = None
         self.long_term_memory_error: str | None = None
+        self.agent_memory: AgentMemoryManager | None = None
+        self._agent_memory_sessions: dict[str, AgentMemorySession] = {}
+        self._agent_memory_session_managers: dict[str, AgentMemoryManager] = {}
         self._long_term_memory_accepting = False
         self._long_term_memory_protected_paths: tuple[Path, ...] = ()
         self._memory_review_tasks: set[asyncio.Task[None]] = set()
@@ -795,6 +799,12 @@ class App:
         if reporter:
             reporter.stop()
         self._outgoing_jobs.pop(job.event.id, None)
+        session, manager = self._pop_agent_memory_session(job)
+        if session is not None and manager is not None:
+            try:
+                manager.cleanup(session)
+            except (OSError, ValueError):
+                logger.warning("agent memory cleanup failed job=%s", job.id)
         try:
             await self._cleanup_policy()
         except Exception:  # noqa: BLE001 - cleanup must not mask the original job outcome
@@ -818,6 +828,10 @@ class App:
             await self._finish_schedule_parse_job(job, result)
             return
         transactional = False
+        delivered_any = False
+        delivery_failed = result in {"[timeout]", "[cancelled]"} or result.startswith(
+            "[error]"
+        )
         if job.allow_outgoing_resources and job.outgoing_dir and job.outgoing_token:
             job.artifact_delivery_outcome = "failed"
             expected_outbox = (
@@ -850,6 +864,7 @@ class App:
             if not transactional:
                 job.artifact_delivery_outcome = None
             if not resolution.verified:
+                delivery_failed = True
                 reply_text = "文件没有成功生成或无法验证，本次未发送。"
             elif outgoing:
                 sent = 0
@@ -859,6 +874,7 @@ class App:
                         await self._send_outgoing_resource(job, resource, index)
                     except Exception as exc:  # noqa: BLE001 - isolate each OneBot resource failure
                         failed += 1
+                        delivery_failed = True
                         logger.warning(
                             "outgoing resource delivery failed job=%s index=%d kind=%s error=%s",
                             job.id,
@@ -868,6 +884,7 @@ class App:
                         )
                     else:
                         sent += 1
+                        delivered_any = True
                 if failed == 0:
                     job.artifact_delivery_outcome = "succeeded"
                     reply_text = resolution.text
@@ -903,10 +920,14 @@ class App:
                         f"{ev.id}-{i}",
                     )
                     self.proactive.record_bot_send(ev.chat_id)
+                    delivered_any = True
                 else:
                     await self._send_text(ev.chat_id, ev.is_group, reply, f"{ev.id}-{i}")
+                    delivered_any = True
         if transactional and remember and reply_text.strip():
             self.memory.append_exchange(job.event, job.args or job.event.text, reply_text)
+        if delivered_any and not delivery_failed:
+            self._commit_agent_memory_after_delivery(job)
 
     async def _send_outgoing_resource(
         self,
@@ -1228,6 +1249,12 @@ class App:
         self._long_term_memory_protected_paths = protected
         self.long_term_memory_database_path = database_path
         self.long_term_memory_store = store
+        self.agent_memory = AgentMemoryManager(
+            store,
+            app_cfg,
+            Path(app_cfg.agent.default_workspace),
+            app_cfg.resources.root,
+        )
         self.long_term_memory_collector = MemoryCollector(store, app_cfg)
         self.long_term_memory_retriever = LongTermMemoryRetriever(
             store,
@@ -1283,6 +1310,12 @@ class App:
             self.long_term_memory_collector = new_collector
             self.long_term_memory_retriever = new_retriever
             self.memory_commands = new_commands
+            self.agent_memory = AgentMemoryManager(
+                store,
+                cfg,
+                Path(cfg.agent.default_workspace),
+                cfg.resources.root,
+            )
             self._long_term_memory_accepting = bool(cfg.long_term_memory.enabled)
             self.long_term_memory_error = None
         except Exception as exc:  # noqa: BLE001 - retain the open store on reload errors
@@ -1318,6 +1351,18 @@ class App:
         self._dispose_memory_runtime(commands.interpreter if commands is not None else None)
         self._dispose_memory_runtime(coordinator)
         self.long_term_memory_store = None
+        for session_id, session in tuple(self._agent_memory_sessions.items()):
+            manager = self._agent_memory_session_managers.get(
+                session_id, self.agent_memory
+            )
+            if manager is not None:
+                try:
+                    manager.cleanup(session)
+                except (OSError, ValueError):
+                    logger.warning("agent memory shutdown cleanup failed")
+        self._agent_memory_sessions.clear()
+        self._agent_memory_session_managers.clear()
+        self.agent_memory = None
         self.long_term_memory_collector = None
         self.long_term_memory_retriever = None
         self.memory_commands = None
@@ -2460,6 +2505,13 @@ class App:
         resource_context = ""
         prepared_resources = ()
         try:
+            memory_session = self._prepare_agent_memory_session(job)
+            agent_memory_context = (
+                self.agent_memory.prompt_context(memory_session)
+                if memory_session is not None and self.agent_memory is not None
+                else ""
+            )
+            runtime_mounts = self._agent_memory_runtime_mounts(memory_session)
             if cmd in {"ask", "plan", "task", "code"}:
                 prepared_resources = await self.resources.prepare(ev)
                 resource_context = format_resource_context(prepared_resources)
@@ -2485,6 +2537,7 @@ class App:
                 long_term_memory=long_term_memory,
                 runtime_reference_base=runtime_reference_base,
                 schedule_context=schedule_context,
+                agent_memory_context=agent_memory_context,
             )
             ws = self.cfg.agent.default_workspace
             if cmd == "shell":
@@ -2492,15 +2545,22 @@ class App:
             agent_mode = "code" if cmd == "code" else "plan" if cmd == "plan" else "task" if cmd == "task" else "ask"
             model = self._agent_model_for(cmd)
             progress = self._progress_callback_for(job) if cmd in {"task", "code"} else None
+            run_kwargs: dict[str, object] = {
+                "model": model,
+                "progress": progress,
+                "trace_id": job.id,
+                "redact_extra": self._agent_trace_redaction_values(
+                    job, long_term_memory
+                ),
+            }
+            if runtime_mounts:
+                run_kwargs["runtime_mounts"] = runtime_mounts
             return await run_agent(
                 self.agent,
                 prompt,
                 ws,
                 agent_mode,
-                model=model,
-                progress=progress,
-                trace_id=job.id,
-                redact_extra=self._agent_trace_redaction_values(job, long_term_memory),
+                **run_kwargs,
             )
         finally:
             self.resources.cleanup_prepared(prepared_resources)
@@ -2528,6 +2588,107 @@ class App:
             quoted_sender,
             query,
         )
+
+    def _prepare_agent_memory_session(
+        self, job: Job
+    ) -> AgentMemorySession | None:
+        if job.agent_memory_session_id:
+            return self._agent_memory_sessions.get(job.agent_memory_session_id)
+        manager = self.agent_memory
+        if manager is None or job.cmd != "task" or not self.cfg.agent.use_bwrap:
+            return None
+        ev = job.event
+        scope = exact_memory_scope(
+            is_group=ev.is_group,
+            chat_id=ev.chat_id,
+            sender_id=ev.sender_id,
+        )
+        mentions = tuple(
+            dict.fromkeys(
+                str(segment.qq)
+                for segment in ev.segments
+                if segment.type in {"mention", "at"}
+                and segment.qq
+                and str(segment.qq) != str(self.cfg.bot.self_id or "")
+            )
+        )
+        try:
+            session = manager.prepare(
+                job_id=job.id,
+                command=job.cmd,
+                scope=scope,
+                current_sender=ev.sender_id,
+                real_mentions=mentions,
+                quoted_sender=trusted_reply_sender_id(ev.reply),
+                schedule_id=job.schedule_id,
+            )
+        except (OSError, ValueError):
+            logger.warning(
+                "agent memory session disabled job=%s reason=prepare-failed",
+                job.id,
+            )
+            return None
+        if session is None:
+            return None
+        self._agent_memory_sessions[session.id] = session
+        self._agent_memory_session_managers[session.id] = manager
+        job.agent_memory_session_id = session.id
+        self.storage_maintainer.protect_path(session.root, subtree=True)
+        existing = self._protected_storage_paths.get(job.id, ())
+        self._protected_storage_paths[job.id] = (*existing, session.root)
+        return session
+
+    @staticmethod
+    def _agent_memory_runtime_mounts(
+        session: AgentMemorySession | None,
+    ) -> tuple[RuntimeMount, ...]:
+        if session is None:
+            return ()
+        return (
+            RuntimeMount(str(session.snapshot_path), str(session.snapshot_path)),
+            RuntimeMount(str(session.manifest_path), str(session.manifest_path)),
+            RuntimeMount(
+                str(session.proposal_dir),
+                str(session.proposal_dir),
+                writable=True,
+            ),
+        )
+
+    def _pop_agent_memory_session(
+        self, job: Job
+    ) -> tuple[AgentMemorySession | None, AgentMemoryManager | None]:
+        session_id = job.agent_memory_session_id
+        job.agent_memory_session_id = None
+        if not session_id:
+            return None, None
+        session = self._agent_memory_sessions.pop(session_id, None)
+        manager = self._agent_memory_session_managers.pop(
+            session_id, self.agent_memory
+        )
+        return session, manager
+
+    def _commit_agent_memory_after_delivery(self, job: Job) -> None:
+        manager = (
+            self._agent_memory_session_managers.get(job.agent_memory_session_id)
+            if job.agent_memory_session_id
+            else None
+        ) or self.agent_memory
+        session = (
+            self._agent_memory_sessions.get(job.agent_memory_session_id)
+            if job.agent_memory_session_id
+            else None
+        )
+        if manager is None or session is None:
+            return
+        try:
+            inspection = manager.inspect(session)
+            manager.commit(session, inspection)
+        except Exception as exc:  # noqa: BLE001 - memory cannot undo QQ delivery
+            logger.warning(
+                "agent memory commit skipped job=%s error=%s",
+                job.id,
+                type(exc).__name__,
+            )
 
     def _retrieve_long_term_context(
         self,
@@ -2650,6 +2811,21 @@ class App:
         self, job: Job, long_term_memory: str
     ) -> tuple[str, ...]:
         values = list(self._outgoing_redaction_values(job))
+        session = (
+            self._agent_memory_sessions.get(job.agent_memory_session_id)
+            if job.agent_memory_session_id
+            else None
+        )
+        if session is not None:
+            values.extend(
+                (
+                    session.token,
+                    str(session.root),
+                    str(session.snapshot_path),
+                    str(session.manifest_path),
+                    str(session.proposal_dir),
+                )
+            )
         if long_term_memory:
             values.append(long_term_memory)
             for line in long_term_memory.splitlines():

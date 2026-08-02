@@ -83,6 +83,7 @@ def test_inventory_selects_only_allowlisted_entries(tmp_path: Path) -> None:
     _write(resources / "2026-01-01" / "event" / "received.jpg")
     _write(resources / "outgoing" / "job-old" / "result.pdf")
     _write(resources / "sending" / "job-send" / "result.pdf")
+    _write(resources / "agent-memory" / "job-memory" / "snapshot.sqlite3")
     runtime_skill = _write(resources / "runtime-skills" / "skill.md")
     resource_unknown = _write(resources / "misc" / "keep.txt")
 
@@ -99,6 +100,7 @@ def test_inventory_selects_only_allowlisted_entries(tmp_path: Path) -> None:
     assert ("resources", "received", "2026-01-01") in names
     assert ("resources", "outgoing", "job-old") in names
     assert ("resources", "sending", "job-send") in names
+    assert ("resources", "agent-memory", "job-memory") in names
     assert protected.exists()
     assert unknown.exists()
     assert runtime_skill.exists()
@@ -239,6 +241,30 @@ def test_protected_current_job_is_never_inventoried_or_deleted(tmp_path: Path) -
     maintainer.protect_path(job_dir, subtree=True)
     assert maintainer.delete_candidate(candidate) == (0, 0)
     assert job_dir.exists()
+
+
+def test_protected_agent_memory_session_is_not_inventoried(tmp_path: Path) -> None:
+    cfg, home = make_storage_cfg(tmp_path)
+    session = (
+        Path(cfg.agent.default_workspace)
+        / cfg.resources.root
+        / "agent-memory"
+        / "active-job"
+    )
+    _write(session / "snapshot.sqlite3", b"active")
+    maintainer = StorageMaintainer(cfg, home=home, cwd=tmp_path)
+    maintainer.protect_path(session, subtree=True)
+
+    assert all(
+        candidate.path != session
+        for candidate in maintainer.inventory().candidates["resources"]
+    )
+
+    maintainer.unprotect_path(session)
+    assert any(
+        candidate.path == session
+        for candidate in maintainer.inventory().candidates["resources"]
+    )
 
 
 def test_durable_file_parent_does_not_protect_unrelated_resource_descendants(

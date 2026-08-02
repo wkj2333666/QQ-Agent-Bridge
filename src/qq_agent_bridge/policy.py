@@ -75,6 +75,7 @@ class Job:
     schedule_run_id: int | None = None
     scheduled_for: int | None = None
     reply_ats: tuple[str, ...] = ()
+    agent_memory_session_id: str | None = field(default=None, repr=False)
 
 
 JobRunner = Callable[[Job], Awaitable[str]]

@@ -15,10 +15,15 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import qq_agent_bridge.main as main_module  # type: ignore
+from qq_agent_bridge.agent_memory import AgentMemoryManager  # type: ignore
 from qq_agent_bridge.config import BridgeConfig  # type: ignore
 from qq_agent_bridge.cursor_adapter import CustomCommandAdapter  # type: ignore
 from qq_agent_bridge.long_term_memory import LongTermMemoryRetriever, LongTermMemoryStore  # type: ignore
-from qq_agent_bridge.long_term_memory_models import MemoryProposal, MemoryScope, MemorySource  # type: ignore
+from qq_agent_bridge.long_term_memory_models import (  # type: ignore
+    MemoryProposal,
+    MemoryScope,
+    MemorySource,
+)
 from qq_agent_bridge.main import App  # type: ignore
 from qq_agent_bridge.memory_commands import MemoryCommandResult  # type: ignore
 from qq_agent_bridge.onebot import _normalize_event  # type: ignore
@@ -195,6 +200,236 @@ def make_app(cfg: BridgeConfig, runner: Any, adapter: FakeAdapter) -> App:
 
     app.policy = Policy(cfg, job_runner)
     return app
+
+
+def test_agent_memory_commits_only_after_successful_text_delivery(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    async def go() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = make_cfg()
+        cfg.workspaces = {str(workspace): True}
+        cfg.agent.default_workspace = str(workspace)
+        cfg.agent.use_bwrap = True
+        cfg.long_term_memory.enabled = True
+        store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+        store.initialize()
+        scope = MemoryScope("group", "group")
+        store.set_scope_enabled(scope, True)
+        app = App(cfg)
+        adapter = FakeAdapter()
+        app.adapter = adapter  # type: ignore[assignment]
+        app.long_term_memory_store = store
+        app.agent_memory = AgentMemoryManager(
+            store, cfg, workspace, cfg.resources.root
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_run_agent(
+            agent: object,
+            prompt: str,
+            workspace_arg: str,
+            mode: str,
+            **kwargs: Any,
+        ) -> str:
+            mounts = kwargs["runtime_mounts"]
+            captured["prompt"] = prompt
+            captured["mounts"] = mounts
+            manifest_path = Path(
+                next(mount.source for mount in mounts if mount.source.endswith("manifest.json"))
+            )
+            proposal_dir = Path(next(mount.source for mount in mounts if mount.writable))
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            proposal = proposal_dir / "agent.json"
+            proposal.write_text(
+                yaml.safe_dump(
+                    {
+                        "token": manifest["token"],
+                        "job_id": manifest["job_id"],
+                        "operation": "add",
+                        "content": "以后继续复用这条进度",
+                        "item_id": None,
+                        "expected_version": None,
+                    },
+                    allow_unicode=True,
+                ),
+                encoding="utf-8",
+            )
+            # Proposal protocol is strict JSON rather than YAML syntax.
+            proposal.write_text(
+                __import__("json").dumps(
+                    yaml.safe_load(proposal.read_text(encoding="utf-8")),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            proposal.chmod(0o600)
+            return "任务结果已完成"
+
+        monkeypatch.setattr(main_module, "run_agent", fake_run_agent)  # type: ignore[attr-defined]
+        event = make_ev("/task 继续任务", group="group", mid="memory-delivery")
+        job = Job(id="memory-delivery-job", cmd="task", args="继续任务", event=event)
+        app._configure_outgoing_resources(job)
+
+        result = await app._agent_runner_inner(job)
+        assert store.list_items(scope) == ()
+        assert job.agent_memory_session_id is not None
+        assert "任务长期记忆工具" in captured["prompt"]
+        assert len(captured["mounts"]) == 3
+
+        async def done() -> str:
+            return result
+
+        job.task = asyncio.create_task(done())
+        job.state = "done"
+        job.artifact_result = result
+        await app._reply_when_done(job)
+
+        items = store.list_items(scope)
+        assert [item.content for item in items] == ["以后继续复用这条进度"]
+        assert items[0].source_kind == "agent_work"
+        assert not app._agent_memory_sessions
+        store.close()
+
+    asyncio.run(go())
+
+
+def test_agent_memory_rolls_back_when_text_delivery_raises(
+    tmp_path: Path,
+) -> None:
+    class FailingAdapter(FakeAdapter):
+        async def send(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("delivery failed")
+
+    async def go() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = make_cfg()
+        cfg.workspaces = {str(workspace): True}
+        cfg.agent.default_workspace = str(workspace)
+        store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+        store.initialize()
+        scope = MemoryScope("group", "group")
+        store.set_scope_enabled(scope, True)
+        app = App(cfg)
+        app.adapter = FailingAdapter()  # type: ignore[assignment]
+        app.long_term_memory_store = store
+        manager = AgentMemoryManager(store, cfg, workspace, cfg.resources.root)
+        app.agent_memory = manager
+        event = make_ev("/task fail", group="group", mid="memory-fail")
+        job = Job(id="memory-fail-job", cmd="task", args="fail", event=event)
+        session = manager.prepare(
+            job_id=job.id,
+            command="task",
+            scope=scope,
+            current_sender=event.sender_id,
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        )
+        assert session is not None
+        app._agent_memory_sessions[session.id] = session
+        job.agent_memory_session_id = session.id
+        proposal = session.proposal_dir / "proposal.json"
+        proposal.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "add",
+                    "content": "不应提交",
+                    "item_id": None,
+                    "expected_version": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        proposal.chmod(0o600)
+
+        async def done() -> str:
+            return "需要发送的结果"
+
+        job.task = asyncio.create_task(done())
+        job.state = "done"
+        await app._reply_when_done(job)
+
+        assert store.list_items(scope) == ()
+        assert not session.root.exists()
+        store.close()
+
+    asyncio.run(go())
+
+
+def test_agent_memory_commits_after_file_only_delivery(tmp_path: Path) -> None:
+    async def go() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = make_cfg()
+        cfg.workspaces = {str(workspace): True}
+        cfg.agent.default_workspace = str(workspace)
+        store = LongTermMemoryStore(tmp_path / "state" / "memory.sqlite3")
+        store.initialize()
+        scope = MemoryScope("group", "group")
+        store.set_scope_enabled(scope, True)
+        app = App(cfg)
+        adapter = FakeAdapter()
+        app.adapter = adapter  # type: ignore[assignment]
+        manager = AgentMemoryManager(store, cfg, workspace, cfg.resources.root)
+        app.agent_memory = manager
+        event = make_ev("/task file", group="group", mid="memory-file")
+        job = Job(id="memory-file-job", cmd="task", args="file", event=event)
+        app._configure_outgoing_resources(job)
+        session = manager.prepare(
+            job_id=job.id,
+            command="task",
+            scope=scope,
+            current_sender=event.sender_id,
+            real_mentions=(),
+            quoted_sender=None,
+            schedule_id=None,
+        )
+        assert session is not None and job.outgoing_dir and job.outgoing_token
+        app._agent_memory_sessions[session.id] = session
+        job.agent_memory_session_id = session.id
+        proposal = session.proposal_dir / "proposal.json"
+        proposal.write_text(
+            __import__("json").dumps(
+                {
+                    "token": session.token,
+                    "job_id": session.job_id,
+                    "operation": "add",
+                    "content": "文件任务已交付",
+                    "item_id": None,
+                    "expected_version": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        proposal.chmod(0o600)
+        report = Path(job.outgoing_dir) / "report.txt"
+        report.write_text("report", encoding="utf-8")
+        relative = report.relative_to(workspace).as_posix()
+        raw = f"QQBOT_SEND_FILE: {job.outgoing_token} {relative}"
+
+        async def done() -> str:
+            return raw
+
+        job.task = asyncio.create_task(done())
+        job.state = "done"
+        job.artifact_result = raw
+        await app._reply_when_done(job)
+
+        assert len(adapter.sent_files) == 1
+        assert adapter.sent_files[0][2].name.endswith("report.txt")
+        assert adapter.sent == []
+        assert [item.content for item in store.list_items(scope)] == ["文件任务已交付"]
+        store.close()
+
+    asyncio.run(go())
 
 
 def test_all_agent_job_modes_share_structured_long_term_memory_retrieval() -> None:
