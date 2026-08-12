@@ -129,6 +129,8 @@ class CursorAdapter:
         if runtime_mounts and (mode != "task" or not self.cfg.agent.use_bwrap):
             raise ValueError("runtime mounts require bwrap task mode")
         cursor_cmd: list[str] = [self.binary, "-p", "--workspace", workspace]
+        if self.cfg.agent.hardened_read_only:
+            cursor_cmd.append("--disable-auto-update")
         # bwrap already provides a full container sandbox, so disable
         # cursor-agent's own sandbox (which requires AppArmor).
         # Without bwrap, let cursor-agent manage its own sandbox.
@@ -411,6 +413,7 @@ class CursorAdapter:
         required = (binary, runtime_root / "node", runtime_root / "index.js")
         if self._is_tmp_path(runtime_root) or self._is_relative_to(runtime_root, workspace):
             raise ValueError("hardened cursor runtime is not trusted")
+        self._tighten_owned_runtime_root_permissions(runtime_root)
         self._validate_runtime_path(runtime_root, ownership=True)
         for artifact in required:
             artifact_stat = self._runtime_lstat(artifact)
@@ -424,6 +427,31 @@ class CursorAdapter:
         if not os.access(binary, os.X_OK) or not os.access(runtime_root / "node", os.X_OK):
             raise ValueError("hardened cursor runtime is unavailable")
         return runtime_root, binary
+
+    def _tighten_owned_runtime_root_permissions(self, runtime_root: Path) -> None:
+        """Repair Cursor updater's group-writable version directory safely."""
+        observed = self._runtime_lstat(runtime_root)
+        if (
+            not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or not observed.st_mode & 0o022
+        ):
+            return
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(runtime_root, flags)
+        except OSError as exc:
+            raise ValueError("hardened cursor runtime is not trusted") from exc
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise ValueError("hardened cursor runtime is not trusted")
+            if metadata.st_mode & 0o022:
+                os.fchmod(fd, metadata.st_mode & 0o7777 & ~0o022)
+        except OSError as exc:
+            raise ValueError("hardened cursor runtime is not trusted") from exc
+        finally:
+            os.close(fd)
 
     def _validate_runtime_path(self, path: Path, *, ownership: bool) -> None:
         if not path.is_absolute():

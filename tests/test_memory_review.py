@@ -447,6 +447,19 @@ def test_production_builder_constructs_dedicated_restricted_agent_config(
     gate = StorageActivityGate()
 
     adapter = build_restricted_memory_agent(cfg, gate, project_workspace)
+    monkeypatch.setattr(
+        adapter.delegate,
+        "_tighten_owned_runtime_root_permissions",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        adapter.delegate,
+        "_hardened_cursor_runtime",
+        lambda _workspace: (
+            Path("/opt/qq-agent-curator/runtime"),
+            Path("/opt/qq-agent-curator/runtime/cursor-agent"),
+        ),
+    )
 
     assert isinstance(adapter, GatedAgentAdapter)
     restricted = adapter.cfg

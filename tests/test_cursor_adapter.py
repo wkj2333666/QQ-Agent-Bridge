@@ -604,6 +604,15 @@ def test_ask_command_does_not_force_tools_inside_bwrap() -> None:
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"
 
 
+def test_normal_cursor_command_keeps_automatic_updates_enabled() -> None:
+    cfg = BridgeConfig(workspaces={"/tmp": True})
+    adapter = CursorAdapter(cfg)
+
+    cmd = adapter._build_cmd("hello", "/tmp", "ask", model="auto")
+
+    assert "--disable-auto-update" not in cmd
+
+
 @pytest.mark.requires_local_env
 def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
     monkeypatch: pytest.MonkeyPatch,
@@ -618,6 +627,11 @@ def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
         adapter,
         "_runtime_lstat",
         lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_tighten_owned_runtime_root_permissions",
+        lambda _path: None,
     )
 
     cmd = adapter._build_cmd(
@@ -641,6 +655,7 @@ def test_hardened_read_only_command_keeps_inner_sandbox_inside_bwrap(
     )
     assert cmd[cmd.index("--mode") + 1] == "ask"
     assert cmd[cmd.index("--sandbox") + 1] == "disabled"  # bwrap provides sandbox
+    assert "--disable-auto-update" in cmd
     for forbidden in ("--force", "--trust", "--auto-review", "--approve-mcps"):
         assert forbidden not in cmd
 
@@ -734,7 +749,9 @@ def test_hardened_runtime_accepts_root_or_current_user_owned_safe_chain(
     )
 
 
-def test_hardened_runtime_accepts_real_uid_mapped_system_prefix() -> None:
+def test_hardened_runtime_accepts_real_uid_mapped_system_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root_owner = Path("/").lstat().st_uid
     if root_owner in {0, os.getuid()}:
         pytest.skip("host root is not UID-mapped")
@@ -742,6 +759,7 @@ def test_hardened_runtime_accepts_real_uid_mapped_system_prefix() -> None:
     cfg.agent.hardened_read_only = True
     cfg.agent.use_bwrap = True
     adapter = CursorAdapter(cfg)
+    monkeypatch.setattr(adapter, "_tighten_owned_runtime_root_permissions", lambda _path: None)
 
     runtime, binary = adapter._hardened_cursor_runtime(Path("/workspace"))  # noqa: SLF001
 
@@ -792,6 +810,20 @@ def test_hardened_runtime_rejects_group_writable_parent(
 
     with pytest.raises(ValueError, match="not trusted"):
         adapter._hardened_cursor_runtime(tmp_path / "workspace")  # noqa: SLF001
+
+
+def test_hardened_runtime_tightens_owned_version_root_permissions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, binary = _make_cursor_runtime(tmp_path / "cursor/runtime")
+    runtime.chmod(0o775)
+    adapter = _hardened_adapter(binary, tmp_path)
+    monkeypatch.setattr(adapter, "_is_tmp_path", lambda _path: False)
+
+    adapter._tighten_owned_runtime_root_permissions(runtime)  # noqa: SLF001
+
+    assert runtime.stat().st_mode & 0o777 == 0o755
 
 
 def test_hardened_runtime_rejects_mapped_owner_on_mutable_prefix(
@@ -1249,6 +1281,7 @@ def test_hardened_prepare_imports_only_auth_and_resets_hostile_cursor_state(
         "_runtime_lstat",
         lambda path: _trusted_runtime_stat(path, owner=os.getuid()),
     )
+    monkeypatch.setattr(adapter, "_tighten_owned_runtime_root_permissions", lambda _path: None)
 
     error = adapter._prepare_bwrap(str(workspace), "ask")  # noqa: SLF001
 
