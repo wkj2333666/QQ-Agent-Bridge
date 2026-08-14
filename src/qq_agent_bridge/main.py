@@ -75,6 +75,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("qq-bridge")
 ARTIFACT_REPAIR_SHUTDOWN_GRACE_SECONDS = 1.0
 MEMORY_REVIEW_SHUTDOWN_GRACE_SECONDS = 1.0
+_SILENT_POLICY_DENIALS = frozenset(
+    {"duplicate", "no-mention", "group-denied", "user-denied"}
+)
 _ARTIFACT_PROGRESS_NOUN_RE = re.compile(
     r"(?:文件|资源|图片|图像|报告|附件|表格|语音|音频|任务输出|"
     r"\b(?:file|resource|image|report|attachment|document|pdf|audio|voice|output)\b)",
@@ -234,7 +237,7 @@ class App:
                 assert mention_command is not None
                 ok, reason = self.policy.allow(ev, mention_command)
                 if not ok:
-                    if reason not in {"duplicate", "no-mention"}:
+                    if reason not in _SILENT_POLICY_DENIALS:
                         await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                     return
                 if group_default_command == "chat":
@@ -276,7 +279,7 @@ class App:
         if preauthorized_command != parsed.name:
             ok, reason = self.policy.allow(ev, parsed.name)
             if not ok:
-                if reason not in {"duplicate", "no-mention"}:
+                if reason not in _SILENT_POLICY_DENIALS:
                     await self._send_text(ev.chat_id, ev.is_group, f"[denied] {reason}", ev.id)
                 await self._cleanup_policy()
                 return

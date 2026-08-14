@@ -1779,6 +1779,56 @@ def test_non_owner_reload_is_denied() -> None:
     asyncio.run(go())
 
 
+def test_denied_private_user_is_silent() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        calls: list[str] = []
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            calls.append(cmd)
+            return "unexpected agent call"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(make_ev("/ask 不应处理", sender="blocked-user", mid="denied-private"))
+
+        assert adapter.sent == []
+        assert calls == []
+
+    asyncio.run(go())
+
+
+def test_denied_group_is_silent_for_mentioned_message() -> None:
+    async def go() -> None:
+        adapter = FakeAdapter()
+        cfg = make_cfg()
+        calls: list[str] = []
+
+        async def runner(cmd: str, args: str, ev: ChatEvent) -> str:
+            calls.append(cmd)
+            return "unexpected agent call"
+
+        app = make_app(cfg, runner, adapter)
+
+        await app._handle(
+            make_ev("不应处理", sender="reader", group="blocked-group", mid="denied-group-chat")
+        )
+        await app._handle(
+            make_ev(
+                "/ask 不应处理",
+                sender="reader",
+                group="blocked-group",
+                mid="denied-group-command",
+            )
+        )
+
+        assert adapter.sent == []
+        assert calls == []
+
+    asyncio.run(go())
+
+
 def test_private_user_can_update_own_profile(tmp_path: Path) -> None:
     async def go() -> None:
         adapter = FakeAdapter()
